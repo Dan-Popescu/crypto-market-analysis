@@ -49,18 +49,30 @@ class AccumulationService:
                                  thresholds=thresholds, max_price_age=self.settings.market_interval * 2)
         return {**result, "input_reference": captured.reference, "input_truncation": captured.truncation}
 
-    def _plan_inputs(self, config, as_of):
+    def _plan_inputs(self, config, as_of, *, captured=None):
         from .plans import validate_config
 
         config = validate_config(config)
         now = int(time.time()) if as_of is None else as_of
-        rows = self.store.candles(config["asset"], config["source"], config["quote"], now,
-                                  config["data_mode"], versions=True)
+        if captured is None:
+            rows = self.store.candles(config["asset"], config["source"], config["quote"], now,
+                                      config["data_mode"], versions=True)
+        else:
+            if ((captured.asset, captured.source, captured.quote, captured.data_mode, captured.as_of)
+                    != (config["asset"], config["source"], config["quote"], config["data_mode"], now)):
+                raise ValueError("Plan inputs must match the captured market, mode and cutoff.")
+            if captured.candle_versions is None:
+                raise ValueError("Plan replay requires transaction-captured candle versions.")
+            rows = list(captured.candle_versions)
         reference = {"source": config["source"], "quote": config["quote"], "asset": config["asset"],
                      "data_mode": config["data_mode"], "as_of": now, "configuration_hash": content_hash(config),
                      "content_hash": content_hash(rows),
                      "available_at": max((row.observed_at for row in rows), default=0)}
-        if self.dataset_lineage:
+        if captured is not None:
+            reference["watermark"] = dict(captured.watermark)
+            if lineage := (captured.capture_profile or {}).get("dataset_lineage"):
+                reference["dataset_lineage"] = json.loads(canonical_json(lineage))
+        elif self.dataset_lineage:
             reference["dataset_lineage"] = self.dataset_lineage
         return config, now, rows, reference
 
@@ -168,7 +180,8 @@ class AccumulationService:
                     or (quote is not None and quote != plan_identity["quote"])):
                 raise ValueError("An issued plan must match the assessment source and native quote.")
             source, quote = plan_identity["source"], plan_identity["quote"]
-        captured = self.capture(asset, source, quote, issued if as_of is None else as_of, profile="candles")
+        captured = self.capture(asset, source, quote, issued if as_of is None else as_of, profile="candles",
+                                include_candle_versions=plan_config is not None)
         context = market_context(list(captured.candles), captured.as_of)
         windows = analyze_windows(list(captured.candles), captured.as_of, issued_at=issued,
                                   max_price_age=self.settings.market_interval * 2)
@@ -182,7 +195,7 @@ class AccumulationService:
                    "historical_calculation": captured.as_of != issued}
         evidence = captured.evidence()
         if plan_config is not None:
-            config, now, rows, reference = self._plan_inputs(plan_config, captured.as_of)
+            config, now, rows, reference = self._plan_inputs(plan_config, captured.as_of, captured=captured)
             from .plans import compare_plans
             result = compare_plans(config, rows, now) if config["start_time"] <= now else _future_plan(config, now)
             payload["plan"] = {**result, "input_reference": reference}

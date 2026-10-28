@@ -393,12 +393,15 @@ class Store:
 
     def capture(self, asset: str, as_of: int, mode: str = "live", *, source: str | None = None,
                 quote: str | None = None, profile: str = "bundle", vigilance_policy: dict | None = None,
-                observation_limit: int = 200000, candle_limit: int = 500000) -> dict:
+                observation_limit: int = 200000, candle_limit: int = 500000,
+                include_candle_versions: bool = False) -> dict:
         """Read operation-specific analytical evidence in one SQLite read transaction.
 
         Explicit native-market filters precede the candle cap. Limits may be lowered
         for bounded callers/tests, never raised above the production resource contract.
         Candle-only operations intentionally do not read global observation history.
+        Optional replay history requires an explicit native market and is frozen
+        here, rather than reconstructed later from recyclable physical row IDs.
         """
         if asset not in ("BTC", "ETH") or mode not in ("live", "demo", "import"):
             raise ValueError("Unsupported asset or data mode.")
@@ -406,6 +409,8 @@ class Store:
             raise ValueError("as_of must be UTC epoch seconds.")
         if profile not in ("bundle", "candles", "vigilance"):
             raise ValueError("Capture profile must be bundle, candles or vigilance.")
+        if include_candle_versions and (not source or not quote):
+            raise ValueError("Candle version capture requires an explicit source and native quote.")
         for name, value in (("observation_limit", observation_limit), ("candle_limit", candle_limit)):
             if type(value) is not int or not 1 <= value <= 500000:
                 raise ValueError(f"{name} must be between 1 and 500000.")
@@ -439,6 +444,16 @@ class Store:
                                   [*values, candle_limit + 1]).fetchall()
             if len(candles) > candle_limit and profile != "bundle":
                 raise ValueError(f"Required {profile} candle evidence exceeds the {candle_limit}-row capture limit.")
+            candle_versions = None
+            if include_candle_versions:
+                # Retain every eligible vintage: known-at replay needs old timely
+                # bars and first later-known bars, not only each latest revision.
+                version_limit = min(candle_limit, 100000)
+                candle_versions = con.execute(
+                    f"SELECT payload FROM candles WHERE {' AND '.join(conditions)} "
+                    "ORDER BY open_time,observed_at,id LIMIT ?", [*values, version_limit + 1]).fetchall()
+                if len(candle_versions) > version_limit:
+                    raise ValueError(f"Required candle versions exceed the {version_limit}-row capture limit.")
             observations, observation_coverage = self._capture_observations(
                 con, asset, as_of, mode, profile, source, quote, observation_limit, baseline)
             # Health and calendars are consumed by broad bundles; analytical candle
@@ -471,6 +486,8 @@ class Store:
                             "available_start": start, "available_end": end}
                            for venue, currency, count, start, end in candle_coverage]
         return {"watermark": watermark, "candles": retained_candles, "observations": observations,
+                "candle_versions": ([Candle(**json.loads(row[0])) for row in candle_versions]
+                                    if candle_versions is not None else None),
                 "events": [json.loads(row[0]) for row in events[:100]],
                 "calendar": [json.loads(row[0]) for row in calendar[:500]],
                 "runs": [json.loads(row[0]) for row in runs[:100]], "counts": counts,

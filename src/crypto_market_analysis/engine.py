@@ -91,10 +91,12 @@ class Engine:
 
     def capture_inputs(self, asset: str = "BTC", source: str | None = None,
                        quote: str | None = None, as_of: int | None = None, *,
-                       profile: str = "bundle", vigilance_policy: dict | None = None) -> CapturedInputs:
+                       profile: str = "bundle", vigilance_policy: dict | None = None,
+                       include_candle_versions: bool = False) -> CapturedInputs:
         now = int(time.time()) if as_of is None else as_of
         raw = self.store.capture(asset, now, self.mode, source=source, quote=quote,
-                                 profile=profile, vigilance_policy=vigilance_policy)
+                                 profile=profile, vigilance_policy=vigilance_policy,
+                                 include_candle_versions=include_candle_versions)
         candles, coverage = self._select_market(raw["candles"], now)
         observations = raw["observations"]
         if profile == "vigilance":
@@ -120,7 +122,8 @@ class Engine:
                               tuple(coverage), tuple(raw["events"]),
                               self._health(now, raw["runs"], raw["counts"]) if profile == "bundle" else
                               {"status": "not_requested", "as_of": stamp(now), "data_mode": self.mode}, raw["watermark"],
-                              configuration, raw["truncation"], tuple(raw["calendar"]), raw["capture_profile"])
+                              configuration, raw["truncation"], tuple(raw["calendar"]), raw["capture_profile"],
+                              tuple(raw["candle_versions"]) if raw["candle_versions"] is not None else None)
 
     def inputs(self, asset: str, source: str | None = None, quote: str | None = None,
                as_of: int | None = None) -> tuple[list[Candle], list[Observation], list[dict], dict]:
@@ -273,8 +276,11 @@ class Engine:
     ) -> dict:
         rows = list(captured.candles) if captured else self.selected_candles(asset, source, quote, as_of)[0]
         alignment = max((c.close_time for c in rows), default=0) % 86400 // 3600
-        if rows:
-            rows = self.store.candles(asset, rows[0].source, rows[0].quote, as_of, self.mode, versions=True,
+        if captured is not None and captured.candle_versions is not None:
+            rows = list(captured.candle_versions)
+        elif rows:
+            rows = self.store.candles(asset, rows[0].source, rows[0].quote,
+                                      captured.as_of if captured else as_of, self.mode, versions=True,
                                       max_id=captured.watermark["candles"] if captured else None)
         return evaluate(rows, horizon, threshold, validation, anchor_hour_utc=alignment)
 

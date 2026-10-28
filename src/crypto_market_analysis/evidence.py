@@ -8,7 +8,7 @@ import json
 import math
 import re
 import zlib
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass, fields, is_dataclass
 from decimal import Decimal
 from pathlib import Path
 
@@ -131,10 +131,14 @@ class CapturedInputs:
     truncation: dict
     calendar: tuple[dict, ...] = ()
     capture_profile: dict | None = None
+    # Optional replay history from the same read transaction as the latest bars.
+    # Issuance archives its extra versions once, in plan_candle_versions.
+    candle_versions: tuple[Candle, ...] | None = None
 
     def evidence(self) -> dict:
         """Return an independent JSON envelope, suitable for immutable local issuance."""
-        result = asdict(self)
+        result = {field.name: getattr(self, field.name) for field in fields(self)
+                  if field.name != "candle_versions"}
         if self.capture_profile is None:
             result.pop("capture_profile")
         return json.loads(canonical_json(result))
