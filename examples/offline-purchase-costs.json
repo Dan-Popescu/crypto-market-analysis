@@ -1,0 +1,48 @@
+{
+  "asset": "BTC",
+  "quote": "EUR",
+  "data_mode": "demo",
+  "budget": "112.1",
+  "max_age_seconds": 60,
+  "max_skew_seconds": 5,
+  "sources": ["synthetic_book", "missing_example"],
+  "snapshots": [
+    {
+      "source": "synthetic_book",
+      "asset": "BTC",
+      "quote": "EUR",
+      "data_mode": "demo",
+      "event_time": 1793145590,
+      "captured_at": 1793145591,
+      "input_reference": "synthetic-ask-levels-v1-not-real-market-data",
+      "product": "spot_order_book",
+      "asks_complete": false,
+      "asks": [
+        {"price": "100", "quantity": "0.5"},
+        {"price": "120", "quantity": "1"}
+      ],
+      "assumptions": {
+        "input_reference": "synthetic-assumptions-v1-not-an-exchange-fee-schedule",
+        "fee_tier": "synthetic retail taker example",
+        "fee_rate": "0.01",
+        "fee_currency": "quote",
+        "fee_step": "0",
+        "fixed_fee_quote": "1",
+        "payment_cost_quote": "0",
+        "withdrawal_cost_quote": "0",
+        "withdrawal_cost_base": "0",
+        "quantity_step": "0.01",
+        "price_step": "0.01",
+        "min_quantity": "0.01",
+        "min_notional": "1"
+      },
+      "purchase_eligibility": {
+        "jurisdiction": "France",
+        "legal_entity": "Synthetic entity; no real authorization asserted",
+        "service": "spot_order_book",
+        "status": "unknown",
+        "input_reference": "synthetic-example-not-regulatory-evidence"
+      }
+    }
+  ]
+}
