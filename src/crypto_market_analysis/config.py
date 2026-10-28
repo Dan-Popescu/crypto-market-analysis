@@ -6,7 +6,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .venues import VENUES
+from .venues import FRANCE_PURCHASE_CANDIDATES, VENUES
 
 
 @dataclass
@@ -24,6 +24,13 @@ class Settings:
     options_interval: int = 21600
     context_interval: int = 86400
     liquidity_retention_days: int = 7
+
+    # Explicit native markets; stablecoin quotes are never converted to USD.
+    quote_currencies: list[str] = field(default_factory=lambda: ["EUR", "USD", "USDT", "USDC"])
+    purchase_jurisdiction: str = "France"
+    purchase_candidates: list[str] = field(default_factory=lambda: list(FRANCE_PURCHASE_CANDIDATES))
+    # None samples all analytical venues; a subset bounds book requests only.
+    liquidity_venues: list[str] | None = None
 
     @property
     def database(self) -> Path:
@@ -48,6 +55,24 @@ def load_settings(path: Path | None = None, data_dir: Path | None = None) -> Set
         raise ValueError("assets must contain BTC and/or ETH.")
     if not settings.venues or set(settings.venues) - set(VENUES):
         raise ValueError("Unknown venue; use the venues command.")
+    if (
+        not isinstance(settings.quote_currencies, list)
+        or not settings.quote_currencies
+        or any(q not in ("EUR", "USD", "USDT", "USDC") for q in settings.quote_currencies)
+        or len(set(settings.quote_currencies)) != len(settings.quote_currencies)
+    ):
+        raise ValueError("quote_currencies must contain distinct native EUR, USD, USDT or USDC quotes.")
+    if settings.purchase_jurisdiction != "France":
+        raise ValueError("purchase_jurisdiction currently supports France only.")
+    if not isinstance(settings.purchase_candidates, list) or any(
+        v not in VENUES for v in settings.purchase_candidates
+    ):
+        raise ValueError("purchase_candidates must contain known venues; eligibility remains unverified.")
+    if settings.liquidity_venues is not None and (
+        not isinstance(settings.liquidity_venues, list)
+        or any(v not in settings.venues for v in settings.liquidity_venues)
+    ):
+        raise ValueError("liquidity_venues must be a subset of analytical venues.")
     for name, low, high in (
         ("workers", 1, 8),
         ("history_days", 1, 3650),

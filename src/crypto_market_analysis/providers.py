@@ -52,7 +52,10 @@ class PublicHTTP:
 
 
 def _date(value: str) -> int:
-    return int(datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=UTC).timestamp())
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return int(parsed.astimezone(UTC).timestamp())
 
 
 def parse_options(instruments: list[dict], summaries: list[dict], asset: str, now: int) -> list[Observation]:

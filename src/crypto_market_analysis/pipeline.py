@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from threading import Event
 
-from .collectors import collect_exchange
+from .collectors import ExchangeClients, collect_exchange
 from .config import Settings
 from .models import CollectionResult
 from .providers import collect_context, collect_options
@@ -23,7 +23,11 @@ def collect(
     *,
     tasks: tuple[str, ...] = ("market", "liquidity", "options", "context"),
     days: int | None = None,
+    clients: ExchangeClients | None = None,
 ) -> dict:
+    if clients is None:
+        with ExchangeClients() as owned:
+            return collect(settings, store, tasks=tasks, days=days, clients=owned)
     now = int(time.time())
     since = now - (days or settings.history_days) * 86400
     reports = []
@@ -36,20 +40,33 @@ def collect(
         reports.append(store.save_result(result, task, completed))
 
     def exchange(venue: str) -> CollectionResult:
-        starts = [store.latest_candle_time(venue, asset) for asset in settings.assets]
-        cursor = (
-            since
-            if days is not None or not all(t is not None for t in starts)
-            else max(since, min(starts) - 3600)
+        starts = {
+            (asset, quote): store.latest_candle_time(venue, asset, quote=quote)
+            for asset in settings.assets
+            for quote in settings.quote_currencies
+        }
+        cursors = {
+            market: since if days is not None or latest is None else max(since, latest - 3600)
+            for market, latest in starts.items()
+        }
+        liquidity = "liquidity" in tasks and (
+            settings.liquidity_venues is None or venue in settings.liquidity_venues
         )
         include = tuple(
             [
                 *(("candles", "derivatives") if "market" in tasks else ()),
-                *(("liquidity",) if "liquidity" in tasks else ()),
+                *(("liquidity",) if liquidity else ()),
             ]
         )
         return collect_exchange(
-            venue, settings.assets, since=cursor, include=include, max_pages=settings.max_pages
+            venue,
+            settings.assets,
+            since=since,
+            include=include,
+            max_pages=settings.max_pages,
+            quotes=tuple(settings.quote_currencies),
+            since_by_market=cursors,
+            clients=clients,
         )
 
     with ThreadPoolExecutor(max_workers=settings.workers) as pool:
@@ -57,7 +74,18 @@ def collect(
         if "market" in tasks or "liquidity" in tasks:
             task = "+".join(t for t in ("market", "liquidity") if t in tasks)
             for venue in settings.venues:
-                futures[pool.submit(exchange, venue)] = (venue, task)
+                if (
+                    "market" not in tasks
+                    and settings.liquidity_venues is not None
+                    and venue not in settings.liquidity_venues
+                ):
+                    continue
+                venue_task = (
+                    task
+                    if settings.liquidity_venues is None or venue in settings.liquidity_venues
+                    else "market"
+                )
+                futures[pool.submit(exchange, venue)] = (venue, venue_task)
         if "options" in tasks and settings.options:
             futures[pool.submit(collect_options, settings.assets)] = ("deribit", "options")
         if "context" in tasks and settings.context:
@@ -69,7 +97,7 @@ def collect(
                 for result in value if isinstance(value, list) else [value]:
                     ingest(result, task)
             except Exception as exc:
-                ingest(CollectionResult(source, errors=[f"Collecte : {type(exc).__name__}: {exc}"]), task)
+                ingest(CollectionResult(source, errors=[f"Collection: {type(exc).__name__}: {exc}"]), task)
     return {
         "started_at": now,
         "completed_at": int(time.time()),
@@ -84,6 +112,11 @@ def collect(
 
 
 def run_scheduler(settings: Settings, store: Store, stop: Event | None = None) -> None:
+    with ExchangeClients() as clients:
+        _run_scheduler(settings, store, stop, clients)
+
+
+def _run_scheduler(settings: Settings, store: Store, stop: Event | None, clients: ExchangeClients) -> None:
     from .retention import compact_liquidity
 
     stop = stop or Event()
@@ -111,7 +144,11 @@ def run_scheduler(settings: Settings, store: Store, stop: Event | None = None) -
                     default=0,
                 )
                 for source in (
-                    settings.venues
+                    (
+                        settings.liquidity_venues
+                        if task == "liquidity" and settings.liquidity_venues is not None
+                        else settings.venues
+                    )
                     if task in ("market", "liquidity")
                     else ["deribit"]
                     if task == "options"
@@ -141,7 +178,7 @@ def run_scheduler(settings: Settings, store: Store, stop: Event | None = None) -
             if due[t] <= now and (t not in ("options", "context") or getattr(settings, t))
         )
         if tasks:
-            report = collect(settings, store, tasks=tasks)
+            report = collect(settings, store, tasks=tasks, clients=clients)
             for task in tasks:
                 due[task] = time.time() + intervals[task]
             log.info("Collection: %s", report["status"])
