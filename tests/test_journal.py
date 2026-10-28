@@ -9,6 +9,7 @@ import pytest
 
 from crypto_market_analysis.journal import AssessmentJournal
 from crypto_market_analysis.models import Observation
+from crypto_market_analysis.retention import compact_liquidity
 from crypto_market_analysis.storage import Store
 
 
@@ -57,13 +58,13 @@ def test_outcomes_append_and_never_change_original(tmp_path):
 
 def test_replay_survives_revision_and_raw_retention(tmp_path):
     store = Store(tmp_path / "market.sqlite")
-    observation = Observation("venue", "BTC", "depth", 100, 100, 10, "EUR", "EUR")
+    observation = Observation("venue", "BTC", "depth_bid_1pct", 3600, 3600, 10, "EUR", "EUR")
     store.put_observations([observation])
     journal = AssessmentJournal(store)
-    original = journal.issue("key", {"result": "elevated", "quote": "EUR"}, {"observations": [asdict(observation)]}, 100)
-    store.put_observations([replace(observation, value=1000, observed_at=200)])
-    with store.connection() as con:
-        con.execute("DELETE FROM observations WHERE observed_at=100")
+    original = journal.issue("key", {"result": "elevated", "quote": "EUR"}, {"observations": [asdict(observation)]}, 3600)
+    store.put_observations([replace(observation, value=1000, observed_at=7200)])
+    compacted = compact_liquidity(store, keep_days=1, now=10 * 86400)
+    assert compacted["raw_rows_deleted"] == 2
     reopened = AssessmentJournal(Store(store.path))
     assert reopened.get(original["assessment_id"]) == original
     assert reopened.get(original["assessment_id"])["evidence"]["observations"][0]["value"] == 10
@@ -91,3 +92,19 @@ def test_bounded_inputs_and_missing_identity(tmp_path):
     with pytest.raises(KeyError):
         journal.append_outcome("missing", "outcome", {}, 100)
     assert journal.list() == []
+
+
+def test_concurrent_conflicting_payload_is_atomic(tmp_path):
+    journal = AssessmentJournal(Store(tmp_path / "market.sqlite"))
+
+    def attempt(value):
+        try:
+            return journal.issue("same-key", {"value": value}, {}, 100)
+        except ValueError:
+            return None
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(attempt, range(8)))
+    successful = [result for result in results if result is not None]
+    assert len(successful) == 1
+    assert journal.list() == successful
