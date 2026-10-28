@@ -68,6 +68,20 @@ def test_evidence_archive_is_lossless_and_detects_corruption():
         restore_evidence({**archive, "sha256": "0" * 64})
 
 
+def test_collector_funding_metrics_keep_explicit_actual_and_projected_comparisons():
+    from crypto_market_analysis.source_catalog import interpret_context
+
+    actual = Observation("fixture", "BTC", "funding_rate_actual", 100, 100, 0.001,
+                         "rate", "USD", {"funding_interval_hours": 8})
+    projected = replace(actual, metric="funding_rate_projected")
+    rows = [actual, projected, replace(actual, event_time=200, observed_at=200, value=0.002),
+            replace(projected, event_time=200, observed_at=200, value=0.003)]
+    result = interpret_context(rows, 200)["observations"]
+    assert {row["value_kind"] for row in result} == {"actual", "projected"}
+    assert all(row["comparable"] for row in result)
+    assert sorted(row["change"] for row in result) == [0.001, 0.002]
+
+
 def test_two_year_assessment_with_plan_can_be_issued_without_duplicate_history(tmp_path):
     end = int(time.time()) // 86400 * 86400
     start = end - 731 * 86400

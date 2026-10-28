@@ -833,8 +833,10 @@ def interpret_context(observations: list[Observation], as_of: int) -> dict[str, 
         kind = metadata.get("value_kind", metadata.get("funding_kind"))
         if kind is None:
             kind = (
+                "actual" if observation.metric == "funding_rate_actual" else
                 "projected"
                 if metadata.get("projected") is True or "predicted" in observation.metric
+                or observation.metric == "funding_rate_projected"
                 else "unknown"
             )
         period = _funding_period(metadata)
