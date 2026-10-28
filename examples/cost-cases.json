@@ -1,0 +1,15 @@
+{
+  "cases": [
+    {"name": "declared costs"},
+    {
+      "name": "zero cost benchmark",
+      "fees": {"rate": "0", "fixed": "0", "asset": "quote"},
+      "execution": {"spread_bps": "0", "slippage_bps": "0"}
+    },
+    {
+      "name": "higher assumed costs",
+      "fees": {"rate": "0.005", "fixed": "2", "asset": "quote"},
+      "execution": {"spread_bps": "25", "slippage_bps": "15"}
+    }
+  ]
+}
