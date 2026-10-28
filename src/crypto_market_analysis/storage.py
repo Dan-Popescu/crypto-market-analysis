@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 
+from .evidence import metric_dimension
 from .models import Candle, CollectionResult, Observation
 
 
@@ -55,6 +56,12 @@ class Store:
                     payload TEXT NOT NULL, PRIMARY KEY(id,observed_at)
                 );
             """)
+            # Add dimensions without dropping observations or rewriting their source payloads.
+            if con.execute("PRAGMA user_version").fetchone()[0] < 1:
+                for row in con.execute("SELECT id,payload FROM observations").fetchall():
+                    dimension = _json(metric_dimension(Observation(**json.loads(row["payload"]))))
+                    con.execute("UPDATE observations SET dimension=? WHERE id=?", (dimension, row["id"]))
+                con.execute("PRAGMA user_version=1")
 
     @contextmanager
     def connection(self):
@@ -123,13 +130,7 @@ class Store:
                     raise ValueError("Invalid data mode.")
                 payload = asdict(o)
                 fingerprint = _hash({k: v for k, v in payload.items() if k != "observed_at"})
-                dimension = _json(
-                    {
-                        "quote": o.quote,
-                        "unit": o.unit,
-                        **{k: o.metadata[k] for k in ("expiry", "instrument", "symbol") if k in o.metadata},
-                    }
-                )
+                dimension = _json(metric_dimension(o))
                 key = (o.source, o.asset, o.metric, o.event_time, o.data_mode, dimension)
                 latest = con.execute(
                     """SELECT fingerprint FROM observations WHERE source=? AND asset=?
@@ -290,6 +291,52 @@ class Store:
                 table: con.execute(f"SELECT COALESCE(MAX(rowid),0) FROM {table}").fetchone()[0]
                 for table in ("candles", "observations", "events", "runs")
             }
+
+    def capture(self, asset: str, as_of: int, mode: str = "live", *, observation_limit: int = 200000) -> dict:
+        """Read market, events and operational evidence in one SQLite read transaction."""
+        if asset not in ("BTC", "ETH") or mode not in ("live", "demo", "import"):
+            raise ValueError("Unsupported asset or data mode.")
+        if isinstance(as_of, bool) or not isinstance(as_of, int):
+            raise ValueError("as_of must be UTC epoch seconds.")
+        if not 1 <= observation_limit <= 500000:
+            raise ValueError("observation_limit must be between 1 and 500000.")
+        with self.connection() as con:
+            con.execute("BEGIN")
+            watermark = {table: con.execute(f"SELECT COALESCE(MAX(rowid),0) FROM {table}").fetchone()[0]
+                         for table in ("candles", "observations", "events", "runs")}
+            candles = con.execute("""SELECT payload FROM (SELECT payload,open_time,
+                ROW_NUMBER() OVER(PARTITION BY source,asset,quote,timeframe,open_time,data_mode
+                ORDER BY observed_at DESC,id DESC) rn FROM candles
+                WHERE asset=? AND data_mode=? AND close_time<=? AND observed_at<=?)
+                WHERE rn=1 ORDER BY open_time DESC LIMIT 500001""", (asset, mode, as_of, as_of)).fetchall()
+            observations = con.execute("""SELECT payload FROM (SELECT payload,event_time,
+                ROW_NUMBER() OVER(PARTITION BY source,asset,metric,event_time,data_mode,dimension
+                ORDER BY observed_at DESC,id DESC) rn FROM observations
+                WHERE asset IN (?, 'MACRO', 'STABLECOINS') AND data_mode=?
+                AND event_time<=? AND observed_at<=? AND event_time>=?)
+                WHERE rn=1 ORDER BY event_time DESC LIMIT ?""",
+                (asset, mode, as_of, as_of, as_of - 730 * 86400, observation_limit + 1)).fetchall()
+            events = con.execute("""SELECT payload FROM (SELECT payload,event_time,
+                ROW_NUMBER() OVER(PARTITION BY id ORDER BY observed_at DESC) rn FROM events
+                WHERE observed_at<=? AND event_time>=? AND event_time<=?)
+                WHERE rn=1 ORDER BY event_time LIMIT 101""",
+                (as_of, as_of - 86400, as_of + 60 * 86400)).fetchall()
+            runs = con.execute("""SELECT payload FROM (SELECT payload,observed_at,
+                ROW_NUMBER() OVER(PARTITION BY source,task ORDER BY observed_at DESC,id DESC) rn
+                FROM runs WHERE observed_at<=?) WHERE rn=1 ORDER BY observed_at DESC LIMIT 101""",
+                (as_of,)).fetchall()
+            counts = {}
+            for table in ("candles", "observations"):
+                counts[table] = con.execute(f"SELECT COUNT(*) FROM {table} WHERE data_mode=? AND observed_at<=?",
+                                            (mode, as_of)).fetchone()[0]
+            for table in ("events", "runs"):
+                counts[table] = con.execute(f"SELECT COUNT(*) FROM {table} WHERE observed_at<=?", (as_of,)).fetchone()[0]
+        return {"watermark": watermark, "candles": [Candle(**json.loads(row[0])) for row in reversed(candles[:500000])],
+                "observations": [Observation(**json.loads(row[0])) for row in observations[:observation_limit]],
+                "events": [json.loads(row[0]) for row in events[:100]],
+                "runs": [json.loads(row[0]) for row in runs[:100]], "counts": counts,
+                "truncation": {"candles": len(candles) > 500000, "observations": len(observations) > observation_limit,
+                               "events": len(events) > 100, "runs": len(runs) > 100}}
 
     def latest_candle_time(self, source: str, asset: str, mode: str = "live") -> int | None:
         with self.connection() as con:

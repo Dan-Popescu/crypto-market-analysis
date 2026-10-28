@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import time
 from collections import defaultdict
 from dataclasses import asdict
@@ -11,6 +9,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .config import Settings
+from .evidence import CapturedInputs, metric_identity
+from .freshness import metric_freshness
 from .models import Candle, Observation
 from .research import build_analysis, daily_bars, evaluate, forecast
 from .storage import Store
@@ -28,154 +28,112 @@ class Engine:
         self.store = Store(settings.database)
         self.mode = mode
 
-    def selected_candles(
-        self,
-        asset: str,
-        source: str | None = None,
-        quote: str | None = None,
-        as_of: int | None = None,
-        watermark: dict | None = None,
-    ) -> tuple[list[Candle], list[dict]]:
-        if asset not in ("BTC", "ETH"):
-            raise ValueError("Choose BTC or ETH.")
-        candles = self.store.candles(
-            asset, source, quote, as_of, self.mode, max_id=watermark["candles"] if watermark else None
-        )
+    @staticmethod
+    def _select_market(candles: list[Candle], cutoff: int) -> tuple[list[Candle], list[dict]]:
         grouped = defaultdict(list)
         for candle in candles:
             grouped[(candle.source, candle.quote)].append(candle)
-        coverage = []
-        for (venue, currency), bars in grouped.items():
-            coverage.append(
-                {
-                    "source": venue,
-                    "quote": currency,
-                    "hourly_candles": len(bars),
-                    "complete_days": len(daily_bars(bars)),
-                    "last_close_time": max(c.close_time for c in bars),
-                }
-            )
-        # A stale long history must not hide a source with recent usable data.
-        cutoff = int(time.time()) if as_of is None else as_of
-        coverage.sort(
-            key=lambda row: (
-                row["last_close_time"] >= cutoff - 172800,
-                row["complete_days"],
-                row["last_close_time"],
-                row["source"],
-            ),
-            reverse=True,
-        )
+        coverage = [{"source": venue, "quote": currency, "hourly_candles": len(bars),
+                     "complete_days": len(daily_bars(bars)),
+                     "last_close_time": max(c.close_time for c in bars)}
+                    for (venue, currency), bars in grouped.items()]
+        coverage.sort(key=lambda row: (row["last_close_time"] >= cutoff - 7200,
+                                      row["complete_days"], row["last_close_time"], row["source"]), reverse=True)
         if not coverage:
             return [], []
         selected = coverage[0]
         return grouped[(selected["source"], selected["quote"])], coverage
 
-    def status(self, as_of: int | None = None) -> dict:
+    def selected_candles(self, asset: str, source: str | None = None, quote: str | None = None,
+                         as_of: int | None = None, watermark: dict | None = None) -> tuple[list[Candle], list[dict]]:
+        if asset not in ("BTC", "ETH"):
+            raise ValueError("Choose BTC or ETH.")
         now = int(time.time()) if as_of is None else as_of
-        runs = self.store.runs(now)
+        candles = self.store.candles(asset, source, quote, now, self.mode,
+                                     max_id=watermark["candles"] if watermark else None)
+        return self._select_market(candles, now)
+
+    def _health(self, now: int, runs: list[dict], counts: dict) -> dict:
         for run in runs:
             run["age_seconds"] = now - run["observed_at"]
-            periods = [
-                self.settings.liquidity_interval
-                if t == "liquidity"
-                else self.settings.market_interval
-                if t == "market"
-                else self.settings.options_interval
-                if t == "options"
-                else self.settings.context_interval
-                for t in run["task"].split("+")
-            ]
-            run["stale"] = run["age_seconds"] > max(periods) * 2
-        observed = {r["source"] for r in runs}
-        return {
-            "as_of": stamp(now),
-            "data_mode": self.mode,
-            "counts": self.store.counts(),
-            "runs": runs,
-            "configured_venues": self.settings.venues,
-            "never_collected": [v for v in self.settings.venues if v not in observed],
-            "paid_collection_apis": False,
-        }
+            periods = [{"liquidity": self.settings.liquidity_interval,
+                        "market": self.settings.market_interval,
+                        "options": self.settings.options_interval}.get(task, self.settings.context_interval)
+                       for task in run["task"].split("+")]
+            run["stale"] = run["age_seconds"] >= min(periods) * 2
+            run["freshness_basis"] = "collection_completion; inspect individual market event age separately"
+        observed = {run["source"] for run in runs}
+        return {"as_of": stamp(now), "data_mode": self.mode, "counts": counts, "runs": runs,
+                "configured_venues": list(self.settings.venues),
+                "never_collected": [venue for venue in self.settings.venues if venue not in observed],
+                "paid_collection_apis": False}
 
-    def inputs(
-        self, asset: str, source: str | None = None, quote: str | None = None, as_of: int | None = None
-    ) -> tuple[list[Candle], list[Observation], list[dict], dict]:
+    def status(self, as_of: int | None = None) -> dict:
         now = int(time.time()) if as_of is None else as_of
-        watermark = self.store.watermark()
-        candles, coverage = self.selected_candles(asset, source, quote, now, watermark)
-        observations = self.store.observations(asset, now, self.mode, max_id=watermark["observations"])
-        return candles, observations, coverage, watermark
+        result = self._health(now, self.store.runs(now), self.store.counts())
+        result["counts_scope"] = "all stored versions and modes; operational inventory"
+        return result
 
-    def bundle(
-        self,
-        asset: str = "BTC",
-        source: str | None = None,
-        quote: str | None = None,
-        as_of: int | None = None,
-        include_forecast: bool = True,
-    ) -> dict:
+    def capture_inputs(self, asset: str = "BTC", source: str | None = None,
+                       quote: str | None = None, as_of: int | None = None) -> CapturedInputs:
         now = int(time.time()) if as_of is None else as_of
-        candles, observations, coverage, watermark = self.inputs(asset, source, quote, now)
-        context = [
-            o
-            for o in self.store.observations(
-                as_of=now, mode=self.mode, max_id=watermark["observations"], days=365
-            )
-            if o.asset in ("MACRO", "STABLECOINS")
-        ]
-        analysis = build_analysis(candles, [*observations, *context], now)
+        raw = self.store.capture(asset, now, self.mode)
+        candidates = [row for row in raw["candles"]
+                      if (source is None or row.source == source) and (quote is None or row.quote == quote)]
+        candles, coverage = self._select_market(candidates, now)
+        configuration = asdict(self.settings)
+        configuration.pop("data_dir", None)
+        return CapturedInputs(now, asset, self.mode, candles[0].source if candles else source,
+                              candles[0].quote if candles else quote, tuple(candles), tuple(raw["observations"]),
+                              tuple(coverage), tuple(raw["events"]),
+                              self._health(now, raw["runs"], raw["counts"]), raw["watermark"],
+                              configuration, raw["truncation"])
+
+    def inputs(self, asset: str, source: str | None = None, quote: str | None = None,
+               as_of: int | None = None) -> tuple[list[Candle], list[Observation], list[dict], dict]:
+        captured = self.capture_inputs(asset, source, quote, as_of)
+        return (list(captured.candles), [row for row in captured.observations if row.asset == asset],
+                list(captured.coverage), dict(captured.watermark))
+
+    def bundle(self, asset: str = "BTC", source: str | None = None, quote: str | None = None,
+               as_of: int | None = None, include_forecast: bool = True, *,
+               captured: CapturedInputs | None = None) -> dict:
+        captured = captured or self.capture_inputs(asset, source, quote, as_of)
+        now, candles, observations = captured.as_of, list(captured.candles), list(captured.observations)
+        settings = Settings(**captured.configuration)
         latest = {}
-        for o in sorted(
-            [*observations, *context], key=lambda row: (row.event_time, row.observed_at), reverse=True
-        ):
-            dimension = (o.source, o.asset, o.metric, o.quote, o.metadata.get("expiry"))
-            if dimension in latest:
-                continue
-            age = now - o.event_time
-            expected = (
-                self.settings.options_interval
-                if o.source == "deribit"
-                else self.settings.context_interval
-                if o.asset in ("MACRO", "STABLECOINS") or o.source == "coinmetrics"
-                else self.settings.market_interval
-            )
-            latest[dimension] = {
-                **asdict(o),
-                "age_seconds": age,
-                "stale": age > max(expected * 3, 86400 if o.asset == "MACRO" else 0),
-            }
-        fingerprint = json.dumps(
-            {
-                "as_of": now,
-                "watermark": watermark,
-                "asset": asset,
-                "source": candles[0].source if candles else None,
-                "mode": self.mode,
-            },
-            sort_keys=True,
-        )
-        return {
-            "schema_version": "1.0",
-            "snapshot_id": hashlib.sha256(fingerprint.encode()).hexdigest()[:16],
-            "as_of": stamp(now),
-            "as_of_epoch": now,
-            "data_mode": self.mode,
-            "asset": asset,
-            "selected_market": {"source": candles[0].source, "quote": candles[0].quote} if candles else None,
-            "market_coverage": coverage,
-            "analysis": analysis,
-            "forecast": forecast(candles, as_of=now) if include_forecast else None,
-            "latest_metrics": list(latest.values())[:150],
-            "events": self.store.events(now),
-            "source_health": self.status(now),
-            "limitations": [
-                "No implicit USD/USDT/USDC/EUR conversion or price averaging across venues.",
-                "Forecasts use 24-hour windows anchored to the last known hourly close, which may differ from the current price.",
-                "Calendar and ETF flows: sourced manual imports; no claim of a complete automated feed.",
-                "Missing data is not a neutral signal.",
-            ],
-        }
+        for observation in sorted(observations, key=lambda row: (row.event_time, row.observed_at), reverse=True):
+            dimension = metric_identity(observation)
+            if dimension not in latest:
+                freshness = metric_freshness(observation, settings, now)
+                latest[dimension] = {**asdict(observation), "age_seconds": freshness["age_seconds"],
+                                     "stale": freshness["stale"], "freshness": freshness}
+        reference = captured.reference
+        prediction = forecast(candles, as_of=now) if include_forecast else None
+        price_freshness = None
+        if candles:
+            from .freshness import assess_freshness
+            last = max(candles, key=lambda row: row.close_time)
+            price_freshness = assess_freshness(last.close_time, last.observed_at, now, settings.market_interval)
+            if prediction is not None:
+                prediction["stale"] = price_freshness["stale"]
+                prediction["freshness"] = price_freshness
+        return {"schema_version": "2.0", "snapshot_id": reference["content_hash"][:24],
+                "input_reference": reference, "as_of": stamp(now), "as_of_epoch": now,
+                "data_mode": captured.data_mode, "asset": captured.asset,
+                "selected_market": {"source": captured.source, "quote": captured.quote} if candles else None,
+                "market_selection_rule": "explicit filters, then recent usable complete history; not an execution venue",
+                "market_coverage": list(captured.coverage), "analysis": build_analysis(candles, observations, now),
+                "forecast": prediction, "price_freshness": price_freshness,
+                "latest_metrics": list(latest.values())[:150], "metrics_truncated": len(latest) > 150,
+                "input_truncation": dict(captured.truncation), "events": list(captured.events),
+                "source_health": captured.source_health,
+                "limitations": [
+                    "No implicit USD/USDT/USDC/EUR conversion or cross-venue price averaging.",
+                    "The historical reference market is distinct from a simulated purchase venue.",
+                    "Hourly-close anchors are not current executable purchase prices.",
+                    "Calendar and ETF coverage may be manual or incomplete; missing data is unknown.",
+                    "Unverified macro release schedules cannot establish historical availability."]}
 
     def predictions(
         self,
