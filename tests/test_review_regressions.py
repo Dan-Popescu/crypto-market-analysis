@@ -82,6 +82,22 @@ def test_collector_funding_metrics_keep_explicit_actual_and_projected_comparison
     assert sorted(row["change"] for row in result) == [0.001, 0.002]
 
 
+def test_legacy_evaluation_excludes_preissuance_barrier_ambiguity():
+    from crypto_market_analysis.research import evaluate
+
+    day = 86400
+    data = [Candle("fixture", "BTC", "USD", "1h", hour * 3600, (hour + 1) * 3600,
+                   100, 101, 99, 100, 1, (hour + 1) * 3600 + 120) for hour in range(90 * 24)]
+    first_hour = 82 * 24
+    data[first_hour] = replace(data[first_hour], low=80)
+    ambiguous = evaluate(data, horizon=1, threshold=0.1)
+    assert ambiguous["origins"][0]["outcomes"]["down_barrier"] is None
+    assert ambiguous["metrics"]["down_barrier"]["ambiguous_origins_excluded"] >= 1
+    data[first_hour + 1] = replace(data[first_hour + 1], low=80)
+    definite = evaluate(data, horizon=1, threshold=0.1)
+    assert definite["origins"][0]["outcomes"]["down_barrier"] == 1
+
+
 def test_two_year_assessment_with_plan_can_be_issued_without_duplicate_history(tmp_path):
     end = int(time.time()) // 86400 * 86400
     start = end - 731 * 86400

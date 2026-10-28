@@ -483,11 +483,12 @@ def _plans_result(fig, result: dict, as_of: int, quote: str):
         raise ValueError("Plan comparison chart unavailable: no observed valuation trajectory.")
     wealth.set_ylabel(f"Holdings plus reserve ({quote})")
     costs = "; ".join(
-        f"{name}: {plan.get('new_purchases_all_in_cost') or 'unknown'} {quote}"
+        f"{name}: {float(plan['new_purchases_all_in_cost']):,.2f} {quote}"
+        if plan.get("new_purchases_all_in_cost") is not None else f"{name}: unknown"
         for name, plan in result.get("plans", {}).items()
     )
     wealth.set_title(
-        f"Hypothetical purchase plans · non-interest-bearing reserve\nNew purchase all-in acquisition cost — {costs}",
+        f"Hypothetical holdings plus reserve · deposits included\nNew purchase all-in cost — {costs}",
         loc="left",
         fontsize=10,
     )
@@ -517,6 +518,8 @@ def render_result_chart(kind: str, result: dict, output: Path) -> Path:
     mode = market.get("data_mode", result.get("data_mode", "unknown"))
     mode = "SYNTHETIC DEMONSTRATION" if mode in {"demo", "synthetic"} else mode.upper()
     reference = result.get("input_reference", result.get("input_fingerprint", "unavailable"))
+    if isinstance(reference, dict):
+        reference = str(reference.get("content_hash", "unavailable"))[:24]
     with (
         plt.style.context("dark_background"),
         matplotlib.rc_context({"svg.hashsalt": "crypto-market-analysis", "svg.fonttype": "none"}),
@@ -529,8 +532,8 @@ def render_result_chart(kind: str, result: dict, output: Path) -> Path:
             for ax in fig.axes:
                 ax.set_facecolor("#172235")
                 ax.grid(alpha=0.17)
-            fig.get_layout_engine().set(rect=(0, 0.07, 1, 0.96))
-            fig.suptitle(f"{asset}/{quote} · {source} · {mode}", fontsize=12)
+            fig.get_layout_engine().set(rect=(0, 0.07, 1, 0.90))
+            fig.suptitle(f"{asset}/{quote} · {source} · {mode}", fontsize=12, y=0.985)
             fig.text(
                 0.01,
                 0.025,

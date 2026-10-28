@@ -12,6 +12,7 @@ This local Python example uses the installed MCP SDK over STDIO. Run from the re
 uv run --frozen python - <<'PY'
 import asyncio
 import json
+import sys
 from pathlib import Path
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -21,6 +22,7 @@ async def main():
     common = {"asset": "BTC", "source": "demo", "quote": "EUR", "as_of": 1793145600}
     calls = [
         ("get_analysis_bundle", common),
+        ("get_source_catalog", {}),
         ("get_market_context", {**common, "lookbacks": [7, 30, 365, 730]}),
         ("get_purchase_windows", {**common, "horizons": [1, 3, 7, 14], "thresholds": [0.02, 0.05]}),
         ("compare_purchase_plans", {"config": plan, "as_of": common["as_of"], "validation": "retrospective"}),
@@ -30,8 +32,8 @@ async def main():
     issued = Path("output/demo-issued.json")
     if issued.exists():
         calls.append(("get_assessment", {"assessment_id": json.loads(issued.read_text())["assessment_id"]}))
-    params = StdioServerParameters(command="uv", args=[
-        "run", "--frozen", "crypto-market-analysis", "serve", "--transport", "stdio",
+    params = StdioServerParameters(command=sys.executable, args=[
+        "-m", "crypto_market_analysis", "serve", "--transport", "stdio",
         "--mode", "demo", "--data-dir", "data/demo-docs",
     ])
     async with stdio_client(params) as (read, write):
@@ -39,6 +41,7 @@ async def main():
             await session.initialize()
             for name, arguments in calls:
                 result = await session.call_tool(name, arguments)
+                assert not result.isError, name
                 print(name, "error=" + str(result.isError))
                 for content in result.content:
                     if content.type == "text":

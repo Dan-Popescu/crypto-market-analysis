@@ -469,6 +469,18 @@ def _latest_versions(candles: list[Candle]) -> list[Candle]:
     return list(versions.values())
 
 
+def _post_issuance_barriers(candles, issued_at, endpoint, anchor_price, threshold):
+    """A coarse boundary extreme cannot prove a touch after delayed issuance."""
+    rows = [row for row in candles if row.open_time < endpoint and row.close_time > issued_at]
+    full = [row for row in rows if row.open_time >= issued_at and row.close_time <= endpoint]
+    boundary = [row for row in rows if row not in full]
+    result = {}
+    for key, crossed in (("down_barrier", lambda row: row.low <= anchor_price * (1 - threshold)),
+                         ("up_barrier", lambda row: row.high >= anchor_price * (1 + threshold))):
+        result[key] = 1 if any(crossed(row) for row in full) else None if any(crossed(row) for row in boundary) else 0
+    return result
+
+
 def evaluate(
     candles: list[Candle],
     horizon: int = 7,
@@ -488,6 +500,7 @@ def evaluate(
         raise ValueError("anchor_hour_utc must be an integer between 0 and 23")
     offset = anchor_hour_utc * 3600
     bars = _aligned_bars(_latest_versions(candles), offset)
+    outcome_hours = _latest_versions(candles)
     records = []
     # Derive the first instant when all 24 hourly bars of each anchor day were known.
     first_seen: dict[int, int] = {}
@@ -547,6 +560,9 @@ def evaluate(
         out = _outcome(bars, i, horizon, threshold, anchor_price)
         if out is None:
             continue
+        if issued_at > anchor_time:
+            out.update(_post_issuance_barriers(outcome_hours, issued_at, anchor_time + horizon * 86400,
+                                              anchor_price, threshold))
         prediction.update(
             anchor_time=_stamp(anchor_time),
             issued_at=_stamp(issued_at),
@@ -557,12 +573,13 @@ def evaluate(
         last_time = anchor_time
     metrics = {}
     for key in _EVENTS:
-        if not records:
+        eligible_records = [record for record in records if record[1][key] is not None]
+        if not eligible_records:
             metrics[key] = None
             continue
-        p = np.array([r[0]["probabilities"][key] for r in records])
-        b = np.array([r[0]["base_rates"][key] for r in records])
-        y = np.array([r[1][key] for r in records])
+        p = np.array([r[0]["probabilities"][key] for r in eligible_records])
+        b = np.array([r[0]["base_rates"][key] for r in eligible_records])
+        y = np.array([r[1][key] for r in eligible_records])
         bins = []
         for lo in np.arange(0, 1, 0.2):
             mask = (p >= lo) & (p < lo + 0.2 if lo < 0.8 else p <= 1)
@@ -577,6 +594,8 @@ def evaluate(
                     }
                 )
         metrics[key] = {
+            "sample_size": len(eligible_records),
+            "ambiguous_origins_excluded": len(records) - len(eligible_records),
             "brier": float(np.mean((p - y) ** 2)),
             "base_brier": float(np.mean((b - y) ** 2)),
             "calibration_bins": bins,
