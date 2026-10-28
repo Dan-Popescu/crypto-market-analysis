@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from collections import defaultdict
 from copy import deepcopy
@@ -26,6 +27,19 @@ class Engine:
         if mode not in ("live", "demo", "import"):
             raise ValueError("Invalid mode.")
         self.settings = settings
+        self.dataset_lineage = None
+        marker = settings.data_dir / "dataset.json"
+        if mode == "import" and marker.is_file():
+            from .history_dataset import DatasetConfig
+
+            if marker.stat().st_size > 2_000_000:
+                raise ValueError("Research dataset identity exceeds the 2 MB limit.")
+            dataset = DatasetConfig(**json.loads(marker.read_text(encoding="utf-8")))
+            if Path(dataset.directory).resolve() != settings.data_dir.resolve():
+                raise ValueError("Research dataset directory does not match its identity.")
+            self.dataset_lineage = {"name": dataset.name, "source": dataset.source,
+                                    "data_mode": dataset.data_mode,
+                                    "target_start": dataset.target_start, "target_end": dataset.target_end}
         self.store = Store(settings.database)
         self.mode = mode
 
@@ -167,7 +181,7 @@ class Engine:
     @property
     def accumulation(self):
         from .application import AccumulationService
-        return AccumulationService(self.settings, self.store, self.mode, self.capture_inputs)
+        return AccumulationService(self.settings, self.store, self.mode, self.capture_inputs, self.dataset_lineage)
 
     def context(self, asset="BTC", source=None, quote=None, as_of=None, lookbacks=None):
         return self.accumulation.context(asset, source, quote, as_of, lookbacks)
@@ -177,6 +191,15 @@ class Engine:
 
     def compare_plans(self, config, as_of=None, validation="retrospective"):
         return self.accumulation.compare_plans(config, as_of, validation)
+
+    def accumulation_brief(self, asset="BTC", source=None, quote=None, as_of=None, plan_config=None):
+        return self.accumulation.accumulation_brief(asset, source, quote, as_of, plan_config)
+
+    def cost_sensitivity(self, config, cost_cases, as_of=None, validation="retrospective"):
+        return self.accumulation.cost_sensitivity(config, cost_cases, as_of, validation)
+
+    def journal_summary(self, as_of=None, limit=20):
+        return self.accumulation.journal_summary(as_of, limit)
 
     def evaluate_plans(self, config, as_of=None, origins=None, validation="known_at",
                        held_out_start=None, policy_frozen_at=None):

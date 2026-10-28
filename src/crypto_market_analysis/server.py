@@ -133,7 +133,7 @@ def create_server(
         transport_security=TransportSecuritySettings(
             enable_dns_rebinding_protection=True, allowed_hosts=allowed_hosts
         ),
-        instructions="Analyze BTC/ETH over 1–60 days. For accumulation use descriptive context through 730 days, experimental 1/3/7/14-day purchase windows and hypothetical plans assessed at 90/180 days. All tools are read-only; assessment issuance and outcome observation require explicit local CLI operations. Start with get_analysis_bundle to establish the date, mode, coverage and sources. Percentages are experimental; never describe them as calibrated or as a demonstrated edge. Missing data is not a neutral signal. Cite the source, unit and anchor. Keep USD, EUR and stablecoins separate, and distinguish demonstration data from real data. Use render_chart to illustrate observations. Explain contradictions and the conditions that would change the interpretation. No order execution.",
+        instructions="Analyze BTC/ETH over 1–60 days. For accumulation use get_accumulation_brief with an explicitly pinned source/native EUR or USD quote or matching plan. It combines descriptive context through 730 days, experimental 1/3/7/14-day purchase windows and hypothetical plans assessed at 90/180 days on one snapshot. Use compare_cost_sensitivity for caller-declared costs and get_journal_summary for bounded pending/missing cohorts. All tools are read-only; assessment issuance and outcome observation require explicit local CLI operations. get_analysis_bundle provides the broader source dossier. Percentages are experimental; never describe them as calibrated or as a demonstrated edge. Missing data is not a neutral signal. Cite the source, unit and anchor. Keep USD, EUR and stablecoins separate, and distinguish demonstration data from real data. Use render_chart to illustrate observations. Explain contradictions and the conditions that would change the interpretation. No order execution.",
     )
     engine = Engine(settings, mode)
     readonly = ToolAnnotations(
@@ -149,6 +149,44 @@ def create_server(
     ) -> dict[str, Any]:
         """Use first for a concise research dossier: observations, scenarios, coverage, sources and limits. as_of is UTC epoch seconds; never invent missing evidence."""
         return engine.bundle(asset, source, quote, as_of)
+
+    @server.tool(annotations=readonly)
+    def get_accumulation_brief(
+        asset: Literal["BTC", "ETH"] = "BTC",
+        source: str | None = None,
+        quote: Literal["EUR", "USD"] | None = None,
+        as_of: int | None = None,
+        plan_config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """One pinned-snapshot next-tranche review: observations, funding, targets/deadlines and pending outcomes. Supply explicit source/native quote or a matching plan object. No buy score or policy selection."""
+        return engine.accumulation_brief(asset, source, quote, as_of,
+            bounded_object(plan_config) if plan_config is not None else None)
+
+    @server.tool(annotations=readonly)
+    def construct_purchase_plan(request: dict[str, Any]) -> dict[str, Any]:
+        """Pure UTC recurrence constructor returning schema-1 JSON without saving it. Amounts are decimal strings; monthly schedules require an explicit clip/skip month-end convention. No personal holdings required."""
+        from .plan_builder import construct_plan
+        return construct_plan(bounded_object(request, "plan request"))
+
+    @server.tool(annotations=readonly)
+    def preview_purchase_funding(config: dict[str, Any], as_of: int | None = None) -> dict[str, Any]:
+        """Price-free funding constraints with fees, future deposits and free/locked commitments. This is a conservative declared-plan illustration, not an account balance or fill simulation."""
+        from .plan_builder import preview_plan_funding
+        return preview_plan_funding(bounded_object(config), int(time.time()) if as_of is None else as_of)
+
+    @server.tool(annotations=readonly)
+    def compare_cost_sensitivity(
+        config: dict[str, Any], cost_cases: list[dict[str, Any]], as_of: int | None = None,
+        validation: Literal["known_at", "retrospective"] = "retrospective",
+    ) -> dict[str, Any]:
+        """Read-only comparison of 1–3 caller-named fee/spread/slippage cases with frozen policy/cashflows/bars. First case is an arithmetic reference, never a preferred case. No optimization or measured-fill claim."""
+        bounded_object({"cases": cost_cases}, "cost cases")
+        return engine.cost_sensitivity(bounded_object(config), cost_cases, as_of, validation)
+
+    @server.tool(annotations=readonly)
+    def get_journal_summary(as_of: int | None = None, limit: int = 20) -> dict[str, Any]:
+        """Bounded read-only issued-event cohorts with pending/missing/excluded denominators and first definite outcomes. Modes/quotes/lineages stay separate; no independence or performance score is claimed. Up to 100 originals."""
+        return engine.journal_summary(as_of, limit)
 
     @server.tool(annotations=readonly)
     def get_market_context(

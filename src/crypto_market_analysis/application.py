@@ -11,15 +11,29 @@ from .config import Settings
 from .evidence import archive_evidence, canonical_json, content_hash
 
 
+def _future_plan(config, as_of):
+    from .plans import RULE_VERSION
+
+    return {"schema_version": 1, "rule_version": RULE_VERSION, "as_of": as_of,
+            "status": "not_started", "config": config, "validation_mode": "retrospective",
+            **{key: config[key] for key in ("source", "asset", "quote", "data_mode")},
+            "plans": {family: {"status": "not_started", "terminals": {
+                str(days): {"status": "pending", "time": config["start_time"] + days * 86400,
+                            "reason": "future_horizon"} for days in (90, 180)}}
+                      for family in ("regular", "split", "deferred")},
+            "assumptions": ["The frozen plan has not started; no future price, fill or outcome is assumed."]}
+
+
 class AccumulationService:
-    def __init__(self, settings: Settings, store, mode: str, capture):
+    def __init__(self, settings: Settings, store, mode: str, capture, dataset_lineage=None):
         self.settings, self.store, self.mode, self.capture = settings, store, mode, capture
+        self.dataset_lineage = dataset_lineage
 
     def context(self, asset="BTC", source=None, quote=None, as_of=None, lookbacks=None):
         from .context import market_context
         from .research import daily_bars
 
-        captured = self.capture(asset, source, quote, as_of)
+        captured = self.capture(asset, source, quote, as_of, profile="candles")
         result = market_context(list(captured.candles), captured.as_of, lookbacks)
         bars = daily_bars(list(captured.candles)).tail(731)
         history = [{"time": int(date.timestamp()), **{key: float(row[key]) for key in
@@ -30,7 +44,7 @@ class AccumulationService:
     def purchase_windows(self, asset="BTC", source=None, quote=None, as_of=None, horizons=None, thresholds=None):
         from .purchase_windows import analyze_windows
 
-        captured = self.capture(asset, source, quote, as_of)
+        captured = self.capture(asset, source, quote, as_of, profile="candles")
         result = analyze_windows(list(captured.candles), captured.as_of, horizons=horizons,
                                  thresholds=thresholds, max_price_age=self.settings.market_interval * 2)
         return {**result, "input_reference": captured.reference, "input_truncation": captured.truncation}
@@ -44,7 +58,10 @@ class AccumulationService:
                                   config["data_mode"], versions=True)
         reference = {"source": config["source"], "quote": config["quote"], "asset": config["asset"],
                      "data_mode": config["data_mode"], "as_of": now, "configuration_hash": content_hash(config),
-                     "content_hash": content_hash(rows)}
+                     "content_hash": content_hash(rows),
+                     "available_at": max((row.observed_at for row in rows), default=0)}
+        if self.dataset_lineage:
+            reference["dataset_lineage"] = self.dataset_lineage
         return config, now, rows, reference
 
     def compare_plans(self, config, as_of=None, validation="retrospective"):
@@ -52,6 +69,56 @@ class AccumulationService:
 
         config, now, rows, reference = self._plan_inputs(config, as_of)
         return {**compare_plans(config, rows, now, validation=validation), "input_reference": reference}
+
+    def accumulation_brief(self, asset="BTC", source=None, quote=None, as_of=None, plan_config=None):
+        from .accumulation_brief import build_accumulation_brief
+        from .plans import validate_config
+
+        if plan_config is not None:
+            config = validate_config(plan_config)
+            if config["asset"] != asset or config["data_mode"] != self.mode:
+                raise ValueError("The brief plan must match the requested asset and data mode.")
+            if ((source is not None and source != config["source"])
+                    or (quote is not None and quote != config["quote"])):
+                raise ValueError("The brief plan must match its pinned source and native quote.")
+            source, quote = config["source"], config["quote"]
+        if not source or not quote:
+            raise ValueError("An accumulation brief requires an explicit source and native quote, or a matching plan.")
+        captured = self.capture(asset, source, quote, as_of, profile="candles")
+        return build_accumulation_brief(captured, plan_config)
+
+    def cost_sensitivity(self, config, cost_cases, as_of=None, validation="retrospective"):
+        from .sensitivity import compare_cost_sensitivity
+
+        config, now, rows, reference = self._plan_inputs(config, as_of)
+        return {**compare_cost_sensitivity(config, rows, now, cost_cases, validation),
+                "input_reference": reference}
+
+    def journal_summary(self, as_of=None, limit=20):
+        from .prospective import summarize_journal
+
+        now = int(time.time()) if as_of is None else as_of
+        if type(now) is not int or now < 0 or type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("Use a nonnegative UTC cutoff and a journal limit from 1 through 100.")
+        with self.store.connection() as con:
+            con.execute("BEGIN")
+            exists = con.execute("SELECT 1 FROM sqlite_master WHERE name='assessment_journal'").fetchone()
+            total = con.execute("SELECT COUNT(*) FROM assessment_journal WHERE issued_at<=?", (now,)).fetchone()[0] if exists else 0
+            rows = con.execute("SELECT json_remove(record,'$.evidence') FROM assessment_journal WHERE issued_at<=? ORDER BY issued_at DESC,assessment_id LIMIT ?",
+                               (now, limit)).fetchall() if exists else []
+            records = [json.loads(row[0]) for row in rows]
+            outcomes, truncated = {}, []
+            for record in records:
+                identity = record["assessment_id"]
+                values = con.execute("SELECT record FROM assessment_outcomes WHERE assessment_id=? AND json_extract(record,'$.observed_at')<=? ORDER BY sequence LIMIT 257",
+                                     (identity, now)).fetchall()
+                outcomes[identity] = [json.loads(row[0]) for row in values[:256]]
+                if len(values) > 256:
+                    truncated.append(identity)
+        return {**summarize_journal(records, outcomes, now),
+                "selection": {"scope": "most_recent_issuances_at_or_before_cutoff", "limit": limit,
+                              "available_records": total, "records_truncated": total > limit,
+                              "outcome_limit_per_record": 256, "outcomes_truncated": truncated}}
 
     def evaluate_plans(self, config, as_of=None, origins=None, validation="known_at",
                        held_out_start=None, policy_frozen_at=None):
@@ -101,24 +168,31 @@ class AccumulationService:
                     or (quote is not None and quote != plan_identity["quote"])):
                 raise ValueError("An issued plan must match the assessment source and native quote.")
             source, quote = plan_identity["source"], plan_identity["quote"]
-        captured = self.capture(asset, source, quote, issued if as_of is None else as_of)
+        captured = self.capture(asset, source, quote, issued if as_of is None else as_of, profile="candles")
         context = market_context(list(captured.candles), captured.as_of)
         windows = analyze_windows(list(captured.candles), captured.as_of, issued_at=issued,
                                   max_price_age=self.settings.market_interval * 2)
         payload = {"kind": "accumulation_assessment", "request": request, "request_hash": request_hash,
                    "input_reference": captured.reference, "config": captured.configuration,
-                   "rules": {"context": 1, "purchase_windows": 1}, "context": context,
+                   "rules": {"context": 1, "purchase_windows": 1, "outcome_protocol": 1}, "context": context,
+                   "outcome_protocol": {"schema_version": 1, "endpoint_convention": "hourly_after_deadline_v1",
+                                        "future_price_selection": "first_observed_version",
+                                        "forecast_comparability": "not_established_for_anchor_relative_estimates"},
                    "windows": windows, "plan": None,
                    "historical_calculation": captured.as_of != issued}
         evidence = captured.evidence()
         if plan_config is not None:
             config, now, rows, reference = self._plan_inputs(plan_config, captured.as_of)
             from .plans import compare_plans
-            payload["plan"] = {**compare_plans(config, rows, now), "input_reference": reference}
+            result = compare_plans(config, rows, now) if config["start_time"] <= now else _future_plan(config, now)
+            payload["plan"] = {**result, "input_reference": reference}
             consumed = set(captured.candles)
             evidence["plan_candle_versions"] = [asdict(row) for row in rows if row not in consumed]
             evidence["plan_uses_captured_candles"] = True
         evidence = archive_evidence(evidence)
+        payload["evidence_budget"] = {"uncompressed_bytes": evidence["uncompressed_bytes"],
+                                      "maximum_uncompressed_bytes": 32 * 1024 * 1024,
+                                      "capture_profile": "candles"}
         try:
             return journal.issue(idempotency_key, payload, evidence, issued)
         except ValueError:
@@ -149,8 +223,17 @@ class AccumulationService:
         if payload.get("kind") != "accumulation_assessment":
             raise ValueError("This journal record is not an accumulation assessment.")
         reference = payload["input_reference"]
+        protocol = payload.get("outcome_protocol")
+        if protocol and (protocol.get("schema_version") != 1
+                         or protocol.get("endpoint_convention") != "hourly_after_deadline_v1"):
+            raise ValueError("The frozen outcome protocol is unsupported; original records remain unchanged.")
         rows = self.store.candles(reference["asset"], reference["source"], reference["quote"], now,
-                                  reference["data_mode"])
+                                  reference["data_mode"], versions=bool(protocol))
+        if protocol:
+            first_versions = {}
+            for row in rows:
+                first_versions.setdefault(row.open_time, row)
+            rows = list(first_versions.values())
         windows = payload["windows"]
         anchor = windows.get("anchor") or {}
         results = []
@@ -163,7 +246,8 @@ class AccumulationService:
             for horizon, thresholds in windows.get("windows", {}).items():
                 for threshold in thresholds:
                     results.append(resolve_window(rows, anchor_price, anchor_time, original["issued_at"],
-                                                  int(horizon), float(threshold), now))
+                                                  int(horizon), float(threshold), now,
+                                                  **({"endpoint_convention": protocol["endpoint_convention"]} if protocol else {})))
         outcome = {"as_of": now, "input_reference": {**reference, "content_hash": content_hash(rows)},
                    "windows": results, "status": "observed" if results else "insufficient"}
         frozen_plan = payload.get("plan")
@@ -208,7 +292,8 @@ class AccumulationService:
                 frozen_rows = sorted(pinned.values(), key=lambda row: (row.open_time, row.observed_at))
                 added_rows = sorted(future.values(), key=lambda row: (row.open_time, row.observed_at))
                 merged = frozen_rows + added_rows
-                result = compare_plans(config, merged, now, validation=validation)
+                result = (compare_plans(config, merged, now, validation=validation)
+                          if config["start_time"] <= now else _future_plan(config, now))
                 result["input_reference"] = {
                     "as_of": now, "source": config["source"], "asset": config["asset"],
                     "quote": config["quote"], "data_mode": config["data_mode"],
@@ -235,7 +320,7 @@ class AccumulationService:
     def vigilance(self, asset="BTC", source=None, quote=None, as_of=None, horizon_hours=4, policy=None):
         from .vigilance import assess_vigilance
 
-        captured = self.capture(asset, source, quote, as_of)
+        captured = self.capture(asset, source, quote, as_of, profile="vigilance", vigilance_policy=policy)
         rules = {"price_max_age": min(7200, self.settings.market_interval * 2),
                  "liquidity_max_age": min(3600, self.settings.liquidity_interval * 2),
                  "derivatives_max_age": min(86400, self.settings.market_interval * 2), **(policy or {})}

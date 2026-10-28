@@ -787,6 +787,7 @@ def _nested(lines, result, quote):
             rows = []
             for window in nested:
                 endpoint = window.get("endpoint_below_anchor") or {}
+                observable = window.get("observable_endpoint") or {}
                 touch = window.get("below_anchor_touch") or {}
                 rows.append(
                     [
@@ -796,6 +797,9 @@ def _nested(lines, result, quote):
                         touch.get("state"),
                         endpoint.get("state"),
                         endpoint.get("interval"),
+                        observable.get("state"),
+                        _date(observable.get("mark_time")),
+                        observable.get("offset_seconds"),
                         window.get("coverage"),
                     ]
                 )
@@ -808,6 +812,9 @@ def _nested(lines, result, quote):
                     "Threshold touch",
                     "Endpoint below anchor",
                     "Endpoint reason",
+                    "Separate observable hourly mark",
+                    "Hourly mark time",
+                    "Offset seconds",
                     "Coverage",
                 ],
                 rows,
@@ -864,6 +871,27 @@ def render_accumulation_report(result: dict, kind: str) -> str:
         _plans(lines, result, quote)
     elif kind == "evaluate-plans":
         _evaluation(lines, result, quote)
+    elif kind == "plan-preview":
+        _details(lines, "Declared fees", result.get("fees", {}), quote)
+        lines.extend(["", f"Split and deferred policies equivalent: {_display(result.get('policies_equivalent'))}."])
+        for family, preview in result.get("families", {}).items():
+            _details(lines, f"{family} current funding constraints", preview.get("current", {}), quote)
+            _details(lines, f"{family} next tranche", preview.get("next_tranche") or {}, quote)
+        _details(lines, "Future contributions", {str(index): row for index, row in enumerate(result.get("future_contributions", []))}, quote)
+    elif kind == "journal-summary":
+        _details(lines, "Selection and bounds", result.get("selection", {}), quote)
+        _details(lines, "Issue/event counts (not independent samples)", result.get("counts", {}), quote)
+        rows = []
+        for cohort in result.get("cohorts", []):
+            identity, counts = cohort["identity"], cohort["counts"]
+            rows.append([identity.get("asset"), identity.get("quote"), identity.get("source"),
+                         identity.get("data_mode"), identity.get("event"), identity.get("horizon_days"),
+                         identity.get("threshold"), counts.get("issued"), counts.get("resolved"),
+                         counts.get("pending"), counts.get("missing"), counts.get("ambiguous"),
+                         counts.get("excluded"), cohort.get("overlapping_pairs")])
+        _table(lines, ["Asset", "Quote", "Source", "Mode", "Event", "Days", "Threshold", "Issued",
+                       "Resolved", "Pending", "Missing", "Ambiguous", "Excluded", "Overlapping pairs"], rows)
+        _details(lines, "Plan pending horizons (unscored)", result.get("plan_pending", {}), quote)
     else:
         for key in ("state", "reasons", "supporting_evidence", "missing_sources", "summary", "comparisons"):
             if key in result:

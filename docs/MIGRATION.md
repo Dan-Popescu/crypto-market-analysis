@@ -84,3 +84,55 @@ need them. Preserve existing observation versions, modes and provenance.
 New `issue`, `observe`, imports, collection and explicit vigilance `--state-key`
 operations write locally. Existing and new MCP lookup/calculation tools remain
 read-only; there is no MCP issuance or outcome-append operation.
+
+## Version 0.3.0 follow-up contracts
+
+The follow-up implements the selected priorities in [IMPROVEMENT_REVIEW.md](IMPROVEMENT_REVIEW.md);
+[IMPROVEMENTS.md](IMPROVEMENTS.md) contains executable examples. Existing commands,
+TOML, native quotes and the integer schema-1 plan configuration remain compatible.
+Result consumers must also inspect `rule_version`, rather than the schema alone.
+
+- `accumulation-v2` changes waiting statistics to include funded pending, expired
+  and unfilled intents, clipped at the reported cutoff. Released free cash stops
+  target waiting. Amount-weighted quote-days do not depend on splitting an intent.
+- Plan terminal `complete` still describes valuation availability. New
+  `execution_coverage` and per-origin `evidence_qualification` separately determine
+  eligibility for performance aggregates. `sample_size` now counts qualified
+  origins; `scenario_sample_size` retains complete valuation scenarios. Missing
+  observations never manufacture fills.
+- Old issued records and outcomes remain immutable. A saved plan with an
+  unavailable earlier rule version remains readable; observing that plan reports
+  `unsupported` rather than silently recomputing it under v2. New future-starting
+  plans can be frozen as `not_started`, with pending outcomes.
+- New issues freeze `outcome_protocol` with `hourly_after_deadline_v1`. It adds a
+  separately named observable hourly mark, timestamp and offset. The exact
+  endpoint remains unknown when unobservable. Legacy issues without this protocol
+  retain their exact convention. New protocol outcomes use first-observed price
+  versions; this does not establish comparability with anchor-relative forecasts.
+- Input references add actual consumed-evidence `available_at` and optional
+  `dataset_lineage`. Legacy projected records without availability evidence remain
+  excluded from prospective cohorts. Import provenance alone does not disqualify
+  a genuinely future issuance; no historical availability is backdated.
+- Capture profiles bound evidence by operation. Candle-only context/windows,
+  briefs and issuance omit unused book history; broad bundles retain bounded
+  native series with explicit coverage/omissions. Vigilance retains the raw
+  baseline its policy requires. The 32 MiB issuance limit remains unchanged.
+- Late raw liquidity for a finalized hour is preserved as `late_raw_unmerged`.
+  The earlier median/count remains, with a later `partial_unmerged` aggregate
+  version and incomplete-coverage flag. Quarantined observations cannot enter a
+  raw vigilance baseline. A small local retention-lock SQLite sidecar serializes
+  compactors and contains no portfolio or assessment evidence.
+
+The optional named research dataset uses its own directory, `dataset.json` and
+`observer.sqlite`. Its additive audit/repair tables and payload files preserve
+archive parts/member hashes, real capture/materialization time, conflicts and
+resumable missing ranges. Normal `--mode import --data-dir DATASET_DIRECTORY`
+analysis reads it. It is never silently unioned with ordinary live data. Archive
+staging and repairs are explicit CLI actions; no permanent worker is activated.
+
+The five new MCP calculations/reads are `get_accumulation_brief`,
+`construct_purchase_plan`, `preview_purchase_funding`, `compare_cost_sensitivity`
+and `get_journal_summary`. They accept bounded objects, not arbitrary file paths,
+and create no assessments, orders, datasets or notifications. Journal summaries
+report their record/outcome bounds and count each issued event once; they are not
+a calibrated scorecard or evidence of an investment advantage.

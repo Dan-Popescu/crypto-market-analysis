@@ -92,6 +92,56 @@ def _write_result(result: dict, args) -> None:
             print(text, end="")
 
 
+def _history_operation(args) -> dict:
+    from .history_dataset import ArchivePart, DatasetConfig, HistoryDataset, KrakenRESTCapture
+
+    if args.as_of is not None:
+        raise ValueError("Dataset operations preserve actual capture times; --as-of is for analysis commands.")
+    raw = _json_file(args.dataset_config)
+    directory = Path(raw["directory"]).expanduser()
+    raw["directory"] = str(directory if directory.is_absolute() else args.dataset_config.resolve().parent / directory)
+    for key in ("target_start", "target_end"):
+        if isinstance(raw.get(key), str):
+            raw[key] = parse_time(raw[key])
+    config = DatasetConfig(**raw)
+    if args.action != "init" and not (Path(config.directory) / "dataset.json").is_file():
+        raise ValueError("Initialize this explicit research dataset first with history-dataset init.")
+    dataset = HistoryDataset(config)
+    if args.action in ("init", "status"):
+        return dataset.manifest()
+    if args.action == "stage":
+        if args.parts_manifest is None or not args.member or args.captured_at is None:
+            raise ValueError("Archive staging requires --parts-manifest, --member and --captured-at.")
+        manifest = _json_file(args.parts_manifest)
+        if not isinstance(manifest.get("parts"), list):
+            raise ValueError("A parts manifest requires an explicitly ordered parts array.")
+        parts = []
+        for item in manifest["parts"]:
+            part = dict(item)
+            path = Path(part["path"]).expanduser()
+            part["path"] = str(path if path.is_absolute() else args.parts_manifest.resolve().parent / path)
+            parts.append(ArchivePart(**part))
+        return dataset.stage_archive(parts, member=args.member, asset=args.asset, quote=args.quote,
+                                     captured_at=args.captured_at, build_metadata=manifest.get("build_metadata"))
+    if args.action == "plan-repair":
+        if args.start is None or args.end is None:
+            raise ValueError("A bounded repair plan requires --start and --end.")
+        return dataset.plan_repair(args.asset, args.quote, args.start, args.end)
+    if args.action == "refresh" and args.since is None:
+        raise ValueError("One-shot refresh requires an explicit --since timestamp.")
+    fetch = KrakenRESTCapture()
+    try:
+        if args.action == "refresh":
+            return dataset.append_rest(args.asset, args.quote, fetch, since=args.since, limit=args.limit)
+        return dataset.repair(args.asset, args.quote, fetch, request_budget=args.request_budget)
+    except Exception as exc:
+        raise ValueError(f"Dataset public capture failed: {type(exc).__name__}: {exc}") from exc
+    finally:
+        session = getattr(fetch.client, "session", None)
+        if session is not None and callable(getattr(session, "close", None)):
+            session.close()
+
+
 def _common(parser: argparse.ArgumentParser, sub: bool = False) -> None:
     default = argparse.SUPPRESS if sub else None
     parser.add_argument("--config", type=Path, default=default, help="TOML configuration")
@@ -262,6 +312,37 @@ def parser() -> argparse.ArgumentParser:
     )
     windows.add_argument("--horizons", help="At most 16 unique horizons, 1–365 days")
     windows.add_argument("--thresholds", help="At most 12 unique decline fractions, for example 0.02,0.05")
+    accumulation = command("accumulation-brief", "Review one pinned next purchase tranche from one snapshot.",
+                           "crypto-market-analysis accumulation-brief --asset BTC --source kraken --quote EUR")
+    accumulation.add_argument("--plan-config", type=Path)
+    plan_init = command("plan-init", "Construct a local plan from UTC dates and explicit recurrence.",
+                        "crypto-market-analysis plan-init --request request.json --output data/personal-plan.json")
+    plan_init.add_argument("--request", type=Path, required=True)
+    plan_init.add_argument("--output")
+    preview = command("plan-preview", "Preview dated funding constraints without market prices.",
+                      "crypto-market-analysis plan-preview --plan-config plan.json")
+    preview.add_argument("--plan-config", type=Path, required=True)
+    sensitivity = command("cost-sensitivity", "Compare at most three declared cost assumptions on frozen policies.",
+                          "crypto-market-analysis cost-sensitivity --plan-config plan.json --cost-cases costs.json")
+    sensitivity.add_argument("--cost-cases", type=Path, required=True, help='Object containing a "cases" array')
+    journal_summary = command("journal-summary", "Read bounded journal cohorts and pending or missing outcomes.",
+                              "crypto-market-analysis journal-summary --limit 20")
+    journal_summary.add_argument("--limit", type=int, default=20, help="Most recent issuances, 1–100")
+    dataset = command("history-dataset", "Manage one explicit import-only research dataset; network is opt-in.",
+                      "crypto-market-analysis history-dataset init --dataset-config dataset.json")
+    dataset.add_argument("action", choices=("init", "status", "stage", "refresh", "plan-repair", "repair"))
+    dataset.add_argument("--dataset-config", type=Path, required=True)
+    dataset.add_argument("--asset", choices=("BTC", "ETH"), default="BTC")
+    dataset.add_argument("--quote", choices=("EUR", "USD"), default="EUR")
+    dataset.add_argument("--parts-manifest", type=Path)
+    dataset.add_argument("--member")
+    dataset.add_argument("--captured-at", type=parse_time)
+    dataset.add_argument("--since", type=parse_time)
+    dataset.add_argument("--start", type=parse_time)
+    dataset.add_argument("--end", type=parse_time)
+    dataset.add_argument("--limit", type=int, default=720)
+    dataset.add_argument("--request-budget", type=int, default=1)
+    dataset.add_argument("--output")
     comparison = command(
         "compare-plans",
         "Compare hypothetical regular, split and deferred purchases.",
@@ -272,7 +353,7 @@ def parser() -> argparse.ArgumentParser:
         "Paired chronological purchase-plan evaluation.",
         "crypto-market-analysis evaluate-plans --plan-config plan.json --validation known_at",
     )
-    for p in (comparison, plan_evaluation):
+    for p in (comparison, plan_evaluation, sensitivity):
         p.add_argument("--plan-config", type=Path, required=True, help="Finite JSON object, at most 2 MB")
         p.add_argument(
             "--validation",
@@ -334,10 +415,11 @@ def parser() -> argparse.ArgumentParser:
         "Collect the bounded verified public calendar source once.",
         "crypto-market-analysis collect-calendar --mode live",
     )
-    for p in (context, windows, comparison, plan_evaluation, issue, assessment, observe, vigilance):
+    for p in (context, windows, comparison, plan_evaluation, issue, assessment, observe, vigilance,
+              accumulation, preview, sensitivity, journal_summary):
         p.add_argument("--format", choices=("json", "markdown"), default="json")
         p.add_argument("--output")
-    for p in (brief, forecast, evaluation, chart, context, windows, issue, vigilance, history):
+    for p in (brief, forecast, evaluation, chart, context, windows, issue, vigilance, history, accumulation):
         p.add_argument("--asset", choices=("BTC", "ETH"), default="BTC")
         p.add_argument("--source", help="Reference venue; otherwise the most usable complete history")
         p.add_argument("--quote", help="Native quote currency; no implicit conversion")
@@ -368,6 +450,20 @@ def main(argv: list[str] | None = None) -> int:
 
             write_json(source_catalog())
             return 0
+        if args.command == "plan-init":
+            from .plan_builder import construct_plan
+
+            write_json(construct_plan(_json_file(args.request)), args.output)
+            return 0
+        if args.command == "plan-preview":
+            from .plan_builder import preview_plan_funding
+
+            now = args.as_of if args.as_of is not None else int(datetime.now(UTC).timestamp())
+            _write_result(preview_plan_funding(_json_file(args.plan_config), now), args)
+            return 0
+        if args.command == "history-dataset":
+            write_json(_history_operation(args), args.output)
+            return 0
         config_path = args.config or (Path("observer.toml") if Path("observer.toml").exists() else None)
         settings = load_settings(config_path, args.data_dir)
         engine = Engine(settings, args.mode)
@@ -375,6 +471,17 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "context":
             lookbacks = bounded_integers(_csv_numbers(args.lookbacks, int), "lookbacks", 3650, 16)
             _write_result(engine.context(args.asset, args.source, args.quote, args.as_of, lookbacks), args)
+        elif args.command == "accumulation-brief":
+            _write_result(engine.accumulation_brief(args.asset, args.source, args.quote, args.as_of,
+                _json_file(args.plan_config) if args.plan_config else None), args)
+        elif args.command == "cost-sensitivity":
+            cases = _json_file(args.cost_cases)
+            if set(cases) != {"cases"}:
+                raise ValueError('Cost assumptions require one object with a "cases" array.')
+            _write_result(engine.cost_sensitivity(_json_file(args.plan_config), cases["cases"],
+                args.as_of, args.validation), args)
+        elif args.command == "journal-summary":
+            _write_result(engine.journal_summary(args.as_of, args.limit), args)
         elif args.command == "windows":
             horizons = bounded_integers(_csv_numbers(args.horizons, int), "horizons", 365, 16)
             thresholds = bounded_thresholds(_csv_numbers(args.thresholds, float))

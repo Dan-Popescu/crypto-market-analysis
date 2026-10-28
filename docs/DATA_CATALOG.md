@@ -2,6 +2,21 @@
 
 All market timestamps use UTC epoch seconds internally. Every observation retains source, asset, metric, native unit, optional quote currency, event time, ingestion/availability time and data mode. Preserve revisions and gaps. A missing value is neither zero nor a neutral signal. EUR, USD, USDT and USDC are never merged or converted implicitly.
 
+Version 0.3.0 adds explicitly named, isolated Kraken import research datasets.
+Their bounded manifests record four native market coverages, real gaps, archive
+parts/member hashes, REST capture lineage, actual materialization time, conflicts
+and manual repair progress. See [the dataset workflow](IMPROVEMENTS.md). Manifest
+output has explicit omission counts; a successful synthetic parser test does not
+qualify a real source. Ordinary import-mode analysis exposes dataset lineage.
+
+Operation profiles keep exact consumed evidence within bounds: candle-only
+accumulation outputs omit unused book histories; broad context reports per-family
+available/captured/omitted records; vigilance requires its actual raw baseline.
+Late observations for finalized liquidity hours remain `late_raw_unmerged`, with
+the retained median flagged `partial_unmerged` rather than replaced by a late
+batch. Amount-weighted plan waiting and execution-path qualification use
+`accumulation-v2`; terminal valuation availability remains a separate property.
+
 ## Source qualification and access
 
 `uv run crypto-market-analysis sources` returns the dated machine-readable catalogue: endpoint, documentation, authentication/cost, page cap, timestamp units, history limits, rights, implementation state and runtime access evidence. Documentation qualification dated October 28, 2026 establishes no successful live availability. New public-source checks in this cloud were blocked by the proxy allowlist; earliest/latest observed history and gaps remain unverified unless actual observations establish them. The original author's different environment and historical results remain separately recorded in [VALIDATION.md](VALIDATION.md).
