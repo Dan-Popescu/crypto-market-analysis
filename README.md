@@ -18,6 +18,8 @@ These are **synthetic** scenarios, with independent EUR and USD prices, not a me
 
 See [the accumulation guide](docs/ACCUMULATION.md) for reproducible evaluation, journal, vigilance, chart and import examples; [MCP clients](docs/MCP_CLIENTS.md) includes a local protocol example. [Implementation status](docs/IMPLEMENTATION_STATUS.md) separates implemented code, verification evidence and blocked live checks. No predictive advantage over regular purchases has been established.
 
+The [follow-up improvement review](docs/IMPROVEMENT_REVIEW.md) records demonstrated gaps, independent review evidence and the selected next priorities. Its proposed fixes and additions are not implemented by that review.
+
 ## Sources and configuration
 
 ```bash
