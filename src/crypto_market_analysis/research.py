@@ -339,6 +339,8 @@ def _estimate(
         "training_end": None,
         "probabilities": None,
         "base_rates": None,
+        "reference_frequencies": None,
+        "reference_confidence_intervals": None,
         "required_effective_samples": 20,
         "confidence_intervals": None,
         "insufficient_reason": "Requires 20 valid non-overlapping historical windows and 61 days of feature history.",
@@ -364,6 +366,14 @@ def _estimate(
     if selected:
         base["training_start"] = _iso(bars.index[selected[0][0]] + pd.Timedelta(days=1))
         base["training_end"] = _iso(bars.index[selected[-1][0] + horizon] + pd.Timedelta(days=1))
+        # Descriptive evidence survives the conditional estimator's support gate.
+        counts = {key: sum(item[2][key] for item in selected) for key in _EVENTS}
+        base["reference_frequencies"] = {
+            key: count / len(selected) for key, count in counts.items()
+        }
+        base["reference_confidence_intervals"] = {
+            key: _wilson(count, len(selected)) for key, count in counts.items()
+        }
     if len(selected) < 20:
         return base
     x = np.stack([v[1] for v in selected])
@@ -378,7 +388,7 @@ def _estimate(
         insufficient_reason=None,
         confidence_intervals={key: _wilson(sum(selected[n][2][key] for n in nearest), k) for key in _EVENTS},
         probabilities={key: float(np.mean([selected[n][2][key] for n in nearest])) for key in _EVENTS},
-        base_rates={key: float(np.mean([v[2][key] for v in selected])) for key in _EVENTS},
+        base_rates=base["reference_frequencies"],
     )
     return base
 
@@ -389,6 +399,14 @@ def forecast(
     threshold: float = 0.10,
     as_of: int | None = None,
 ) -> dict:
+    """Return empirical evidence and, with sufficient support, conditional estimates.
+
+    Each horizon's reference frequencies and Wilson intervals describe all eligible
+    disjoint outcomes, including samples below the 20-outcome conditional gate.
+    Sample counts and training dates describe that same selection. Feature warmup,
+    gaps and the origin purge apply to both. Legacy base_rates remain available
+    only alongside supported conditional probabilities.
+    """
     if not 0 < threshold < 1:
         raise ValueError("threshold must be between 0 and 1")
     horizons = [1, 7, 21, 30, 60] if horizons is None else horizons
@@ -405,7 +423,10 @@ def forecast(
     results = {
         str(h): _estimate(bars, len(bars) - 1, h, threshold)
         if len(bars)
-        else {"status": "insufficient", "probabilities": None, "base_rates": None}
+        else {
+            "status": "insufficient", "probabilities": None, "base_rates": None,
+            "reference_frequencies": None, "reference_confidence_intervals": None,
+        }
         for h in horizons
     }
     stale = bool(

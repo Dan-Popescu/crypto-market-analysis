@@ -207,3 +207,104 @@ def test_expiry_is_exclusive_at_maximum_price_age():
     result = analyze_windows(data, 100 * 86400 + 7200, [1], [0.05])
     assert result["stale"] is True
     assert result["windows"]["1"]["0.05"]["conditional_frequencies"] is None
+
+
+@pytest.mark.parametrize(
+    "days,horizon,missing_days,missing_hours,selected,raw_count,anchor_day",
+    [
+        (61, 1, (), (), [], 0, 61),  # Feature warmup alone gives no purged outcomes.
+        (81, 1, (), (), list(range(60, 79)), 19, 81),
+        (82, 1, (), (), list(range(60, 80)), 20, 82),
+        (121, 3, (), (), list(range(60, 115, 3)), 57, 121),
+        (122, 3, (), (), list(range(60, 118, 3)), 58, 122),
+        # A missing day excludes outcome endpoints and the following feature warmup.
+        (180, 3, (75,), (), [60, 63, 66, 69, *range(136, 176, 3)], 52, 180),
+        (180, 7, (75,), (), [60, 67, *range(136, 172, 7)], 44, 180),
+        # A single missing endpoint hour invalidates that whole daily outcome too.
+        (180, 3, (), (75 * 24 + 23,), [60, 63, 66, 69, *range(136, 176, 3)], 52, 180),
+        # A partial latest day retains older evidence but cannot issue a current conditional.
+        (180, 3, (75,), (179 * 24,), [60, 63, 66, 69, *range(136, 175, 3)], 51, 179),
+        (180, 1, (150,), (), [], 0, 180),  # Current features are incomplete.
+    ],
+)
+def test_public_empirical_evidence_selection(
+    days, horizon, missing_days, missing_hours, selected, raw_count, anchor_day
+):
+    from datetime import UTC, datetime
+    from math import sqrt
+
+    from crypto_market_analysis.research import forecast
+
+    def price(day):
+        return 100 + (day * 11 % 17)
+
+    data = [
+        replace(c, open=price(c.open_time // 86400), close=price(c.open_time // 86400),
+                high=price(c.open_time // 86400) + 1, low=price(c.open_time // 86400) - 1)
+        for c in hours(days * 24)
+        if c.open_time // 86400 not in missing_days and c.open_time // 3600 not in missing_hours
+    ]
+    historical = forecast(data, [horizon], threshold=0.05, as_of=days * 86400)
+    research = historical["horizons"][str(horizon)]
+    window = analyze_windows(data, days * 86400, [horizon], [0.05])["windows"][str(horizon)]["0.05"]
+    assert research["training_samples"] == window["raw_samples"] == raw_count
+    assert research["effective_samples"] == window["effective_samples"] == len(selected)
+    mapping = {"red": "endpoint_below_anchor", "down_barrier": "below_anchor_touch"}
+    if not selected:
+        assert research["reference_frequencies"] is None
+        assert research["reference_confidence_intervals"] is None
+        assert window["reference_frequencies"] is None
+        return
+    assert research["training_start"] == datetime.fromtimestamp((selected[0] + 1) * 86400, UTC).isoformat()
+    assert research["training_end"] == datetime.fromtimestamp((selected[-1] + horizon + 1) * 86400, UTC).isoformat()
+    assert research["training_end"] < historical["anchor_time"]  # Strict horizon purge.
+    assert window["training_start"] == research["training_start"]
+    assert window["training_end"] == research["training_end"]
+    for event, renamed in mapping.items():
+        count = sum(
+            price(day + horizon) < price(day) if event == "red" else
+            min(price(future) - 1 for future in range(day + 1, day + horizon + 1)) <= price(day) * 0.95
+            for day in selected
+        )
+        frequency = count / len(selected)
+        assert research["reference_frequencies"][event] == window["reference_frequencies"][renamed] == frequency
+        # Independent Wilson score formula, including nonzero uncertainty for zero counts.
+        z = 1.959963984540054
+        n = len(selected)
+        center = (count + z * z / 2) / (n + z * z)
+        radius = z * sqrt(count * (n - count) / n + z * z / 4) / (n + z * z)
+        assert research["reference_confidence_intervals"][event] == pytest.approx([center - radius, center + radius])
+        assert window["reference_uncertainty"][renamed] == research["reference_confidence_intervals"][event]
+    if len(selected) < 20:
+        assert research["base_rates"] is None
+        assert research["probabilities"] is None
+        assert window["conditional_frequencies"] is None
+    else:
+        assert research["base_rates"] == research["reference_frequencies"]
+        assert window["conditional_frequencies"] == {
+            renamed: research["probabilities"][event] for event, renamed in mapping.items()
+        }
+    assert historical["anchor_time"] == datetime.fromtimestamp(anchor_day * 86400, UTC).isoformat()
+
+
+def test_sparse_evidence_excludes_future_closes_and_late_observations():
+    from crypto_market_analysis.research import forecast
+
+    cutoff = 81 * 86400
+    data = hours(90 * 24)
+    # A past extreme not known at the cutoff must not enter the sample.
+    data[10 * 24] = replace(data[10 * 24], low=1, observed_at=cutoff + 1)
+    changed = [
+        replace(c, close=500, high=500, low=1)
+        if c.close_time > cutoff or c.observed_at > cutoff else c
+        for c in data
+    ]
+    evidence = forecast(data, [1, 3], as_of=cutoff)
+    assert evidence["horizons"]["1"]["effective_samples"] == 8
+    assert evidence["horizons"]["1"]["reference_frequencies"] is not None
+    assert evidence == forecast(changed, [1, 3], as_of=cutoff)
+    assert analyze_windows(data, cutoff, [1, 3], [0.05]) == analyze_windows(changed, cutoff, [1, 3], [0.05])
+    # The cutoff excludes future hours even when supplied without the rest of the future history.
+    known = [c for c in data if c.close_time <= cutoff and c.observed_at <= cutoff]
+    assert forecast(data, [1, 3], as_of=cutoff) == forecast(known, [1, 3], as_of=cutoff)
+    assert analyze_windows(data, cutoff, [1, 3], [0.05]) == analyze_windows(known, cutoff, [1, 3], [0.05])

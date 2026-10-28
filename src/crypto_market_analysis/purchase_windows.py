@@ -18,7 +18,7 @@ from .context import (
     _timestamp,
 )
 from .models import Candle
-from .research import _aligned_bars, _feature, _outcome, _wilson, forecast
+from .research import forecast
 
 _DAY = 86400
 _EVENT_NAMES = {"red": "endpoint_below_anchor", "down_barrier": "below_anchor_touch"}
@@ -232,30 +232,6 @@ def _renamed(values: dict | None) -> dict | None:
     return {_EVENT_NAMES[key]: values[key] for key in _EVENT_NAMES} if values is not None else None
 
 
-def _sparse_reference(candles: list[Candle], horizon: int, threshold: float) -> dict | None:
-    """Retain descriptive base rates below the conditional estimator's support gate.
-
-    Use exactly its feature eligibility, purged training range and disjoint
-    outcome selection; this does not lower its conditional-frequency sample gate.
-    """
-    offset = candles[-1].close_time % _DAY if candles else 0
-    bars = _aligned_bars(candles, offset)
-    selected = []
-    last = -horizon - 1
-    for index in range(60, len(bars) - 1 - horizon):
-        if index - last < horizon or _feature(bars, index) is None:
-            continue
-        outcome = _outcome(bars, index, horizon, threshold)
-        if outcome is not None:
-            selected.append(outcome)
-            last = index
-    return (
-        {key: sum(item[key] for item in selected) / len(selected) for key in _EVENT_NAMES}
-        if selected
-        else None
-    )
-
-
 def analyze_windows(
     candles: list[Candle],
     as_of: int,
@@ -298,17 +274,10 @@ def analyze_windows(
             estimate = historical["horizons"][str(horizon)]
             supported = estimate["status"] == "experimental" and current_alignment
             any_support |= supported
-            raw_reference = estimate["base_rates"]
-            if raw_reference is None and estimate.get("effective_samples", 0):
-                raw_reference = _sparse_reference(eligible, horizon, threshold)
-            reference = _renamed(raw_reference)
+            reference = _renamed(estimate["reference_frequencies"])
             conditional = _renamed(estimate["probabilities"]) if supported and not stale else None
             effective = estimate.get("effective_samples", 0)
-            reference_intervals = (
-                {key: _wilson(round(value * effective), effective) for key, value in reference.items()}
-                if reference and effective
-                else None
-            )
+            reference_intervals = _renamed(estimate["reference_confidence_intervals"])
             windows[str(horizon)][str(threshold)] = {
                 "status": "stale" if stale else "experimental" if supported else "insufficient",
                 "horizon_days": horizon,
