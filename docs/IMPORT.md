@@ -41,9 +41,12 @@ synthétiques. Les sept rapports et graphiques réels du ZIP, le wheel fourni,
 les bases et les environnements Python sont exclus du versionnement.
 Le compte rendu de validation de l'auteur reste séparé dans VALIDATION.md.
 
-Le dépôt GitHub est privé et GitHub Actions est désactivé. Une commande commune
-de vérification est fournie pour le PC et Codex cloud ; ses résultats doivent
-être consignés avant chaque fusion.
+Le dépôt a été initialisé en privé. Le 28 octobre 2026, Dan a ensuite choisi
+un dépôt public pour faciliter les essais de pipeline et les vérifications
+sur GitHub lorsqu'elles seront utiles. GitHub Actions reste désactivé à cette
+étape ; aucun workflow n'est ajouté par ce changement de visibilité.
+Une commande commune de vérification est fournie pour le PC et Codex cloud ;
+ses résultats doivent être consignés avant chaque fusion.
 
 ## Limite déjà observée
 
