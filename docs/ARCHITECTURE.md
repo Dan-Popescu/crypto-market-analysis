@@ -42,6 +42,10 @@ simulator can observe a price, fill an eligible purchase and release rounding
 refunds. A preview cannot infer those events. Shared accounting must preserve this
 distinction rather than force both calculations to produce identical balances.
 
+Shared-budget previews reuse the same private cash lifecycle and activation
+calculation. The purchase-plan module also owns not-started snapshots consumed by
+issuance and checked replay; replay never imports application-private helpers.
+
 Tests cross the same interface as callers and cover simultaneous contributions,
 reserve releases and tranches, fixed fees, partial funding, caps, missing anchors
 and conservation of committed cash. Existing historical execution, waiting,
@@ -97,3 +101,11 @@ Future changes should improve locality: a domain rule and its verification belon
 with its owner. The deletion test should expose whether a proposed module hides
 meaningful knowledge or only adds forwarding. Architecture does not guarantee zero
 future debt; preserving these invariants and reviewing changes makes debt visible.
+
+The offline additions keep calculation and I/O responsibilities explicit.
+`scorecards` interprets journal-owned bounded selections; `recovery` owns checked
+filesystem/database snapshots and consumes public frozen-calculation interfaces.
+`venue_analysis`, `quote_context` and `derivatives_context` calculate from explicit
+bounded local inputs. CLI and MCP adapters expose those same interfaces, with
+filesystem writes confined to explicit CLI operations. See
+[the offline completion plan](OFFLINE_COMPLETION_PLAN.md) for acceptance limits.

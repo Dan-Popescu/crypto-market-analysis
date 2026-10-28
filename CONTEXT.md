@@ -34,6 +34,10 @@ A touched price alone does not establish an executable fill.
 A conservative illustration of declared cash commitments without market prices,
 fills, rounding refunds or inferred account balances.
 
+**Shared budget envelope**:
+One optional dated cash supply shared by declared BTC/ETH plan families in one
+native quote and data mode. Embedded plan contributions are not additional funds.
+
 ## Evidence and prospective analysis
 
 **Captured evidence**:
@@ -57,3 +61,12 @@ observation time and evidence; it does not rewrite the original.
 An observed event frequency in eligible, disjoint historical windows, with its
 sample count and uncertainty.
 It remains distinct from a supported conditional forecast.
+
+**Prospective scorecard**:
+A descriptive comparison of frozen assessments and later eligible observations,
+with explicit cohorts, missingness and execution qualification. It does not turn
+historical simulations into prospective performance.
+
+**Indicative FX reference**:
+A dated informational currency conversion reference with explicit source and
+orientation, distinct from an executable exchange rate.

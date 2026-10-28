@@ -129,7 +129,7 @@ def replay_assessment(record: dict) -> dict:
     records remain backup-verifiable but only accumulation assessments replay.
     """
     from .context import market_context
-    from .plans import RULE_VERSION, compare_plans, validate_config
+    from .plans import RULE_VERSION, compare_plans, future_plan_snapshot, validate_config
     from .purchase_windows import analyze_windows
 
     record, evidence = _original(record)
@@ -197,10 +197,7 @@ def replay_assessment(record: dict) -> dict:
                     and plan_reference["available_at"] != max((row.observed_at for row in rows), default=0)):
                 raise ValueError("Original plan availability mismatch.")
             if config["start_time"] > captured.as_of:
-                # One canonical implementation owns the frozen future-plan shape.
-                from .application import _future_plan
-
-                replayed_plan = _future_plan(config, captured.as_of)
+                replayed_plan = future_plan_snapshot(config, captured.as_of)
             else:
                 replayed_plan = compare_plans(config, rows, captured.as_of,
                                              validation=plan.get("validation_mode", "retrospective"))

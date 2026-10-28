@@ -89,6 +89,27 @@ New `issue`, `observe`, imports, collection and explicit vigilance `--state-key`
 operations write locally. Existing and new MCP lookup/calculation tools remain
 read-only; there is no MCP issuance or outcome-append operation.
 
+## Version 0.4.0 offline additions
+
+The [offline workflow guide](OFFLINE_WORKFLOWS.md) documents new explicit CLI
+commands and seven read-only MCP tools. Existing commands, configuration, journal
+archives, plan rule `accumulation-v2` and mode/native-quote identities remain
+compatible. No third-party dependency changed and no destructive migration runs.
+
+Backup/restore operates on explicit paths through the CLI only. Restoration
+requires a new or empty directory. Named-dataset backup requires stopped writers
+and `--quiescent-dataset`; directory rebasing retains original manifest provenance.
+Original replay refuses unsupported frozen rules instead of silently updating
+results. The prospective scorecard consumes bounded journal projections and
+validates recorded replay/qualification; it does not replace archive replay or
+establish calibration against incompatible forecast clocks.
+
+Request-only calculations use their request's explicit data mode. Venue estimates
+require actual supplied ask levels and explicit fee/product/rule assumptions;
+stored aggregate depth is insufficient. The new `ecb-manual` import is a sourced
+manual JSON schema, not an automatic official feed. FX transformations are
+informational and explicit; no core price series is converted or renamed.
+
 ## Version 0.3.0 follow-up contracts
 
 The follow-up implements the selected priorities in [IMPROVEMENT_REVIEW.md](IMPROVEMENT_REVIEW.md);

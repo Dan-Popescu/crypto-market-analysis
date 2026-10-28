@@ -64,6 +64,13 @@ All registered tools declare read-only behavior. Chart rendering uses temporary 
 | `preview_purchase_funding` | Price-free dated funding constraints and fees; no account balance or assumed fill. |
 | `compare_cost_sensitivity` | One to three caller-declared cost cases on frozen policies and cashflows, without optimization. |
 | `get_journal_summary` | Bounded issued-event cohorts with first definite outcomes and pending/missing/excluded denominators; no performance score. |
+| `get_journal_scorecard` | Bounded descriptive event rates and qualified paired 90/180-day plan outcomes; distinct cohorts and overlap exclusions. |
+| `replay_assessment` | Verify an existing original by ID and recompute its supported frozen calculations without appending outcomes. |
+| `preview_shared_budget` | Price-free BTC/ETH commitments against one explicit dated native-quote envelope. |
+| `calculate_purchase_costs` | Hypothetical amount-specific spot costs from explicit local books, fees and trading rules. |
+| `calculate_venue_disagreement` | Fresh aligned same-quote dispersion with stale, missing and outlier sources visible. |
+| `get_quote_context` | Explicit indicative FX and stablecoin basis with native input and transformation provenance. |
+| `get_derivatives_context` | Native funding/OI 4h/24h comparisons with known-at endpoints, conventions and missingness. |
 | `get_analysis_bundle` | Establish as-of time, mode, reference market, observations, source coverage and limitations. |
 | `get_market_context` | Descriptive context, complete UTC periods and explicit lookback coverage. |
 | `get_purchase_windows` | Experimental 1/3/7/14-day endpoint/touch frequencies, reference rates, support and expiry. |
@@ -89,6 +96,14 @@ The first cost case is an arithmetic reference, never a recommendation.
 originals and reports outcome truncation. Event counts are not independent sample
 counts. New observable hourly endpoints remain separate from exact endpoints and
 are not scored against unmatched historical forecasts. See [IMPROVEMENTS.md](IMPROVEMENTS.md).
+
+The five new request-based calculations take `request` as a bounded JSON object
+and optional integer `as_of`; use the corresponding JSON examples in
+[offline workflows](OFFLINE_WORKFLOWS.md). The request's explicit data mode is
+authoritative. `get_journal_scorecard` takes the same cutoff/limit as the journal
+summary; `replay_assessment` takes `assessment_id`. No backup/restore operation
+or filesystem-path input is exposed through MCP. Native USDT derivatives remain
+separate from USD analyses.
 
 An assistant request can be: “Compare regular, split and deferred BTC purchases using this synthetic EUR plan. Start with coverage and the same as-of time. Show holdings plus reserve at 90 and 180 days, underperformance and waiting costs. Distinguish observations, assumed fills and insufficient evidence. Explain contradictory context and never invent a calibrated probability.”
 

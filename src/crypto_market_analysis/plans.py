@@ -172,6 +172,22 @@ def validate_config(config: dict) -> dict:
     return result
 
 
+def future_plan_snapshot(config: dict, as_of: int) -> dict:
+    """Freeze a validated not-started plan without assuming future observations."""
+    config = validate_config(config)
+    as_of = _time(as_of, 'as_of')
+    if config['start_time'] <= as_of:
+        raise ValueError('A future plan must start after its snapshot cutoff')
+    return {'schema_version': 1, 'rule_version': RULE_VERSION, 'as_of': as_of,
+            'status': 'not_started', 'config': config, 'validation_mode': 'retrospective',
+            **{key: config[key] for key in ('source', 'asset', 'quote', 'data_mode')},
+            'plans': {family: {'status': 'not_started', 'terminals': {
+                str(days): {'status': 'pending', 'time': config['start_time'] + days * DAY,
+                            'reason': 'future_horizon'} for days in (90, 180)}}
+                      for family in ('regular', 'split', 'deferred')},
+            'assumptions': ['The frozen plan has not started; no future price, fill or outcome is assumed.']}
+
+
 def _market_bars(config, candles, as_of, validation):
     if len(candles) > 100000:
         raise ValueError('At most 100000 candle versions are supported')

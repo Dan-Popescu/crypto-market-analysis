@@ -9,19 +9,7 @@ from pathlib import Path
 
 from .config import Settings
 from .evidence import archive_evidence, canonical_json, content_hash
-
-
-def _future_plan(config, as_of):
-    from .plans import RULE_VERSION
-
-    return {"schema_version": 1, "rule_version": RULE_VERSION, "as_of": as_of,
-            "status": "not_started", "config": config, "validation_mode": "retrospective",
-            **{key: config[key] for key in ("source", "asset", "quote", "data_mode")},
-            "plans": {family: {"status": "not_started", "terminals": {
-                str(days): {"status": "pending", "time": config["start_time"] + days * 86400,
-                            "reason": "future_horizon"} for days in (90, 180)}}
-                      for family in ("regular", "split", "deferred")},
-            "assumptions": ["The frozen plan has not started; no future price, fill or outcome is assumed."]}
+from .plans import future_plan_snapshot
 
 
 class AccumulationService:
@@ -183,7 +171,8 @@ class AccumulationService:
         if plan_config is not None:
             config, now, rows, reference = self._plan_inputs(plan_config, captured.as_of, captured=captured)
             from .plans import compare_plans
-            result = compare_plans(config, rows, now) if config["start_time"] <= now else _future_plan(config, now)
+            result = (compare_plans(config, rows, now) if config["start_time"] <= now
+                      else future_plan_snapshot(config, now))
             payload["plan"] = {**result, "input_reference": reference}
             consumed = set(captured.candles)
             evidence["plan_candle_versions"] = [asdict(row) for row in rows if row not in consumed]
@@ -291,7 +280,7 @@ class AccumulationService:
                 added_rows = sorted(future.values(), key=lambda row: (row.open_time, row.observed_at))
                 merged = frozen_rows + added_rows
                 result = (compare_plans(config, merged, now, validation=validation)
-                          if config["start_time"] <= now else _future_plan(config, now))
+                          if config["start_time"] <= now else future_plan_snapshot(config, now))
                 result["input_reference"] = {
                     "as_of": now, "source": config["source"], "asset": config["asset"],
                     "quote": config["quote"], "data_mode": config["data_mode"],
