@@ -92,6 +92,15 @@ class AccumulationService:
             if record["payload"].get("request_hash") != request_hash:
                 raise ValueError("Idempotency key already belongs to a different request.")
             return record
+        if plan_config is not None:
+            from .plans import validate_config
+            plan_identity = validate_config(plan_config)
+            if plan_identity["asset"] != asset or plan_identity["data_mode"] != self.mode:
+                raise ValueError("An issued plan must match the assessment asset and data mode.")
+            if ((source is not None and source != plan_identity["source"])
+                    or (quote is not None and quote != plan_identity["quote"])):
+                raise ValueError("An issued plan must match the assessment source and native quote.")
+            source, quote = plan_identity["source"], plan_identity["quote"]
         captured = self.capture(asset, source, quote, issued if as_of is None else as_of)
         context = market_context(list(captured.candles), captured.as_of)
         windows = analyze_windows(list(captured.candles), captured.as_of, issued_at=issued,
@@ -227,9 +236,9 @@ class AccumulationService:
         from .vigilance import assess_vigilance
 
         captured = self.capture(asset, source, quote, as_of)
-        rules = {"price_max_age": self.settings.market_interval * 2,
-                 "liquidity_max_age": self.settings.liquidity_interval * 2,
-                 "derivatives_max_age": self.settings.market_interval * 2, **(policy or {})}
+        rules = {"price_max_age": min(7200, self.settings.market_interval * 2),
+                 "liquidity_max_age": min(3600, self.settings.liquidity_interval * 2),
+                 "derivatives_max_age": min(86400, self.settings.market_interval * 2), **(policy or {})}
         result = assess_vigilance(list(captured.candles), list(captured.observations),
                                   captured.as_of, horizon_hours, rules)
         return {**result, "input_reference": captured.reference}

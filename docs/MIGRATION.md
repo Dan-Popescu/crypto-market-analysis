@@ -32,6 +32,20 @@ public deployment, account connection or new analytical feature.
 
 ## Existing local data and clients
 
+SQLite market tables remain in place. Schema version 2 recomputes only observation
+identity dimensions, preserving payloads, first-seen times and revisions. Contract
+size, settlement, market type and funding conventions remain distinct. Equivalent
+explicit funding-period aliases normalize to seconds; conflicts remain unknown.
+New calendar/import and journal tables are additive. Use SQLite's backup API for
+a consistent backup before updating an existing database.
+
+Issued evidence uses a lossless `zlib+base64` envelope with a SHA256 checksum and
+a 32 MiB uncompressed limit. `restore_evidence` also accepts early raw envelopes.
+Plan inputs reuse captured candles and retain additional versions only once.
+Later plan outcomes pin original evidence and use first-observed fully
+post-issuance candles; a straddling hour remains excluded. No original assessment
+is rewritten. MCP returns evidence counts/hashes rather than the archive body.
+
 Keep local databases and settings in place. Consumers that previously compared
 French direction values must update those comparisons for schema `2.0`.
 Retain the distinction between legacy input compatibility and canonical output:

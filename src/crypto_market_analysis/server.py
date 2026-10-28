@@ -212,7 +212,8 @@ def create_server(
         evidence = original.pop("evidence", {})
         outcomes = engine.assessment_outcomes(assessment_id)
         return {**original, "evidence_summary": {"available_locally": True,
-                "candles": len(evidence.get("candles", [])), "observations": len(evidence.get("observations", [])),
+                "candles": evidence.get("candles_count", len(evidence.get("candles", []))),
+                "observations": evidence.get("observations_count", len(evidence.get("observations", []))),
                 "content_hash": original["content_hash"]},
                 "outcomes": outcomes[-20:], "outcomes_truncated": len(outcomes) > 20}
 

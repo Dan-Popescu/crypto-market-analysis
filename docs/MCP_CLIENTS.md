@@ -64,11 +64,12 @@ All registered tools declare read-only behavior. Chart rendering uses temporary 
 | `get_assessment` | Read a previously issued immutable assessment and appended outcomes by `assessment_id`. |
 | `get_vigilance` | Read-only 4/8-hour observed fragility with reasons, contradictions, missing coverage and expiry. |
 | `get_source_status` | Collection failures, configured venues, freshness and entity-specific unknowns. |
+| `get_source_catalog` | Documented endpoint capabilities, rights limitations and dated French entity evidence; no live availability claim. |
 | `get_forecast`, `get_evaluation` | Existing experimental 1–60-day historical frequencies and chronological evaluation. |
 | `get_metric_history`, `explain_metric` | Bounded sourced observations and interpretation definitions. |
 | `render_chart` | Native MCP image for existing charts or `context`, `windows` and `plans`. |
 
-Arguments are bounded: up to 16 lookbacks, 16 purchase horizons, 12 decline thresholds and 24 evaluation origins. Plan/policy inputs must be finite JSON objects within documented limits. No arbitrary SQL, code execution or unrestricted file path interface is exposed. The endpoint/rights catalogue is available through CLI `sources`; no MCP catalogue operation is implied beyond registered tools.
+Arguments are bounded: up to 16 lookbacks, 16 purchase horizons, 12 decline thresholds and 24 evaluation origins. Plan/policy inputs must be finite JSON objects within documented limits. No arbitrary SQL, code execution or unrestricted file path interface is exposed. The endpoint/rights catalogue is available through CLI `sources` and MCP `get_source_catalog`. Assessment lookups summarize frozen evidence and return at most 20 appended outcomes; full evidence stays in the local journal.
 
 An assistant request can be: “Compare regular, split and deferred BTC purchases using this synthetic EUR plan. Start with coverage and the same as-of time. Show holdings plus reserve at 90 and 180 days, underperformance and waiting costs. Distinguish observations, assumed fills and insufficient evidence. Explain contradictory context and never invent a calibrated probability.”
 

@@ -30,7 +30,7 @@ uv run crypto-market-analysis chart --data-dir data/demo-docs --mode demo --asse
 
 ## Context and event definitions
 
-Context defaults to 7, 21, 30, 60, 90, 180, 365 and 730 days. Measures use complete UTC days with explicit required/observed coverage; missing history does not silently become a shorter lookback. Weeks run Monday–Sunday UTC. Completed months and quarters use calendar boundaries. Price ranks and historical drawdowns describe observed history; a low rank is not proof of undervaluation.
+Context defaults to 7, 21, 30, 60, 90, 180, 365 and 730 days. Measures use complete UTC days with explicit required/observed coverage; missing history does not silently become a shorter lookback. Weeks run Monday–Sunday UTC. Completed months use calendar boundaries. Price ranks and historical drawdowns describe observed history; a low rank is not proof of undervaluation.
 
 Purchase windows default to 1, 3, 7 and 14 days and declines of 2%, 5% and 10% from the recorded issuance anchor. Endpoint change, any below-anchor threshold touch and calendar-red close are distinct events. Resolution excludes pre-issuance extremes; partial bars, missing coverage and unknown barrier ordering remain pending, ambiguous or unavailable. A touch is not an executable fill, and hourly observations do not establish an exact minute of crossing.
 
