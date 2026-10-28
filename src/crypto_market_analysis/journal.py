@@ -11,7 +11,10 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import sqlite3
 import time
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from .storage import Store
@@ -95,11 +98,23 @@ def _provenance(payload: dict) -> dict:
     }
 
 
-class AssessmentJournal:
-    """Local write boundary; lookup/calculation adapters must not issue implicitly."""
+@dataclass(frozen=True)
+class JournalSelection:
+    """One bounded, evidence-free read snapshot for prospective calculation."""
 
-    def __init__(self, store: Store):
+    as_of: int
+    records: list[dict]
+    outcomes: dict[str, list[dict]]
+    selection: dict
+
+
+class AssessmentJournal:
+    """Own immutable issuance, append-only outcomes and their SQLite read lifecycle."""
+
+    def __init__(self, store: Store, *, initialize: bool = True):
         self.store = store
+        if not initialize:
+            return
         with store.connection() as con:
             con.executescript("""
                 CREATE TABLE IF NOT EXISTS assessment_journal (
@@ -121,6 +136,79 @@ class AssessmentJournal:
                 CREATE TRIGGER IF NOT EXISTS assessment_outcomes_no_delete
                 BEFORE DELETE ON assessment_outcomes BEGIN SELECT RAISE(ABORT,'Append-only outcome'); END;
             """)
+
+    @classmethod
+    def open_existing(cls, store: Store) -> AssessmentJournal:
+        """Access existing records without creating a database, schema or guards."""
+        return cls(store, initialize=False)
+
+    @contextmanager
+    def _read_connection(self):
+        if not self.store.path.is_file():
+            yield None
+            return
+        # mode=ro also prevents SQLite from creating a file if it disappears
+        # between the existence check and opening the connection.
+        con = sqlite3.connect(self.store.path.as_uri() + "?mode=ro", uri=True, timeout=15)
+        con.row_factory = sqlite3.Row
+        try:
+            con.execute("BEGIN")
+            exists = con.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='assessment_journal'"
+            ).fetchone()
+            yield con if exists else None
+        finally:
+            con.close()
+
+    def original_for_request(self, idempotency_key: str, request_hash: str) -> dict | None:
+        """Recover the complete immutable original, or reject a reused request key."""
+        key = _key(idempotency_key, "Idempotency key")
+        with self._read_connection() as con:
+            row = con.execute(
+                "SELECT record FROM assessment_journal WHERE idempotency_key=?", (key,)
+            ).fetchone() if con is not None else None
+        if row is None:
+            return None
+        original = json.loads(row["record"])
+        if original["payload"].get("request_hash") != request_hash:
+            raise ValueError("Idempotency key already belongs to a different request.")
+        return original
+
+    def summary_inputs(self, as_of: int | None = None, limit: int = 20) -> JournalSelection:
+        """Read originals and bounded outcomes at one cutoff in one SQLite snapshot.
+
+        Evidence is removed inside SQLite before records cross this boundary.
+        Legacy originals without availability metadata remain unverifiable in the
+        prospective reducer; summary reads never restore their evidence archives.
+        """
+        now = int(time.time()) if as_of is None else as_of
+        if type(now) is not int or now < 0 or type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("Use a nonnegative UTC cutoff and a journal limit from 1 through 100.")
+        records, outcomes, truncated, total = [], {}, [], 0
+        with self._read_connection() as con:
+            if con is not None:
+                total = con.execute(
+                    "SELECT COUNT(*) FROM assessment_journal WHERE issued_at<=?", (now,)
+                ).fetchone()[0]
+                rows = con.execute(
+                    "SELECT json_remove(record,'$.evidence') FROM assessment_journal WHERE issued_at<=? "
+                    "ORDER BY issued_at DESC,assessment_id LIMIT ?", (now, limit)
+                ).fetchall()
+                records = [json.loads(row[0]) for row in rows]
+                for record in records:
+                    identity = record["assessment_id"]
+                    values = con.execute(
+                        "SELECT record FROM assessment_outcomes WHERE assessment_id=? "
+                        "AND json_extract(record,'$.observed_at')<=? ORDER BY sequence LIMIT 257",
+                        (identity, now),
+                    ).fetchall()
+                    outcomes[identity] = [json.loads(row[0]) for row in values[:256]]
+                    if len(values) > 256:
+                        truncated.append(identity)
+        selection = {"scope": "most_recent_issuances_at_or_before_cutoff", "limit": limit,
+                     "available_records": total, "records_truncated": total > limit,
+                     "outcome_limit_per_record": 256, "outcomes_truncated": truncated}
+        return JournalSelection(now, records, outcomes, selection)
 
     def issue(
         self, idempotency_key: str, payload: dict, evidence: dict, issued_at: int | None = None
@@ -159,7 +247,9 @@ class AssessmentJournal:
 
     def get(self, assessment_id: str) -> dict:
         identity = _key(assessment_id, "Assessment ID")
-        with self.store.connection() as con:
+        with self._read_connection() as con:
+            if con is None:
+                raise KeyError("Assessment not found; no analyses have been issued.")
             row = con.execute(
                 "SELECT record FROM assessment_journal WHERE assessment_id=?", (identity,)
             ).fetchone()
@@ -170,7 +260,9 @@ class AssessmentJournal:
     def list(self, limit: int = 20) -> list[dict]:
         if type(limit) is not int or not 1 <= limit <= 1000:
             raise ValueError("Limit must be an integer from 1 through 1000.")
-        with self.store.connection() as con:
+        with self._read_connection() as con:
+            if con is None:
+                return []
             rows = con.execute(
                 "SELECT record FROM assessment_journal ORDER BY issued_at DESC,assessment_id LIMIT ?", (limit,)
             ).fetchall()
@@ -215,8 +307,13 @@ class AssessmentJournal:
 
     def outcomes(self, assessment_id: str) -> list[dict]:
         identity = _key(assessment_id, "Assessment ID")
-        self.get(identity)
-        with self.store.connection() as con:
+        with self._read_connection() as con:
+            if con is None:
+                raise KeyError("Assessment not found; no analyses have been issued.")
+            if con.execute(
+                "SELECT 1 FROM assessment_journal WHERE assessment_id=?", (identity,)
+            ).fetchone() is None:
+                raise KeyError("Assessment not found.")
             rows = con.execute(
                 "SELECT record FROM assessment_outcomes WHERE assessment_id=? ORDER BY sequence", (identity,)
             ).fetchall()

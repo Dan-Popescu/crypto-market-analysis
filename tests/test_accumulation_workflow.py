@@ -1,5 +1,7 @@
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, local
 
 import pytest
 
@@ -58,6 +60,39 @@ def test_actual_issuance_retries_and_outcomes_preserve_original(market):
     assert len(outcome["payload"]["windows"]) == 12
     assert engine.assessment(first["assessment_id"]) == first
     assert len(engine.assessment_outcomes(first["assessment_id"])) == 1
+
+
+def test_concurrent_engine_issuance_recovers_complete_original_after_capture_race(market, monkeypatch):
+    engine, _, end = market
+    ready = Barrier(2)
+    clock = local()
+
+    class RacingEngine(Engine):
+        def capture_inputs(self, *args, **kwargs):
+            captured = super().capture_inputs(*args, **kwargs)
+            ready.wait(timeout=30)
+            return captured
+
+    racing = RacingEngine(engine.settings, "demo")
+    racing.dataset_lineage = {"name": "original-market"}
+    monkeypatch.setattr("crypto_market_analysis.application.time.time", lambda: clock.now)
+
+    def issue(now):
+        clock.now = now
+        return racing.issue_assessment("racing-request", "BTC", "fixture", "EUR")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(issue, (end + 1, end + 2)))
+    assert results[0] == results[1]
+    original = results[0]
+    assert original["evidence"]
+    assert original["payload"]["input_reference"]["dataset_lineage"] == {"name": "original-market"}
+    clock.now = end + DAY
+    engine.dataset_lineage = {"name": "changed-market"}
+    retry = engine.issue_assessment("racing-request", "BTC", "fixture", "EUR")
+    assert retry == original
+    assert engine.assessment(original["assessment_id"]) == original
+    assert engine.journal_summary()["assessment_count"] == 1
 
 
 def test_readonly_calculations_do_not_create_journal_or_watch_tables(market):

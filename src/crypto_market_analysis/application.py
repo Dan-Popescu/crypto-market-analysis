@@ -109,28 +109,9 @@ class AccumulationService:
     def journal_summary(self, as_of=None, limit=20):
         from .prospective import summarize_journal
 
-        now = int(time.time()) if as_of is None else as_of
-        if type(now) is not int or now < 0 or type(limit) is not int or not 1 <= limit <= 100:
-            raise ValueError("Use a nonnegative UTC cutoff and a journal limit from 1 through 100.")
-        with self.store.connection() as con:
-            con.execute("BEGIN")
-            exists = con.execute("SELECT 1 FROM sqlite_master WHERE name='assessment_journal'").fetchone()
-            total = con.execute("SELECT COUNT(*) FROM assessment_journal WHERE issued_at<=?", (now,)).fetchone()[0] if exists else 0
-            rows = con.execute("SELECT json_remove(record,'$.evidence') FROM assessment_journal WHERE issued_at<=? ORDER BY issued_at DESC,assessment_id LIMIT ?",
-                               (now, limit)).fetchall() if exists else []
-            records = [json.loads(row[0]) for row in rows]
-            outcomes, truncated = {}, []
-            for record in records:
-                identity = record["assessment_id"]
-                values = con.execute("SELECT record FROM assessment_outcomes WHERE assessment_id=? AND json_extract(record,'$.observed_at')<=? ORDER BY sequence LIMIT 257",
-                                     (identity, now)).fetchall()
-                outcomes[identity] = [json.loads(row[0]) for row in values[:256]]
-                if len(values) > 256:
-                    truncated.append(identity)
-        return {**summarize_journal(records, outcomes, now),
-                "selection": {"scope": "most_recent_issuances_at_or_before_cutoff", "limit": limit,
-                              "available_records": total, "records_truncated": total > limit,
-                              "outcome_limit_per_record": 256, "outcomes_truncated": truncated}}
+        inputs = self._journal(read=True).summary_inputs(as_of, limit)
+        return {**summarize_journal(inputs.records, inputs.outcomes, inputs.as_of),
+                "selection": inputs.selection}
 
     def evaluate_plans(self, config, as_of=None, origins=None, validation="known_at",
                        held_out_start=None, policy_frozen_at=None):
@@ -144,11 +125,7 @@ class AccumulationService:
     def _journal(self, *, read=False):
         from .journal import AssessmentJournal
 
-        if read:
-            with self.store.connection() as con:
-                if con.execute("SELECT 1 FROM sqlite_master WHERE name='assessment_journal'").fetchone() is None:
-                    raise KeyError("Assessment not found; no analyses have been issued.")
-        return AssessmentJournal(self.store)
+        return AssessmentJournal.open_existing(self.store) if read else AssessmentJournal(self.store)
 
     def issue_assessment(self, idempotency_key, asset="BTC", source=None, quote=None,
                          as_of=None, plan_config=None):
@@ -163,14 +140,9 @@ class AccumulationService:
         request_hash = content_hash(request)
         journal = self._journal()
         # Return the original on a retry, even if collection or wall time changed.
-        with self.store.connection() as con:
-            prior = con.execute("SELECT record FROM assessment_journal WHERE idempotency_key=?",
-                                (idempotency_key,)).fetchone()
-        if prior:
-            record = json.loads(prior[0])
-            if record["payload"].get("request_hash") != request_hash:
-                raise ValueError("Idempotency key already belongs to a different request.")
-            return record
+        original = journal.original_for_request(idempotency_key, request_hash)
+        if original is not None:
+            return original
         if plan_config is not None:
             from .plans import validate_config
             plan_identity = validate_config(plan_config)
@@ -209,13 +181,9 @@ class AccumulationService:
         try:
             return journal.issue(idempotency_key, payload, evidence, issued)
         except ValueError:
-            with self.store.connection() as con:
-                prior = con.execute("SELECT record FROM assessment_journal WHERE idempotency_key=?",
-                                    (idempotency_key,)).fetchone()
-            if prior:
-                original = json.loads(prior[0])
-                if original["payload"].get("request_hash") == request_hash:
-                    return original
+            original = journal.original_for_request(idempotency_key, request_hash)
+            if original is not None:
+                return original
             raise
 
     def assessment(self, assessment_id):
