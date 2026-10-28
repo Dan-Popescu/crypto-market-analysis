@@ -1,5 +1,5 @@
 {
-  "method": "régimes historiques voisins, expérimental",
+  "method": "neighboring historical regimes, experimental",
   "bar_alignment": "rolling_24h_at_last_hourly_close",
   "stale": false,
   "as_of": "2026-10-28T18:07:44+00:00",
@@ -249,16 +249,16 @@
       "insufficient_reason": null
     }
   },
-  "edge": "non évalué",
+  "edge": "not evaluated",
   "limitations": [
-    "Estimations expérimentales, non calibrées ; aucun avantage démontré.",
-    "Red, up et flat comparent la clôture finale à la clôture initiale ; ce ne sont pas des couleurs de bougies calendaires.",
-    "Les horizons partent de la dernière clôture horaire affichée. Les événements de barrière utilisent les extrêmes de périodes de 24 heures ; leur ordre est inconnu.",
-    "Les variables macro et réseau sont exclues faute de données historiques disponibles au bon moment.",
-    "Les fenêtres avec jours manquants sont exclues.",
-    "Les intervalles de Wilson décrivent les fréquences voisines sous hypothèse d’indépendance ; ils ne prouvent pas une calibration.",
-    "Les prix historiques disponibles peuvent comprendre des révisions ou remblayages inconnus à l’époque.",
-    "Données de démonstration synthétiques."
+    "Experimental, uncalibrated estimates; no demonstrated advantage.",
+    "Red, up and flat compare the final close with the initial close; they are not calendar-candle colors.",
+    "Horizons start at the latest displayed hourly close. Barrier events use extremes of 24-hour periods; their order is unknown.",
+    "Macro and network features are excluded because historical data available at the required time is missing.",
+    "Windows with missing days are excluded.",
+    "Wilson intervals describe neighboring frequencies under an independence assumption; they do not prove calibration.",
+    "Available historical prices may include revisions or backfills unknown at the time.",
+    "Synthetic demonstration data."
   ],
   "asset": "BTC",
   "selected_market": {

@@ -1,57 +1,55 @@
-# Import du prototype — 28 octobre 2026
+# Prototype import — October 28, 2026
 
-## Origine et portée
+## Origin and scope
 
-Source : archive `crypto-observer-v0.1.0.zip` fournie par Dan.
-Le nom du projet, du paquet Python et de la commande devient Crypto Market
-Analysis, `crypto_market_analysis` et `crypto-market-analysis`.
-Les références de documentation, tests, configuration MCP, Docker et verrou des
-dépendances suivent ce renommage. Les noms de configuration `OBSERVER_*`,
-`observer.toml`, `observer.sqlite` et le scope `observer:read` restent identiques.
+Source: `crypto-observer-v0.1.0.zip`, supplied by Dan.
+The project, Python package and command are renamed to Crypto Market
+Analysis, `crypto_market_analysis` and `crypto-market-analysis`.
+Documentation references, tests, MCP configuration, Docker files and the
+dependency lockfile follow this rename. The configuration names `OBSERVER_*`,
+`observer.toml`, `observer.sqlite` and the `observer:read` scope remain unchanged.
 
-Cette passe prépare le dépôt et son développement local ou dans le cloud.
-Les calculs de marché et les prévisions du prototype restent inchangés.
-Les fonctionnalités expérimentales existantes conservent leurs limites.
+This pass prepares the repository for local and cloud development.
+The prototype's market calculations and forecasts remain unchanged.
+Existing experimental features retain their limitations.
 
-## Vérifications de l'import
+## Import checks
 
-Vérifications exécutées le 28 octobre 2026 sur Windows avec Python 3.12.3,
-dans un environnement isolé contenant les dépendances verrouillées :
+Checks independently executed on October 28, 2026 on Windows with Python 3.12.3,
+in an isolated environment containing the locked dependencies:
 
-- `uv run --frozen python tools/check.py` : réussite.
-- `uv lock --check --offline` : verrou cohérent.
-- Ruff sur `src`, `tests` et `tools` : aucune erreur.
-- Suite complète : **71 tests réussis** en 20,79 secondes.
-- Protocoles MCP local STDIO et HTTP, et retour d'image native : inclus dans les tests.
-- `uv build --wheel --offline` : distribution renommée construite.
+- `uv run --frozen python tools/check.py`: passed.
+- `uv lock --check --offline`: lockfile consistent.
+- Ruff over `src`, `tests` and `tools`: no errors.
+- Complete suite: **71 tests passed** in 20.79 seconds.
+- Local STDIO and HTTP MCP protocols, and native image responses: included in the tests.
+- `uv build --wheel --offline`: renamed distribution built.
 
-Le premier essai des tests MCP dans l'environnement restreint ne s'est pas
-terminé ; il a été interrompu. La suite complète a ensuite réussi avec l'accès
-nécessaire aux processus et connexions locales. Aucun changement du code MCP
-n'a été nécessaire.
+The first MCP test attempt in the restricted environment did not finish and
+was interrupted. The complete suite then passed with the required access to
+local processes and connections. No MCP code change was necessary.
 
-Aucune collecte publique, connexion de compte IA, intégration Ledgerly ou
-installation Docker n'a été effectuée pendant cet import. Leur fonctionnement
-réel n'est donc pas validé par cette passe.
+No public collection, AI account connection, Ledgerly integration or Docker
+installation was performed during this import. This pass therefore does not
+validate their real-world operation.
 
-## Contenu du dépôt
+## Repository contents
 
-Le dépôt conserve le code, les tests, la documentation et les exemples
-synthétiques. Les sept rapports et graphiques réels du ZIP, le wheel fourni,
-les bases et les environnements Python sont exclus du versionnement.
-Le compte rendu de validation de l'auteur reste séparé dans VALIDATION.md.
+The repository retains code, tests, documentation and synthetic examples.
+The seven real-market reports and charts from the ZIP, the supplied wheel,
+databases and Python environments are excluded from version control.
+The original author's validation report remains separate in [VALIDATION.md](VALIDATION.md).
 
-Le dépôt a été initialisé en privé. Le 28 octobre 2026, Dan a ensuite choisi
-un dépôt public pour faciliter les essais de pipeline et les vérifications
-sur GitHub lorsqu'elles seront utiles. GitHub Actions reste désactivé à cette
-étape ; aucun workflow n'est ajouté par ce changement de visibilité.
-Une commande commune de vérification est fournie pour le PC et Codex cloud ;
-ses résultats doivent être consignés avant chaque fusion.
+The repository was initially private. On October 28, 2026, Dan then chose a
+public repository to facilitate pipeline trials and GitHub checks when useful.
+GitHub Actions remains disabled at this stage; this visibility change adds no
+workflow. A shared verification command is provided for PCs and Codex cloud;
+its results must be recorded before every merge.
 
-## Limite déjà observée
+## Previously observed limitation
 
-Le marqueur de fraîcheur de chaque mesure de liquidité utilise le rythme
-général du marché, et peut présenter comme fraîche une mesure vieille de
-30 minutes alors que la collecte de liquidité est prévue toutes les cinq
-minutes. Ce point a été reproduit pendant la lecture du prototype ; il reste
-à corriger dans une tâche distincte. L'import ne modifie pas ce calcul.
+The freshness marker for each liquidity measurement uses the general market
+cadence and can display a 30-minute-old measurement as fresh even though
+liquidity collection is scheduled every five minutes. This was reproduced
+while inspecting the prototype; a separate task must correct it. The import
+does not change this calculation.
