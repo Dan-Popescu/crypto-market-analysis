@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from dataclasses import replace
+from decimal import Decimal
 
 import pytest
 
@@ -189,3 +190,43 @@ def test_usd_is_a_separate_native_market_without_conversion():
     assert result["current_observed"]["anchor"]["price"] == "200"
     target = result["hypothetical_policy"]["next_tranche"]["families"]["deferred"]["allocations"][0]
     assert target["target_price"] == "190"
+
+
+def test_waiting_immediate_cash_does_not_consume_the_dip_target_cap():
+    config = plan(plans={"split": {"max_deferred_reserve_quote": "100"}})
+    config["schedule"].append({"time": 7200, "amount": "100"})
+    config["contributions"][0]["amount"] = "200"
+    result = build_accumulation_brief(capture(5400), config)
+    policy = result["hypothetical_policy"]
+    current = policy["current_simulation"]["plans"]["split"]
+    assert current["unallocated_reserve"] == "100"
+    assert current["locked_reserve"] == "100"
+    assert sorted(row["target"] or "immediate" for row in current["waiting_targets"]) == ["95", "immediate"]
+    split = policy["next_tranche"]["families"]["split"]
+    target = next(row for row in split["allocations"] if row["decline"] is not None)
+    assert target["locked_cash"] == "50"
+    assert target["cap_overflow_immediate_cash"] == "0"
+    assert split["target_locked_cash_before"] == "50"
+    assert split["target_locked_cash_after"] == "100"
+    assert split["locked_cash_after"] == "200"
+    assert Decimal(split["free_cash_after"]) + Decimal(split["locked_cash_after"]) == Decimal(current["reserve"])
+    assert current["reserve"] == "200"
+
+
+def test_brief_reuses_execution_coverage_after_all_intents_resolve():
+    config = plan(plans={"split": {"fallback": "reserve"},
+                         "deferred": {"fraction": "1", "fallback": "reserve"}})
+    terminal = 3600 + 90 * 86400
+    bars = [replace(capture().candles[0], open_time=t, close_time=t + 3600, observed_at=t + 3600)
+            for t in range(0, 8 * 86400, 3600)]
+    bars.append(replace(capture().candles[0], open_time=terminal - 3600,
+                        close_time=terminal, observed_at=terminal))
+    result = build_accumulation_brief(capture(terminal, bars), config)
+    outcome = result["historical_outcomes"]["90"]
+    assert outcome["status"] == "complete"
+    assert outcome["path_coverage"]["complete"]
+    assert outcome["comparisons"]["deferred"]["terminal_wealth_difference"] == "0"
+    for family, path in outcome["path_coverage"]["execution_paths"].items():
+        terminal_coverage = result["hypothetical_policy"]["current_simulation"]["plans"][family]["terminals"]["90"]["execution_coverage"]
+        assert path == terminal_coverage
+        assert path["qualified"]

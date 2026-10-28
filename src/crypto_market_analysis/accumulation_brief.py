@@ -7,7 +7,7 @@ from decimal import Decimal, localcontext
 from .context import _eligible_candles, _timestamp, market_context
 from .evidence import CapturedInputs
 from .plan_builder import allocation_specs, preview_plan_funding, required_cash
-from .plans import DAY, ZERO, _market_bars, compare_plans, decimal_string, validate_config
+from .plans import DAY, ZERO, compare_plans, decimal_string, validate_config
 from .purchase_windows import analyze_windows
 
 _FAMILIES = ("regular", "split", "deferred")
@@ -39,6 +39,9 @@ def _next_tranche(config, candles, as_of, current, anchor):
         current_left, future_left = current_cash, future
         policy = config["plans"].get(family)
         locked = Decimal(simulated["locked_reserve"]) if simulated else ZERO
+        target_locked = sum((Decimal(row["allocated_cash"]) for row in simulated["waiting_targets"]
+                             if row["target"] is not None), ZERO) if simulated else ZERO
+        target_locked_before = target_locked
         allocations = []
         # Preserve separate same-timestamp orders: their fixed fees do not merge.
         for tranche in (row for row in upcoming if row["time"] == time):
@@ -52,8 +55,9 @@ def _next_tranche(config, candles, as_of, current, anchor):
                 allocated = funded_now + funded_future
                 target_cash = allocated if decline is not None else ZERO
                 if target_cash and policy["max_deferred_reserve_quote"] is not None:
-                    target_cash = min(target_cash, max(ZERO, Decimal(policy["max_deferred_reserve_quote"]) - locked))
-                locked += target_cash
+                    target_cash = min(target_cash, max(ZERO, Decimal(policy["max_deferred_reserve_quote"]) - target_locked))
+                target_locked += target_cash
+                locked += allocated
                 within_tolerance = (time > as_of or (anchor["age_seconds"] is not None
                                      and anchor["age_seconds"] <= config["execution"]["max_price_age_seconds"]))
                 target = (Decimal(anchor["price"]) * (1 - Decimal(decline))
@@ -83,6 +87,8 @@ def _next_tranche(config, candles, as_of, current, anchor):
             "deferred_notional": decimal_string(sum((Decimal(row["requested_notional"]) for row in allocations if row["decline"] is not None), ZERO)),
             "allocations": allocations, "free_cash_after": decimal_string(current_left + future_left),
             "locked_cash_after": decimal_string(locked),
+            "target_locked_cash_before": decimal_string(target_locked_before),
+            "target_locked_cash_after": decimal_string(target_locked),
             "funding_shortfall": any(row["funding_shortfall"] for row in allocations)}
     return {"time": time, "requested_notional": decimal_string(amount), "families": families,
             "future_contributions_before_activation": decimal_string(future),
@@ -90,10 +96,8 @@ def _next_tranche(config, candles, as_of, current, anchor):
             "future_anchor_unknown": time > as_of}
 
 
-def _historical_outcomes(config, candles, as_of, current, reference):
+def _historical_outcomes(config, as_of, current, reference):
     outcomes = {}
-    bars = _market_bars(config, candles, as_of, "retrospective")
-    duration = 3600 if config["execution"]["timeframe"] == "1h" else DAY
     for days in (90, 180):
         time = config["start_time"] + days * DAY
         outcome = {"time": time, "input_reference": reference}
@@ -102,14 +106,8 @@ def _historical_outcomes(config, candles, as_of, current, reference):
             continue
         terminals = {family: current["plans"][family]["terminals"][str(days)] for family in _FAMILIES}
         baseline = terminals["regular"]
-        first_open = (config["start_time"] + duration - 1) // duration * duration
-        expected = set(range(first_open, time - duration + 1, duration))
-        observed = {bar.open_time for bar in bars if first_open <= bar.open_time and bar.close_time <= time}
-        activations = [row["time"] for row in config["schedule"] if row["time"] < time]
-        anchors_available = all(any(bar.close_time <= activation
-            and activation - bar.close_time <= config["execution"]["max_price_age_seconds"]
-            for bar in bars) for activation in activations)
-        path_complete = bool(expected) and expected <= observed and anchors_available
+        paths = {family: terminal["execution_coverage"] for family, terminal in terminals.items()}
+        path_complete = all(path["qualified"] for path in paths.values())
         paired = (all(row["status"] == "complete" for row in terminals.values())
                   and len({(row["price"], row["contributions"]) for row in terminals.values()}) == 1)
         comparisons = {}
@@ -122,8 +120,8 @@ def _historical_outcomes(config, candles, as_of, current, reference):
         outcomes[str(days)] = {**outcome, "status": "complete" if paired and path_complete else "insufficient",
             "reason": None if paired and path_complete else "execution_path_incomplete" if paired else "terminal_price_unavailable",
             "plans": terminals, "comparisons": comparisons,
-            "path_coverage": {"required_bars": len(expected), "observed_bars": len(expected & observed),
-                              "activation_anchors_available": anchors_available, "complete": path_complete},
+            "path_coverage": {"complete": path_complete, "execution_paths": paths,
+                              "reasons": sorted({reason for path in paths.values() for reason in path["reasons"]})},
             "interpretation": "Retrospective configured-cost simulation; not actual holdings, prospective evidence or demonstrated performance."}
     return outcomes
 
@@ -173,7 +171,7 @@ def build_accumulation_brief(captured: CapturedInputs, plan_config: dict | None 
         with localcontext() as ctx:
             ctx.prec = 180
             next_tranche = _next_tranche(config, candles, captured.as_of, current, anchor)
-            outcomes = _historical_outcomes(config, candles, captured.as_of, current, reference)
+            outcomes = _historical_outcomes(config, captured.as_of, current, reference)
         policy = {"status": "declared", "input_reference": reference, "config": config,
                   "funding_preview": preview_plan_funding(config, captured.as_of),
                   "next_tranche": next_tranche, "current_simulation": current,
