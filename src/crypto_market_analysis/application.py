@@ -157,6 +157,69 @@ class AccumulationService:
                                                   int(horizon), float(threshold), now))
         outcome = {"as_of": now, "input_reference": {**reference, "content_hash": content_hash(rows)},
                    "windows": results, "status": "observed" if results else "insufficient"}
+        frozen_plan = payload.get("plan")
+        if frozen_plan is not None:
+            from .evidence import restore_evidence
+            from .models import Candle
+            from .plans import RULE_VERSION, compare_plans
+
+            config = frozen_plan["config"]
+            validation = frozen_plan.get("validation_mode", "retrospective")
+            if frozen_plan.get("rule_version") != RULE_VERSION:
+                outcome["plan"] = {"status": "unsupported", "reason": "frozen_plan_rule_version_unavailable",
+                                   "rule_version": frozen_plan.get("rule_version"), "config": config}
+            else:
+                evidence = restore_evidence(original["evidence"])
+                identity = (config["source"], config["asset"], config["quote"], config["data_mode"])
+
+                def matches(row):
+                    return (row.source, row.asset, row.quote, row.data_mode) == identity
+
+                # Only the original consumed vintages may describe pre-issuance
+                # decisions. Store retention or subsequent revisions cannot replace them.
+                pinned = {}
+                for item in evidence.get("candles", []) + evidence.get("plan_candle_versions", []):
+                    row = Candle(**item)
+                    if matches(row):
+                        pinned[content_hash(item)] = row
+                future_rows = self.store.candles(config["asset"], config["source"], config["quote"], now,
+                                                 config["data_mode"], versions=True)
+                future = {}
+                excluded_boundary = 0
+                for row in future_rows:
+                    if row.open_time < original["issued_at"]:
+                        excluded_boundary += row.close_time > original["issued_at"]
+                        continue
+                    # First observed future vintages remain stable across repeated
+                    # observations; a later revision cannot rewrite a simulated step.
+                    key = (row.timeframe, row.open_time)
+                    prior = future.get(key)
+                    if prior is None or row.observed_at < prior.observed_at:
+                        future[key] = row
+                frozen_rows = sorted(pinned.values(), key=lambda row: (row.open_time, row.observed_at))
+                added_rows = sorted(future.values(), key=lambda row: (row.open_time, row.observed_at))
+                merged = frozen_rows + added_rows
+                result = compare_plans(config, merged, now, validation=validation)
+                result["input_reference"] = {
+                    "as_of": now, "source": config["source"], "asset": config["asset"],
+                    "quote": config["quote"], "data_mode": config["data_mode"],
+                    "configuration_hash": content_hash(config), "content_hash": content_hash(merged),
+                }
+                result["replay"] = {
+                    "assessment_id": assessment_id, "original_content_hash": original["content_hash"],
+                    "original_input_reference": frozen_plan.get("input_reference"),
+                    "frozen_rule_version": frozen_plan["rule_version"],
+                    "pinned_candle_versions": len(frozen_rows), "pinned_content_hash": content_hash(frozen_rows),
+                    "future_candle_versions": len(added_rows), "future_content_hash": content_hash(added_rows),
+                    "future_price_selection": "first_observed_version_fully_post_issuance",
+                    "boundary_policy": "exclude_bars_straddling_actual_issuance",
+                    "excluded_straddling_versions": excluded_boundary,
+                }
+                outcome["plan"] = result
+                if not results:
+                    complete = any(terminal["status"] == "complete" for plan in result["plans"].values()
+                                   for terminal in plan["terminals"].values())
+                    outcome["status"] = "observed" if complete else "pending"
         key = "observed-" + content_hash(outcome)
         return journal.append_outcome(assessment_id, key, outcome, now)
 
