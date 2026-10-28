@@ -29,7 +29,8 @@ def _counts():
     return dict.fromkeys(_COUNTS, 0)
 
 
-def _chronology(record):
+def assessment_chronology(record):
+    """Describe the recorded evidence clock; never infer historical availability."""
     payload = record["payload"]
     reference = payload.get("input_reference", {})
     issued = record["issued_at"]
@@ -58,7 +59,12 @@ def _chronology(record):
             else "unverified" if exclusions else "prospective", "exclusions": exclusions}
 
 
-def _eligible_outcomes(record, outcomes, as_of):
+def select_outcomes(record, outcomes, as_of):
+    """Select lineage-matching appends by observed time, then content hash.
+
+    Callers supply bounded journal projections. This is observation chronology,
+    not insertion order; later observed revisions cannot replace a first result.
+    """
     reference = record["payload"].get("input_reference", {})
     eligible = []
     rejected = []
@@ -169,11 +175,11 @@ def summarize_journal(records: list[dict], outcomes_by_id: dict[str, list[dict]]
             ignored += 1
             continue
         seen.add(identity)
-        chronology = _chronology(record)
+        chronology = assessment_chronology(record)
         appended = outcomes_by_id.get(identity, [])
         if len(appended) > 256:
             truncated_outcomes[identity] = len(appended) - 256
-        outcomes, rejected = _eligible_outcomes(record, appended[:256], as_of)
+        outcomes, rejected = select_outcomes(record, appended[:256], as_of)
         payload = record["payload"]
         reference = payload.get("input_reference", {})
         protocol = payload.get("outcome_protocol", {})
