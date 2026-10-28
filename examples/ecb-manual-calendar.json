@@ -1,0 +1,28 @@
+{
+  "schema_version": "ecb-manual-calendar-v1",
+  "source_url": "https://www.ecb.europa.eu/press/calendars/mgcgc/html/index.en.html",
+  "provenance": {
+    "checked_at": 0,
+    "note": "SYNTHETIC SCHEMA EXAMPLE ONLY: these dates/times are invented, not official ECB entries. Replace them and checked_at with independently verified sourced transcription before use."
+  },
+  "events": [
+    {
+      "id": "synthetic-policy-meeting",
+      "title": "Synthetic ECB policy meeting (invented date)",
+      "event_kind": "policy_meeting",
+      "local_date": "2030-01-24",
+      "sequence": 0,
+      "status": "planned"
+    },
+    {
+      "id": "synthetic-press-conference",
+      "title": "Synthetic ECB press conference (invented time)",
+      "event_kind": "press_conference",
+      "local_date": "2030-07-25",
+      "scheduled_time": "2030-07-25T14:45:00",
+      "timezone": "Europe/Berlin",
+      "sequence": 0,
+      "status": "planned"
+    }
+  ]
+}

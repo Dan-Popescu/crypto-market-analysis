@@ -117,3 +117,130 @@ def test_cancelled_utc_cpi_entry_retains_schedule_without_publication_claim():
     assert event["original_timezone"] == "UTC"
     assert event["event_time"] == epoch("2026-07-14T12:30:00")
     assert event["publication_status"] == "unknown"
+
+
+def ecb_schedule(rows=None, **overrides):
+    import json
+
+    from crypto_market_analysis.calendars import ECB_URL
+
+    return json.dumps({
+        "schema_version": "ecb-manual-calendar-v1", "source_url": ECB_URL,
+        "provenance": {"checked_at": 100, "note": "Synthetic transcription example; not fetched."},
+        "events": rows if rows is not None else [{
+            "id": "synthetic-ecb-policy", "title": "Synthetic ECB policy meeting",
+            "event_kind": "policy_meeting", "local_date": "2026-10-29", "sequence": 0,
+        }], **overrides,
+    })
+
+
+def test_ecb_manual_date_only_has_honest_provenance_and_stable_revision_identity():
+    import json
+
+    from crypto_market_analysis.calendars import ECB_URL, parse_ecb_manual_schedule
+
+    text = ecb_schedule()
+    [event] = parse_ecb_manual_schedule(text, 200)
+    assert event["source_url"] == ECB_URL
+    assert event["origin"] == "sourced_manual_schedule"
+    assert event["time_status"] == "date_only" and event["event_time"] is None
+    assert event["publication_time"] is None and not event["publication_time_verified"]
+    assert event["historical_known_at"] == "unknown"
+    revised = json.loads(text)
+    revised["events"][0].update(sequence=1, status="cancelled")
+    [revision] = parse_ecb_manual_schedule(json.dumps(revised), 300)
+    assert revision["event_id"] == event["event_id"]
+    assert revision["data_version"] != event["data_version"]
+    assert revision["status"] == "cancelled" and revision["sequence"] == 1
+
+
+@pytest.mark.parametrize(("timestamp", "zone", "expected"), [
+    ("2026-01-22T14:45:00", "Europe/Frankfurt", "2026-01-22T13:45:00"),
+    ("2026-07-23T14:45:00", "Europe/Berlin", "2026-07-23T12:45:00"),
+    ("2026-07-23T14:45:00+02:00", None, "2026-07-23T12:45:00"),
+])
+def test_ecb_explicit_conference_schedule_respects_frankfurt_dst(timestamp, zone, expected):
+    from crypto_market_analysis.calendars import parse_ecb_manual_schedule
+
+    row = {"id": "synthetic-press", "title": "Synthetic conference", "event_kind": "press_conference",
+           "local_date": timestamp[:10], "sequence": 0, "scheduled_time": timestamp}
+    if zone:
+        row["timezone"] = zone
+    [event] = parse_ecb_manual_schedule(ecb_schedule([row]), 100)
+    assert event["event_time"] == epoch(expected)
+    assert event["event_time_verified"] and event["publication_status"] == "unknown"
+
+
+@pytest.mark.parametrize(("timestamp", "zone", "status"), [
+    ("2026-03-29T02:30:00", "Europe/Berlin", "ambiguous_local_time"),
+    ("2026-10-25T02:30:00", "Europe/Frankfurt", "ambiguous_local_time"),
+    ("2026-07-23T14:45:00", None, "unsupported_explicit_time"),
+    ("2026-07-23T14:45:00", "Europe/Paris", "unsupported_timezone"),
+    ("2026-07-23T14:45:00+01:00", "Europe/Berlin", "unsupported_explicit_time"),
+    ("2026-07-23", "Europe/Berlin", "unsupported_explicit_time"),
+])
+def test_ecb_unsupported_times_remain_explicit(timestamp, zone, status):
+    from crypto_market_analysis.calendars import parse_ecb_manual_schedule
+
+    row = {"id": "synthetic-press", "title": "Synthetic conference", "event_kind": "press_conference",
+           "local_date": timestamp[:10], "sequence": 0, "scheduled_time": timestamp}
+    if zone:
+        row["timezone"] = zone
+    [event] = parse_ecb_manual_schedule(ecb_schedule([row]), 100)
+    assert event["time_status"] == status
+    assert event["event_time"] is None and not event["event_time_verified"]
+
+
+def test_ecb_manual_validation_duplicates_revisions_and_bounds():
+    import json
+
+    from crypto_market_analysis.calendars import parse_ecb_manual_schedule
+
+    row = json.loads(ecb_schedule())["events"][0]
+    with pytest.raises(ValueError, match="Duplicate ECB"):
+        parse_ecb_manual_schedule(ecb_schedule([row, row]), 100)
+    revisions = parse_ecb_manual_schedule(ecb_schedule([row, {**row, "sequence": 1}]), 100)
+    assert len(revisions) == 2 and revisions[0]["event_id"] == revisions[1]["event_id"]
+    with pytest.raises(ValueError, match="Duplicate JSON"):
+        parse_ecb_manual_schedule('{"events":[],"events":[]}', 100)
+    with pytest.raises(ValueError, match="two-megabyte"):
+        parse_ecb_manual_schedule("x" * (2 * 1024 * 1024 + 1), 100)
+    with pytest.raises(ValueError, match="2000"):
+        parse_ecb_manual_schedule(ecb_schedule([row] * 2001), 100)
+    for payload in (
+        ecb_schedule(source_url="https://example.invalid/ecb"),
+        ecb_schedule(provenance={"checked_at": 101, "note": "future"}),
+        ecb_schedule([{**row, "publication_time": 100}]),
+        ecb_schedule([{**row, "source_last_modified": "2026-01-01T00:00:00"}]),
+    ):
+        with pytest.raises(ValueError):
+            parse_ecb_manual_schedule(payload, 100)
+    [unsupported] = parse_ecb_manual_schedule(ecb_schedule([{**row, "event_kind": "non_policy_meeting"}]), 100)
+    assert unsupported["time_status"] == "unsupported_event_kind"
+
+
+def test_ecb_shareable_example_is_explicitly_synthetic_and_sourced_manual():
+    from pathlib import Path
+
+    from crypto_market_analysis.calendars import parse_ecb_manual_schedule
+
+    text = (Path(__file__).parents[1] / "examples" / "ecb-manual-calendar.json").read_text()
+    rows = parse_ecb_manual_schedule(text, 100)
+    assert len(rows) == 2
+    assert all(row["origin"] == "sourced_manual_schedule" for row in rows)
+    assert all("SYNTHETIC" in row["provenance"]["note"] for row in rows)
+
+
+def test_ecb_revision_order_does_not_let_older_input_override_newer_revision():
+    import json
+
+    from crypto_market_analysis.calendars import parse_ecb_manual_schedule
+
+    row = json.loads(ecb_schedule())["events"][0]
+    revisions = parse_ecb_manual_schedule(ecb_schedule([
+        {**row, "sequence": 2, "status": "cancelled"}, row,
+        {**row, "sequence": 1, "source_last_modified": "1970-01-01T00:01:00Z"},
+    ]), 100)
+    assert [item["sequence"] for item in revisions] == [0, 1, 2]
+    assert revisions[-1]["status"] == "cancelled"
+    assert revisions[1]["source_last_modified"] == "1970-01-01T00:01:00Z"

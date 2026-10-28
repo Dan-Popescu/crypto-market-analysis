@@ -1,0 +1,43 @@
+{
+  "data_mode": "demo",
+  "max_age_seconds": 86400,
+  "max_endpoint_skew_seconds": 300,
+  "fx_reference": {
+    "base": "EUR",
+    "quote": "USD",
+    "value": "1.10",
+    "event_time": 1793145600,
+    "observed_at": 1793145660,
+    "source": "synthetic-reference",
+    "source_url": "https://example.invalid/synthetic-eurusd",
+    "data_version": "synthetic-fx-v1",
+    "data_mode": "demo",
+    "price_type": "indicative_reference"
+  },
+  "stablecoin_prices": [
+    {
+      "base": "USDT",
+      "quote": "EUR",
+      "value": "0.90",
+      "event_time": 1793145600,
+      "observed_at": 1793145660,
+      "source": "synthetic-spot",
+      "source_url": "https://example.invalid/synthetic-usdt-eur",
+      "data_version": "synthetic-eur-v1",
+      "data_mode": "demo",
+      "price_type": "observed_spot"
+    },
+    {
+      "base": "USDC",
+      "quote": "USD",
+      "value": "1.001",
+      "event_time": 1793145600,
+      "observed_at": 1793145660,
+      "source": "synthetic-spot",
+      "source_url": "https://example.invalid/synthetic-usdc-usd",
+      "data_version": "synthetic-usd-v1",
+      "data_mode": "demo",
+      "price_type": "observed_spot"
+    }
+  ]
+}
