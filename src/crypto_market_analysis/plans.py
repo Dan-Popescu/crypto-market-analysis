@@ -206,6 +206,83 @@ def _market_bars(config, candles, as_of, validation):
     return sorted(latest.values(), key=lambda c: c.open_time)
 
 
+def _notional_slices(config: dict, family: str, amount: Decimal) -> list[dict]:
+    """Keep zero target slices until the simulator's v2 anchor-evidence check."""
+    if family == 'regular':
+        return [{'requested_notional': amount, 'decline': None}]
+    policy = config['plans'][family]
+    initial = (Decimal(policy['initial_fraction']) if family == 'split'
+               else ONE - Decimal(policy['fraction']))
+    levels = policy['levels'] if family == 'split' else [policy]
+    specs = [{'requested_notional': amount * initial, 'decline': None}]
+    specs.extend({'requested_notional': amount * Decimal(row['fraction']), 'decline': row['decline']}
+                 for row in levels)
+    return specs
+
+
+def allocation_specs(config: dict, family: str, amount: Decimal) -> list[dict]:
+    """Describe positive notional slices in the simulator's activation order."""
+    specs = _notional_slices(config, family, amount)
+    return specs if family == 'regular' else [row for row in specs if row['requested_notional'] > 0]
+
+
+def required_cash(config: dict, notional: Decimal) -> Decimal:
+    """Quote cash for one slice; each positive slice incurs its own fixed fee."""
+    fees = config['fees']
+    return (notional * (ONE + Decimal(fees['rate'])) + Decimal(fees['fixed'])
+            if fees['asset'] == 'quote' and notional > 0 else notional)
+
+
+@dataclass
+class _ActivationFunding:
+    """One activation's cash capacity, independent of price-dependent execution.
+
+    Callers supply free cash and existing waiting/target cash after due deposits
+    and deadline releases. Only free cash can fund new slices. Future deposits
+    are a separate indicative pool, used only by the next-tranche illustration.
+    This temporary calculation neither executes nor releases existing intents.
+    """
+
+    config: dict
+    family: str
+    current_cash: Decimal
+    target_cash: Decimal = ZERO
+    waiting_cash: Decimal = ZERO
+    future_cash: Decimal = ZERO
+
+    def allocate(self, time: int, amount: Decimal, *, targets_available: bool = True) -> list[dict]:
+        policy = self.config['plans'].get(self.family)
+        allocations = []
+        for spec in _notional_slices(self.config, self.family, amount):
+            decline = spec['decline']
+            if decline is not None and not targets_available:
+                allocations.append({'time': time, 'status': 'skipped', 'reason': 'anchor_price_unavailable'})
+                continue
+            if spec['requested_notional'] <= 0:
+                continue
+            needed = required_cash(self.config, spec['requested_notional'])
+            funded_now = min(self.current_cash, needed)
+            self.current_cash -= funded_now
+            funded_future = min(self.future_cash, needed - funded_now)
+            self.future_cash -= funded_future
+            allocated = funded_now + funded_future
+            target = allocated if decline is not None else ZERO
+            if target and policy['max_deferred_reserve_quote'] is not None:
+                target = min(target, max(ZERO, Decimal(policy['max_deferred_reserve_quote']) - self.target_cash))
+            self.target_cash += target
+            self.waiting_cash += allocated
+            allocations.append({'requested_notional': decimal_string(spec['requested_notional']),
+                'decline': decline, 'required_cash': decimal_string(needed),
+                'allocated_cash': decimal_string(allocated), 'funding_shortfall': allocated < needed,
+                'funded_from_current_cash': decimal_string(funded_now),
+                'funded_from_future_contributions': decimal_string(funded_future),
+                'locked_cash': decimal_string(target),
+                'cap_overflow_immediate_cash': decimal_string(allocated - target) if decline is not None else '0',
+                'deadline': time + policy['max_wait_days'] * DAY if decline is not None else None,
+                'fallback': policy['fallback'] if decline is not None else None})
+        return allocations
+
+
 @dataclass
 class _Intent:
     created: int
@@ -246,7 +323,7 @@ def _waiting_summary(intents, cutoff):
             'cash_weighted_waiting_seconds': decimal_string(weighted / allocated) if allocated else None}
 
 
-def _simulate(config, bars, as_of, family, validation):
+def _simulate(config, bars, as_of, family, validation, *, cash_before_activation=False):
     fee = config['fees']
     rate, fixed = Decimal(fee['rate']), Decimal(fee['fixed'])
     settings = config['execution']
@@ -355,31 +432,6 @@ def _simulate(config, bars, as_of, family, validation):
             peak = max(peak, nav)
             max_drawdown = max(max_drawdown, ONE - nav / peak)
 
-    def allocate(time, notional, target, deadline, fallback):
-        nonlocal free
-        if notional <= 0:
-            return
-        needed = notional * (ONE + rate) + fixed if fee['asset'] == 'quote' else notional
-        budget = min(free, needed)
-        free -= budget
-        funding.append({'time': time, 'requested_notional': decimal_string(notional),
-                        'allocated_cash': decimal_string(budget), 'funding_shortfall': budget < needed})
-        if budget:
-            if target is not None:
-                cap = config['plans'][family]['max_deferred_reserve_quote']
-                if cap is not None:
-                    locked = sum((i.budget for i in intents if i.status == 'waiting' and i.target is not None), ZERO)
-                    deferred_budget = min(budget, max(ZERO, Decimal(cap) - locked))
-                    if budget > deferred_budget:
-                        immediate = _Intent(time, budget - deferred_budget, None, None, 'buy_at_deadline')
-                        intents.append(immediate)
-                        all_intents.append(immediate)
-                    budget = deferred_budget
-            if budget:
-                intent = _Intent(time, budget, target, deadline, fallback)
-                intents.append(intent)
-                all_intents.append(intent)
-
     for time in sorted(t for t in times if config['start_time'] <= t <= simulation_end):
         bar = by_open.get(time)
         closing = by_close.get(time)
@@ -441,26 +493,33 @@ def _simulate(config, bars, as_of, family, validation):
                 intent.resolved_at = time
             else:
                 intent.target = None
+        if cash_before_activation and time == as_of:
+            return {'free_cash': free,
+                    'waiting_cash': sum((i.budget for i in intents if i.status == 'waiting'), ZERO),
+                    'target_cash': sum((i.budget for i in intents if i.status == 'waiting' and i.target is not None), ZERO)}
+        activation = _ActivationFunding(config, family, free,
+            target_cash=sum((i.budget for i in intents if i.status == 'waiting' and i.target is not None), ZERO))
         for amount in schedules.get(time, []):
             anchor_bar = anchor_at(time)
             anchor = Decimal(str(anchor_bar.close)) if anchor_bar and time - anchor_bar.close_time <= settings['max_price_age_seconds'] else None
-            if family == 'regular':
-                allocate(time, amount, None, None, 'buy_at_deadline')
-            else:
-                policy = config['plans'][family]
-                deadline = time + policy['max_wait_days'] * DAY
-                if family == 'split':
-                    allocate(time, amount * Decimal(policy['initial_fraction']), None, None, 'buy_at_deadline')
-                    levels = policy['levels']
-                else:
-                    fraction = Decimal(policy['fraction'])
-                    allocate(time, amount * (ONE - fraction), None, None, 'buy_at_deadline')
-                    levels = [{'fraction': policy['fraction'], 'decline': policy['decline']}]
-                for level in levels:
-                    if anchor is None:
-                        funding.append({'time': time, 'status': 'skipped', 'reason': 'anchor_price_unavailable'})
-                    else:
-                        allocate(time, amount * Decimal(level['fraction']), anchor * (ONE - Decimal(level['decline'])), deadline, policy['fallback'])
+            for allocation in activation.allocate(time, amount, targets_available=anchor is not None):
+                if allocation.get('status') == 'skipped':
+                    funding.append(allocation)
+                    continue
+                funding.append({'time': time, **{key: allocation[key] for key in
+                    ('requested_notional', 'allocated_cash', 'funding_shortfall')}})
+                budget = Decimal(allocation['allocated_cash'])
+                target_budget = Decimal(allocation['locked_cash'])
+                if budget > target_budget:
+                    intent = _Intent(time, budget - target_budget, None, None, 'buy_at_deadline')
+                    intents.append(intent)
+                    all_intents.append(intent)
+                if target_budget:
+                    intent = _Intent(time, target_budget, anchor * (ONE - Decimal(allocation['decline'])),
+                                     allocation['deadline'], allocation['fallback'])
+                    intents.append(intent)
+                    all_intents.append(intent)
+        free = activation.current_cash
         for intent in intents:
             if intent.status != 'waiting':
                 continue
@@ -562,6 +621,69 @@ def _simulate(config, bars, as_of, family, validation):
                                 for i in intents if i.status == 'waiting']}
 
 
+def next_activation_funding(config: dict, candles: list[Candle], as_of: int, *, current_simulation=None) -> dict | None:
+    """Illustrate the next activation using the simulator's event boundary.
+
+    At the current cutoff, due contributions and target expiry are processed
+    before cash is inspected, while new allocations and fills are excluded.
+    Future activations use current free cash plus declared deposits only: no
+    future fills, releases or rounding refunds are assumed.
+
+    current_simulation, when supplied, must be compare_plans output for these
+    same inputs and cutoff; the brief reuses its already calculated result.
+    """
+    config = validate_config(config)
+    as_of = _time(as_of, 'as_of')
+    upcoming = [row for row in config['schedule'] if row['time'] >= as_of]
+    if not upcoming:
+        return None
+    time = upcoming[0]['time']
+    tranches = [row for row in upcoming if row['time'] == time]
+    with localcontext() as ctx:
+        ctx.prec = 28
+        if time == as_of:
+            bars = _market_bars(config, candles, as_of, 'retrospective')
+            balances = {family: _simulate(config, bars, as_of, family, 'retrospective', cash_before_activation=True)
+                        for family in ('regular', 'split', 'deferred')}
+        elif as_of >= config['start_time']:
+            current = current_simulation or compare_plans(config, candles, as_of)
+            balances = {family: {'free_cash': Decimal(row['unallocated_reserve']),
+                'waiting_cash': Decimal(row['locked_reserve']),
+                'target_cash': sum((Decimal(target['allocated_cash']) for target in row['waiting_targets']
+                                    if target['target'] is not None), ZERO)}
+                        for family, row in current['plans'].items()}
+        else:
+            balances = {family: {'free_cash': ZERO, 'waiting_cash': ZERO, 'target_cash': ZERO}
+                        for family in ('regular', 'split', 'deferred')}
+    with localcontext() as ctx:
+        ctx.prec = 180
+        future = sum((Decimal(row['amount']) for row in config['contributions']
+                      if as_of < row['time'] <= time), ZERO)
+        families = {}
+        for family, balance in balances.items():
+            activation = _ActivationFunding(config, family, balance['free_cash'],
+                target_cash=balance['target_cash'], waiting_cash=balance['waiting_cash'], future_cash=future)
+            allocations = [allocation for tranche in tranches
+                           for allocation in activation.allocate(time, Decimal(tranche['amount']))]
+            families[family] = {'current_cash_available': decimal_string(balance['free_cash']),
+                'future_contributions_before_activation': decimal_string(future),
+                'immediate_notional': decimal_string(sum((Decimal(row['requested_notional']) for row in allocations
+                                                         if row['decline'] is None), ZERO)),
+                'deferred_notional': decimal_string(sum((Decimal(row['requested_notional']) for row in allocations
+                                                        if row['decline'] is not None), ZERO)),
+                'allocations': allocations,
+                'free_cash_after': decimal_string(activation.current_cash + activation.future_cash),
+                'locked_cash_after': decimal_string(activation.waiting_cash),
+                'target_locked_cash_before': decimal_string(balance['target_cash']),
+                'target_locked_cash_after': decimal_string(activation.target_cash),
+                'funding_shortfall': any(row['funding_shortfall'] for row in allocations)}
+        return {'time': time,
+                'requested_notional': decimal_string(sum((Decimal(row['amount']) for row in tranches), ZERO)),
+                'families': families, 'future_contributions_before_activation': decimal_string(future),
+                'funding_basis': 'Cash-capacity illustration using hypothetical current free reserve plus deposits due by activation; activation still requires eligible prices. No borrowing, future fills, releases or rounding refunds assumed.',
+                'future_anchor_unknown': time > as_of}
+
+
 def compare_plans(config: dict, candles: list[Candle], as_of: int, *, validation: str = 'retrospective') -> dict:
     """Compare frozen regular/split/deferred rules using one Decimal ledger."""
     as_of = _time(as_of, 'as_of')
@@ -592,3 +714,94 @@ def compare_plans(config: dict, candles: list[Candle], as_of: int, *, validation
                     'Terminals include contributions at the cutoff and purchases strictly before it.'],
                 'coverage': {'complete_bars': len(bars), 'start': bars[0].open_time if bars else None,
                              'end': bars[-1].close_time if bars else None}}
+
+
+def policies_equivalent(config: dict) -> bool:
+    """Identify split and deferred policies with the same declared allocations."""
+    split, deferred = config["plans"]["split"], config["plans"]["deferred"]
+    common = ("max_wait_days", "fallback", "max_deferred_reserve_quote")
+    return (all(split[key] == deferred[key] for key in common)
+            and Decimal(split["initial_fraction"]) == 1 - Decimal(deferred["fraction"])
+            and split["levels"] == [{"decline": deferred["decline"], "fraction": deferred["fraction"]}])
+
+
+def _preview_family(config: dict, as_of: int, family: str) -> dict:
+    """Reserve declared cash, with no price-dependent fill or refund assumptions."""
+    cash, deposits = ZERO, ZERO
+    commitments, rows = [], []
+    events = {as_of}
+    contributions, schedules = {}, {}
+    policy = config["plans"].get(family)
+    for row in config["contributions"]:
+        contributions.setdefault(row["time"], []).append(Decimal(row["amount"]))
+        events.add(row["time"])
+    for row in config["schedule"]:
+        schedules.setdefault(row["time"], []).append(Decimal(row["amount"]))
+        events.add(row["time"])
+        if policy:
+            events.add(row["time"] + policy["max_wait_days"] * DAY)
+    current = None
+    for time in sorted(events):
+        for amount in contributions.get(time, []):
+            cash += amount
+            deposits += amount
+        for commitment in commitments:
+            if commitment["locked"] and time >= commitment["deadline"]:
+                commitment["locked"] = False
+                if commitment["fallback"] == "reserve":
+                    cash += commitment["cash"]
+                    commitment["cash"] = ZERO
+        for amount in schedules.get(time, []):
+            allocations = []
+            available = cash
+            activation = _ActivationFunding(config, family, cash,
+                target_cash=sum((c["cash"] for c in commitments if c["locked"]), ZERO))
+            for allocation in activation.allocate(time, amount):
+                locked = Decimal(allocation["locked_cash"])
+                if locked:
+                    commitments.append({"cash": locked, "locked": True, "deadline": allocation["deadline"],
+                                        "fallback": allocation["fallback"]})
+                immediate = Decimal(allocation["allocated_cash"]) - locked
+                if immediate:
+                    commitments.append({"cash": immediate, "locked": False, "deadline": None,
+                                        "fallback": None})
+                allocations.append({key: value for key, value in allocation.items()
+                                    if key not in ("funded_from_current_cash", "funded_from_future_contributions")})
+            cash = activation.current_cash
+            rows.append({"time": time, "phase": "future" if time > as_of else "current" if time == as_of else "past",
+                         "requested_notional": decimal_string(amount),
+                         "cash_available_before": decimal_string(available), "allocations": allocations,
+                         "funding_shortfall": any(row["funding_shortfall"] for row in allocations),
+                         "free_cash_after": decimal_string(cash)})
+        if time == as_of:
+            current = {"contributions_available": decimal_string(deposits), "free_cash": decimal_string(cash),
+                       "locked_cash": decimal_string(sum((c["cash"] for c in commitments if c["locked"]), ZERO)),
+                       "reserved_immediate_cash": decimal_string(sum((c["cash"] for c in commitments if not c["locked"]), ZERO))}
+    return {"current": current, "tranches": rows,
+            "next_tranche": next((row for row in rows if row["time"] >= as_of), None)}
+
+
+def preview_plan_funding(config: dict, as_of: int) -> dict:
+    """Preview declared cash constraints without market prices or actual holdings.
+
+    Deposits become available at their timestamps. Cash assigned to an immediate
+    purchase remains committed; target cash releases only on reserve fallback.
+    Thus this preview cannot claim execution, remaining account cash or rounding
+    refunds. The historical simulator supplies those separate hypothetical paths.
+    """
+    config = validate_config(config)
+    as_of = _time(as_of, "as_of")
+    with localcontext() as ctx:
+        ctx.prec = 180
+        return {"schema_version": 1, "kind": "price_free_funding_preview", "as_of": as_of,
+                "market": {key: config[key] for key in ("asset", "quote", "source", "data_mode")},
+                "fees": config["fees"], "policies_equivalent": policies_equivalent(config),
+                "families": {family: _preview_family(config, as_of, family)
+                             for family in ("regular", "split", "deferred")},
+                "future_contributions": [{**row} for row in config["contributions"] if row["time"] > as_of],
+                "assumptions": ["Declared quote notional excludes quote fees; each positive slice incurs its own fixed fee.",
+                    "No borrowing: deposits are available only at their declared timestamps.",
+                    "Price-free cash commitments assume no fills or rounding refunds; this is not an account balance.",
+                    "A deferred reserve cap can create an additional immediate purchase and additional fixed fee; allocated cash is unchanged and achievable notional can fall.",
+                    "Base-asset fees reduce received units; their quantity cannot be estimated without a price.",
+                    "Ledgerly remains authoritative for actual transactions and holdings."]}

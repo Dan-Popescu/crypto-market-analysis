@@ -63,6 +63,25 @@ def test_exact_activation_preview_does_not_count_current_allocation_twice():
     assert original == config
 
 
+def test_exact_deadline_releases_reserve_before_next_activation_in_all_public_views():
+    config = plan(plans={"deferred": {"fraction": "1", "decline": "0.5",
+                                        "max_wait_days": 7, "fallback": "reserve"}})
+    deadline = 3600 + 7 * 86400
+    config["schedule"].append({"time": deadline, "amount": "100"})
+    bars = [replace(capture().candles[0], open_time=t, close_time=t + 3600, observed_at=t + 3600)
+            for t in range(0, deadline, 3600)]
+    policy = build_accumulation_brief(capture(deadline, bars), config)["hypothetical_policy"]
+    brief = policy["next_tranche"]["families"]["deferred"]
+    simulated = policy["current_simulation"]["plans"]["deferred"]["funding"][-1]
+    preview = policy["funding_preview"]["families"]["deferred"]["next_tranche"]["allocations"][0]
+    assert simulated["allocated_cash"] == preview["allocated_cash"] == "100"
+    assert brief["allocations"][0]["allocated_cash"] == "100"
+    assert brief["current_cash_available"] == "100"
+    assert brief["target_locked_cash_before"] == "0"
+    assert brief["allocations"][0]["target_price"] == "50"
+    assert not any(row["funding_shortfall"] for row in (brief, simulated, preview))
+
+
 def test_future_tranche_deposits_are_distinct_and_targets_only_indicative():
     config = plan(start="1970-01-02T01:00:00Z")
     result = build_accumulation_brief(capture(), config)

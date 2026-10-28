@@ -6,94 +6,44 @@ from decimal import Decimal, localcontext
 
 from .context import _eligible_candles, _timestamp, market_context
 from .evidence import CapturedInputs
-from .plan_builder import allocation_specs, preview_plan_funding, required_cash
-from .plans import DAY, ZERO, compare_plans, decimal_string, validate_config
+from .plans import (
+    DAY,
+    compare_plans,
+    decimal_string,
+    next_activation_funding,
+    preview_plan_funding,
+    validate_config,
+)
 from .purchase_windows import analyze_windows
 
 _FAMILIES = ("regular", "split", "deferred")
 
 
 def _next_tranche(config, candles, as_of, current, anchor):
-    upcoming = [row for row in config["schedule"] if row["time"] >= as_of]
-    if not upcoming:
+    tranche = next_activation_funding(config, candles, as_of, current_simulation=current)
+    if tranche is None:
         return None
-    time = upcoming[0]["time"]
-    amount = sum((Decimal(row["amount"]) for row in upcoming if row["time"] == time), ZERO)
-    # At an exact activation cutoff, preview cash before that activation. This
-    # avoids counting the same simulator allocation twice.
-    before = current
-    if time == as_of:
-        before = (compare_plans(config, candles, as_of - 1) if as_of > config["start_time"] else None)
-    cash_cutoff = as_of - 1 if time == as_of else as_of
-    available_deposits = sum((Decimal(row["amount"]) for row in config["contributions"]
-                              if row["time"] <= as_of and row["time"] > cash_cutoff), ZERO)
-    if before is None:
-        available_deposits = sum((Decimal(row["amount"]) for row in config["contributions"]
-                                  if row["time"] <= as_of), ZERO)
-    future = sum((Decimal(row["amount"]) for row in config["contributions"]
-                  if as_of < row["time"] <= time), ZERO)
-    families = {}
-    for family in _FAMILIES:
-        simulated = before["plans"][family] if before else None
-        current_cash = (Decimal(simulated["unallocated_reserve"]) if simulated else ZERO) + available_deposits
-        current_left, future_left = current_cash, future
-        policy = config["plans"].get(family)
-        locked = Decimal(simulated["locked_reserve"]) if simulated else ZERO
-        target_locked = sum((Decimal(row["allocated_cash"]) for row in simulated["waiting_targets"]
-                             if row["target"] is not None), ZERO) if simulated else ZERO
-        target_locked_before = target_locked
-        allocations = []
-        # Preserve separate same-timestamp orders: their fixed fees do not merge.
-        for tranche in (row for row in upcoming if row["time"] == time):
-            for spec in allocation_specs(config, family, Decimal(tranche["amount"])):
-                notional, decline = spec["requested_notional"], spec["decline"]
-                needed = required_cash(config, notional)
-                funded_now = min(current_left, needed)
-                current_left -= funded_now
-                funded_future = min(future_left, needed - funded_now)
-                future_left -= funded_future
-                allocated = funded_now + funded_future
-                target_cash = allocated if decline is not None else ZERO
-                if target_cash and policy["max_deferred_reserve_quote"] is not None:
-                    target_cash = min(target_cash, max(ZERO, Decimal(policy["max_deferred_reserve_quote"]) - target_locked))
-                target_locked += target_cash
-                locked += allocated
-                within_tolerance = (time > as_of or (anchor["age_seconds"] is not None
-                                     and anchor["age_seconds"] <= config["execution"]["max_price_age_seconds"]))
-                target = (Decimal(anchor["price"]) * (1 - Decimal(decline))
-                          if decline is not None and anchor["status"] == "fresh" and within_tolerance else None)
-                allocations.append({"requested_notional": decimal_string(notional), "decline": decline,
-                    "target_price": decimal_string(target) if target is not None else None,
-                    "target_interpretation": ("indicative_current_anchor_not_future_execution_anchor" if time > as_of
-                                               else "current_observed_anchor_hypothetical_policy")
-                    if target is not None else "suppressed_activation_anchor_outside_plan_tolerance"
+    time = tranche["time"]
+    within_tolerance = (time > as_of or (anchor["age_seconds"] is not None
+                        and anchor["age_seconds"] <= config["execution"]["max_price_age_seconds"]))
+    for family in tranche["families"].values():
+        for allocation in family["allocations"]:
+            decline = allocation["decline"]
+            target = (Decimal(anchor["price"]) * (1 - Decimal(decline))
+                      if decline is not None and anchor["status"] == "fresh" and within_tolerance else None)
+            allocation.update({
+                "target_price": decimal_string(target) if target is not None else None,
+                "target_interpretation": ("indicative_current_anchor_not_future_execution_anchor" if time > as_of
+                    else "current_observed_anchor_hypothetical_policy") if target is not None
+                    else "suppressed_activation_anchor_outside_plan_tolerance"
                     if decline and not within_tolerance and anchor["status"] == "fresh"
                     else "suppressed_stale_or_missing_anchor" if decline else "immediate",
-                    "anchor_time": anchor["time"] if target is not None else None,
-                    "activation_anchor_status": ("unknown_until_future_activation" if time > as_of
-                        else "available" if anchor["status"] == "fresh" and within_tolerance else "unavailable"),
-                    "allocation_status": ("future_policy_preview" if time > as_of else "requires_activation_anchor"
-                        if decline and target is None else "hypothetical_current_activation"),
-                    "deadline": time + policy["max_wait_days"] * DAY if decline else None,
-                    "fallback": policy["fallback"] if decline else None,
-                    "required_cash": decimal_string(needed), "allocated_cash": decimal_string(allocated),
-                    "funded_from_current_cash": decimal_string(funded_now),
-                    "funded_from_future_contributions": decimal_string(funded_future),
-                    "funding_shortfall": allocated < needed, "locked_cash": decimal_string(target_cash),
-                    "cap_overflow_immediate_cash": decimal_string(allocated - target_cash) if decline else "0"})
-        families[family] = {"current_cash_available": decimal_string(current_cash),
-            "future_contributions_before_activation": decimal_string(future),
-            "immediate_notional": decimal_string(sum((Decimal(row["requested_notional"]) for row in allocations if row["decline"] is None), ZERO)),
-            "deferred_notional": decimal_string(sum((Decimal(row["requested_notional"]) for row in allocations if row["decline"] is not None), ZERO)),
-            "allocations": allocations, "free_cash_after": decimal_string(current_left + future_left),
-            "locked_cash_after": decimal_string(locked),
-            "target_locked_cash_before": decimal_string(target_locked_before),
-            "target_locked_cash_after": decimal_string(target_locked),
-            "funding_shortfall": any(row["funding_shortfall"] for row in allocations)}
-    return {"time": time, "requested_notional": decimal_string(amount), "families": families,
-            "future_contributions_before_activation": decimal_string(future),
-            "funding_basis": "Cash-capacity illustration using hypothetical current free reserve plus deposits due by activation; activation still requires eligible prices. No borrowing, future fills, releases or rounding refunds assumed.",
-            "future_anchor_unknown": time > as_of}
+                "anchor_time": anchor["time"] if target is not None else None,
+                "activation_anchor_status": ("unknown_until_future_activation" if time > as_of else "available"
+                    if anchor["status"] == "fresh" and within_tolerance else "unavailable"),
+                "allocation_status": ("future_policy_preview" if time > as_of else "requires_activation_anchor"
+                    if decline and target is None else "hypothetical_current_activation")})
+    return tranche
 
 
 def _historical_outcomes(config, as_of, current, reference):
