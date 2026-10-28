@@ -1,5 +1,9 @@
 # Improvement review and selected roadmap
 
+For subsequent implementation, see the preserved [0.3.0 status](IMPROVEMENT_STATUS.md)
+and [0.4.0 offline completion status](OFFLINE_STATUS.md). This document retains the
+original dated proposals and selection rather than acting as the current checklist.
+
 Review date: October 28, 2026 (Europe/Paris). Reviewed application revision:
 `39725acd0ac1b2a764f6f17440cb132778155e77`, version 0.2.0.
 

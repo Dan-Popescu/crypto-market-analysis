@@ -6,7 +6,7 @@ Version 0.4.0 adds verified local backup/restore and original replay, bounded
 prospective scorecards, shared BTC/ETH cash envelopes, explicit snapshot venue
 cost/dispersion calculations, native derivatives comparisons, sourced manual ECB
 schedules and informational FX/stablecoin context. See the [offline workflows](docs/OFFLINE_WORKFLOWS.md)
-and [completion scope](docs/OFFLINE_COMPLETION_PLAN.md). Real-source acceptance
+and [verified completion status](docs/OFFLINE_STATUS.md). Real-source acceptance
 and prospective investment results remain separate from software completion.
 
 ## Offline demonstration

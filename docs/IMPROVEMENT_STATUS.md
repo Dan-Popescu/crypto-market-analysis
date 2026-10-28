@@ -1,5 +1,9 @@
 # Version 0.3.0 implementation and verification
 
+This is the preserved 0.3.0 delivery record. The later
+[0.4.0 offline completion status](OFFLINE_STATUS.md) records the additional
+non-deployment work and remaining input/time dependencies.
+
 Recorded October 28, 2026 (Europe/Paris). Implemented from the selected
 [improvement review](IMPROVEMENT_REVIEW.md), using independent bounded worktrees
 and shared-interface integration. The [workflow guide](IMPROVEMENTS.md) and
@@ -136,7 +140,8 @@ responsibilities; [CONTEXT.md](../CONTEXT.md) defines the domain terms.
 
 Exact tested and independently reviewed revision:
 `f72babe89bdfe760cbff1bd8acf3f4f9b7db6171`.
-Changes after this revision only record these verification results.
+The verification-only commit `2f3d621` changed no application code. Subsequent
+0.4.0 work is recorded separately in [OFFLINE_STATUS.md](OFFLINE_STATUS.md).
 Review baseline: `3a3fad3e637b21f5df9c3279c5c278aaa00b845d`.
 
 ```bash
