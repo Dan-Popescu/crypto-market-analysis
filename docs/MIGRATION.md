@@ -42,6 +42,10 @@ a consistent backup before updating an existing database.
 Issued evidence uses a lossless `zlib+base64` envelope with a SHA256 checksum and
 a 32 MiB uncompressed limit. `restore_evidence` also accepts early raw envelopes.
 Plan inputs reuse captured candles and retain additional versions only once.
+New plan issuances capture those versions in the same SQLite read transaction as
+the latest candles. A correction inserted after capture cannot change only the
+issued plan. The original archive layout remains readable; the plan's own input
+reference hashes all consumed vintages and includes the captured watermark.
 Later plan outcomes pin original evidence and use first-observed fully
 post-issuance candles; a straddling hour remains excluded. No original assessment
 is rewritten. MCP returns evidence counts/hashes rather than the archive body.
@@ -91,6 +95,15 @@ The follow-up implements the selected priorities in [IMPROVEMENT_REVIEW.md](IMPR
 [IMPROVEMENTS.md](IMPROVEMENTS.md) contains executable examples. Existing commands,
 TOML, native quotes and the integer schema-1 plan configuration remain compatible.
 Result consumers must also inspect `rule_version`, rather than the schema alone.
+
+The architecture follow-up preserves plan configuration, `accumulation-v2`, CLI
+commands and MCP tools. Purchase-plan funding previews remain importable from
+`plan_builder`; accounting is owned by `plans`. Exact-time brief funding now
+includes target reserve released before a new tranche at that timestamp. Research
+forecast horizons add `reference_frequencies` and `reference_confidence_intervals`
+for descriptive samples below the unchanged conditional support gate. Legacy
+`base_rates` remain gated alongside conditional probabilities. Journal overview
+results retain their existing shape; journal reads no longer initialize schema.
 
 - `accumulation-v2` changes waiting statistics to include funded pending, expired
   and unfilled intents, clipped at the reported cutoff. Released free cash stops

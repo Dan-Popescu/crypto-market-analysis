@@ -45,6 +45,10 @@ The `OBSERVER_*` environment variables, `observer.toml`, `observer.sqlite` and `
 
 The repository is [Dan-Popescu/crypto-market-analysis](https://github.com/Dan-Popescu/crypto-market-analysis), imported from Crypto Observer v0.1.0. The Python package is `crypto_market_analysis`.
 
+See [architecture and invariant ownership](docs/ARCHITECTURE.md) when changing
+purchase accounting, captured evidence, journal reads or empirical sample rules.
+The [domain glossary](CONTEXT.md) defines the shared accumulation terminology.
+
 ```bash
 uv sync --frozen --extra dev
 uv run --frozen python tools/check.py
