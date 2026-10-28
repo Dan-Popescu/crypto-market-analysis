@@ -121,6 +121,7 @@ def test_candle_profile_ignores_books_and_optional_context_and_stays_archivable(
     assert evidence["capture_profile"]["optional_context"] == "not_requested"
     assert captured.estimated_evidence_bytes == estimated_evidence_bytes(evidence) < MAX_EVIDENCE_BYTES
     assert captured.reference["content_hash"] == content_hash(evidence)
+    assert captured.reference["available_at"] == NOW
     assert restore_evidence(archive_evidence(evidence)) == evidence
     with pytest.raises(ValueError, match="32 MiB"):
         archive_evidence({"required": "x" * MAX_EVIDENCE_BYTES})
@@ -156,6 +157,10 @@ def test_profile_metadata_default_preserves_legacy_evidence_and_french_errors_ar
     assert "capture_profile" not in legacy.evidence()
     assert legacy.reference["content_hash"] == content_hash(legacy.evidence())
     assert captured.reference["content_hash"] != legacy.reference["content_hash"]
+    assert captured.reference["available_at"] == 0
+    dated = replace(captured, observations=(book(NOW - 10),),
+                    events=({"observed_at": NOW - 5},), calendar=({"observed_at": NOW - 2},))
+    assert dated.reference["available_at"] == NOW - 2
     engine.dataset_lineage = {"dataset_id": "synthetic_research", "data_mode": "import"}
     lineage_capture = engine.capture_inputs(as_of=NOW)
     assert lineage_capture.reference["dataset_lineage"] == engine.dataset_lineage

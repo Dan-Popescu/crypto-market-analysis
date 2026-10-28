@@ -145,8 +145,12 @@ class CapturedInputs:
 
     @property
     def reference(self) -> dict:
+        availability = [row.observed_at for row in (*self.candles, *self.observations)]
+        availability.extend(row["observed_at"] for row in (*self.events, *self.calendar)
+                            if type(row.get("observed_at")) is int)
         result = {"schema_version": "2.0", "as_of": self.as_of, "asset": self.asset,
                   "source": self.source, "quote": self.quote, "data_mode": self.data_mode,
+                  "available_at": max(availability, default=0),
                   "rule_version": "captured-inputs-1", "configuration_hash": content_hash(self.configuration),
                   "content_hash": content_hash(self.evidence()), "watermark": dict(self.watermark)}
         if self.capture_profile and self.capture_profile.get("dataset_lineage"):
