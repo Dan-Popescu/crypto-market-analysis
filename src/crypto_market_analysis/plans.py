@@ -725,60 +725,116 @@ def policies_equivalent(config: dict) -> bool:
             and split["levels"] == [{"decline": deferred["decline"], "fraction": deferred["fraction"]}])
 
 
-def _preview_family(config: dict, as_of: int, family: str) -> dict:
-    """Reserve declared cash, with no price-dependent fill or refund assumptions."""
+def _preview_funding(plans: list[dict], contributions: list[dict], as_of: int) -> dict:
+    """Own price-free commitment lifecycle for one plan or a shared cash pool.
+
+    Inputs are normalized; only ``contributions`` fund this pool. Plans and their
+    same-time schedule rows retain declared order. Each plan owns its target cap,
+    while all plans compete for the same free cash after deposits and releases.
+    """
     cash, deposits = ZERO, ZERO
-    commitments, rows = [], []
+    commitments, tranches, timeline = [], [], []
     events = {as_of}
-    contributions, schedules = {}, {}
-    policy = config["plans"].get(family)
-    for row in config["contributions"]:
-        contributions.setdefault(row["time"], []).append(Decimal(row["amount"]))
-        events.add(row["time"])
-    for row in config["schedule"]:
-        schedules.setdefault(row["time"], []).append(Decimal(row["amount"]))
-        events.add(row["time"])
-        if policy:
-            events.add(row["time"] + policy["max_wait_days"] * DAY)
+    deposits_at, schedules = {}, {}
+    totals = {plan['id']: {key: ZERO for key in ('requested', 'required', 'allocated', 'shortfall')}
+              for plan in plans}
+    for row in contributions:
+        deposits_at.setdefault(row['time'], []).append(Decimal(row['amount']))
+        events.add(row['time'])
+    for plan in plans:
+        policy = plan['config']['plans'].get(plan['family'])
+        for row in plan['config']['schedule']:
+            schedules.setdefault(row['time'], []).append((plan, Decimal(row['amount'])))
+            events.add(row['time'])
+            if policy:
+                events.add(row['time'] + policy['max_wait_days'] * DAY)
+
+    def snapshot():
+        balances = {plan['id']: {'locked_cash': ZERO, 'reserved_immediate_cash': ZERO} for plan in plans}
+        for commitment in commitments:
+            key = 'locked_cash' if commitment['locked'] else 'reserved_immediate_cash'
+            balances[commitment['plan_id']][key] += commitment['cash']
+        per_plan = {}
+        for plan_id, balance in balances.items():
+            per_plan[plan_id] = {key: decimal_string(value) for key, value in balance.items()}
+            per_plan[plan_id]['committed_cash'] = decimal_string(sum(balance.values(), ZERO))
+            per_plan[plan_id].update({f'cumulative_{key}_cash' if key != 'requested'
+                                     else 'cumulative_requested_notional': decimal_string(value)
+                                     for key, value in totals[plan_id].items()})
+        locked = sum((balance['locked_cash'] for balance in balances.values()), ZERO)
+        immediate = sum((balance['reserved_immediate_cash'] for balance in balances.values()), ZERO)
+        return {'contributions_available': decimal_string(deposits), 'free_cash': decimal_string(cash),
+                'locked_cash': decimal_string(locked), 'reserved_immediate_cash': decimal_string(immediate),
+                'committed_cash': decimal_string(locked + immediate), 'per_plan': per_plan}
+
     current = None
     for time in sorted(events):
-        for amount in contributions.get(time, []):
-            cash += amount
-            deposits += amount
+        contributed = sum(deposits_at.get(time, []), ZERO)
+        cash += contributed
+        deposits += contributed
+        releases, activations = [], []
         for commitment in commitments:
-            if commitment["locked"] and time >= commitment["deadline"]:
-                commitment["locked"] = False
-                if commitment["fallback"] == "reserve":
-                    cash += commitment["cash"]
-                    commitment["cash"] = ZERO
-        for amount in schedules.get(time, []):
-            allocations = []
+            if commitment['locked'] and time >= commitment['deadline']:
+                commitment['locked'] = False
+                amount = commitment['cash']
+                released = amount if commitment['fallback'] == 'reserve' else ZERO
+                cash += released
+                commitment['cash'] -= released
+                releases.append({'plan_id': commitment['plan_id'], 'fallback': commitment['fallback'],
+                                 'released_cash': decimal_string(released),
+                                 'retained_commitment_cash': decimal_string(amount - released)})
+        for plan, amount in schedules.get(time, []):
+            plan_id, config, family = plan['id'], plan['config'], plan['family']
             available = cash
             activation = _ActivationFunding(config, family, cash,
-                target_cash=sum((c["cash"] for c in commitments if c["locked"]), ZERO))
-            for allocation in activation.allocate(time, amount):
-                locked = Decimal(allocation["locked_cash"])
+                target_cash=sum((c['cash'] for c in commitments if c['locked'] and c['plan_id'] == plan_id), ZERO))
+            allocations = activation.allocate(time, amount)
+            for allocation in allocations:
+                locked = Decimal(allocation['locked_cash'])
                 if locked:
-                    commitments.append({"cash": locked, "locked": True, "deadline": allocation["deadline"],
-                                        "fallback": allocation["fallback"]})
-                immediate = Decimal(allocation["allocated_cash"]) - locked
+                    commitments.append({'plan_id': plan_id, 'cash': locked, 'locked': True,
+                                        'deadline': allocation['deadline'], 'fallback': allocation['fallback']})
+                immediate = Decimal(allocation['allocated_cash']) - locked
                 if immediate:
-                    commitments.append({"cash": immediate, "locked": False, "deadline": None,
-                                        "fallback": None})
-                allocations.append({key: value for key, value in allocation.items()
-                                    if key not in ("funded_from_current_cash", "funded_from_future_contributions")})
+                    commitments.append({'plan_id': plan_id, 'cash': immediate, 'locked': False,
+                                        'deadline': None, 'fallback': None})
             cash = activation.current_cash
-            rows.append({"time": time, "phase": "future" if time > as_of else "current" if time == as_of else "past",
-                         "requested_notional": decimal_string(amount),
-                         "cash_available_before": decimal_string(available), "allocations": allocations,
-                         "funding_shortfall": any(row["funding_shortfall"] for row in allocations),
-                         "free_cash_after": decimal_string(cash)})
+            required = sum((Decimal(row['required_cash']) for row in allocations), ZERO)
+            allocated = sum((Decimal(row['allocated_cash']) for row in allocations), ZERO)
+            for key, value in [('requested', amount), ('required', required),
+                               ('allocated', allocated), ('shortfall', required - allocated)]:
+                totals[plan_id][key] += value
+            row = {'time': time, 'phase': 'future' if time > as_of else 'current' if time == as_of else 'past',
+                   'plan_id': plan_id, 'requested_notional': decimal_string(amount),
+                   'required_cash': decimal_string(required), 'allocated_cash': decimal_string(allocated),
+                   'shortfall_cash': decimal_string(required - allocated),
+                   'cash_available_before': decimal_string(available),
+                   'allocations': [{key: value for key, value in allocation.items()
+                                    if key not in ('funded_from_current_cash', 'funded_from_future_contributions')}
+                                   for allocation in allocations],
+                   'funding_shortfall': allocated < required, 'free_cash_after': decimal_string(cash)}
+            tranches.append(row)
+            activations.append(row)
+        balance = snapshot()
         if time == as_of:
-            current = {"contributions_available": decimal_string(deposits), "free_cash": decimal_string(cash),
-                       "locked_cash": decimal_string(sum((c["cash"] for c in commitments if c["locked"]), ZERO)),
-                       "reserved_immediate_cash": decimal_string(sum((c["cash"] for c in commitments if not c["locked"]), ZERO))}
-    return {"current": current, "tranches": rows,
-            "next_tranche": next((row for row in rows if row["time"] >= as_of), None)}
+            current = balance
+        timeline.append({'time': time, 'phase': 'future' if time > as_of else 'current' if time == as_of else 'past',
+                         'contributed_cash': decimal_string(contributed), 'deadline_releases': releases,
+                         'tranches': activations, **balance})
+    return {'current': current, 'final': snapshot(), 'timeline': timeline, 'tranches': tranches}
+
+
+def _preview_family(config: dict, as_of: int, family: str) -> dict:
+    """Preserve the single-plan preview contract over the shared lifecycle."""
+    preview = _preview_funding([{'id': family, 'config': config, 'family': family}],
+                               config['contributions'], as_of)
+    current = {key: preview['current'][key] for key in (
+        'contributions_available', 'free_cash', 'locked_cash', 'reserved_immediate_cash')}
+    rows = [{key: value for key, value in row.items()
+             if key not in ('plan_id', 'required_cash', 'allocated_cash', 'shortfall_cash')}
+            for row in preview['tranches']]
+    return {'current': current, 'tranches': rows,
+            'next_tranche': next((row for row in rows if row['time'] >= as_of), None)}
 
 
 def preview_plan_funding(config: dict, as_of: int) -> dict:
