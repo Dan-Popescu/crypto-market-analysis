@@ -66,4 +66,25 @@ def test_configuration_relative_directory_and_bad_venue(tmp_path, capsys):
     capsys.readouterr()
     assert (tmp_path / "nearby" / "observer.sqlite").exists()
     assert main(["collect", "--data-dir", str(tmp_path / "data"), "--venues", "unknown"]) == 2
-    assert "inconnue" in capsys.readouterr().err
+    assert "Unknown venue" in capsys.readouterr().err
+
+
+def test_cli_help_report_and_errors_are_english(tmp_path, capsys):
+    from crypto_market_analysis.cli import parser
+    from crypto_market_analysis.engine import render_brief
+
+    help_text = parser().format_help()
+    assert "BTC/ETH analysis using free public data." in help_text
+    assert "English report or structured dossier for AI." in help_text
+    engine = Engine(Settings(data_dir=tmp_path))
+    report = render_brief(engine.bundle("BTC", as_of=1793145600))
+    assert report.startswith("# BTC — daily report\nAs of ")
+    assert "Insufficient price data: collect or import completed hourly candles." in report
+    assert "## Experimental scenarios" in report
+    assert "## Coverage and limitations" in report
+    assert main(["evaluate", "--data-dir", str(tmp_path), "--horizon", "61"]) == 2
+    error = json.loads(capsys.readouterr().err)
+    assert error == {
+        "error": "The horizon must be between 1 and 60 days.",
+        "hint": "Use crypto-market-analysis <command> --help.",
+    }

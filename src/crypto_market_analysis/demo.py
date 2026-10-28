@@ -13,7 +13,7 @@ from .storage import Store
 
 def seed_demo(store: Store, days: int = 1800, now: int | None = None) -> dict:
     if not 90 <= days <= 3650:
-        raise ValueError("La démonstration exige entre 90 et 3650 jours.")
+        raise ValueError("The demonstration requires between 90 and 3650 days.")
     end = (int(time.time()) if now is None else now) // 86400 * 86400
     start = end - days * 86400
     count = 0
@@ -66,7 +66,7 @@ def seed_demo(store: Store, days: int = 1800, now: int | None = None) -> dict:
         store.put_observations(observations)
     return {
         "data_mode": "demo",
-        "notice": "Données synthétiques : aucune cotation réelle.",
+        "notice": "Synthetic data: no real market quotes.",
         "days": days,
         "end": end,
         "inserted_candles": count,

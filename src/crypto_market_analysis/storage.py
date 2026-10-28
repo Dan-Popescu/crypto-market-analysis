@@ -73,27 +73,27 @@ class Store:
         with self.connection() as con:
             for c in rows:
                 if c.asset not in ("BTC", "ETH") or c.data_mode not in ("live", "demo", "import"):
-                    raise ValueError("Actif ou mode de données non pris en charge.")
+                    raise ValueError("Unsupported asset or data mode.")
                 numeric = (c.open, c.high, c.low, c.close, c.volume)
                 if not all(math.isfinite(v) for v in numeric):
                     raise ValueError("Bougie non finie.")
                 if min(c.open, c.high, c.low, c.close) <= 0 or c.volume < 0:
                     raise ValueError("Prix/volume de bougie invalide.")
                 if c.high < max(c.open, c.low, c.close) or c.low > min(c.open, c.high, c.close):
-                    raise ValueError("Extrêmes de bougie incohérents.")
+                    raise ValueError("Inconsistent candle high or low.")
                 if c.timeframe != "1h" or c.open_time % 3600 or c.close_time != c.open_time + 3600:
-                    raise ValueError("Bougie attendue : une heure UTC alignée.")
+                    raise ValueError("Expected an aligned one-hour UTC candle.")
                 if c.close_time > c.observed_at:
-                    raise ValueError("Une bougie ouverte ne peut pas être stockée.")
+                    raise ValueError("An open candle cannot be stored.")
                 if c.quote_volume is not None and (not math.isfinite(c.quote_volume) or c.quote_volume < 0):
-                    raise ValueError("Volume coté invalide.")
+                    raise ValueError("Invalid quote volume.")
                 if c.taker_buy_quote_volume is not None and (
                     not math.isfinite(c.taker_buy_quote_volume)
                     or c.taker_buy_quote_volume < 0
                     or c.quote_volume is None
                     or c.taker_buy_quote_volume > c.quote_volume * 1.000001
                 ):
-                    raise ValueError("Volume acheteur agressif incohérent.")
+                    raise ValueError("Inconsistent taker buy volume.")
                 payload = asdict(c)
                 fingerprint = _hash({k: v for k, v in payload.items() if k != "observed_at"})
                 key = (c.source, c.asset, c.quote, c.timeframe, c.open_time, c.data_mode)
@@ -118,9 +118,9 @@ class Store:
         with self.connection() as con:
             for o in rows:
                 if not math.isfinite(o.value) or o.event_time > o.observed_at:
-                    raise ValueError("Observation non finie ou datée dans le futur.")
+                    raise ValueError("Non-finite observation or observation dated in the future.")
                 if o.data_mode not in ("live", "demo", "import"):
-                    raise ValueError("Mode de données invalide.")
+                    raise ValueError("Invalid data mode.")
                 payload = asdict(o)
                 fingerprint = _hash({k: v for k, v in payload.items() if k != "observed_at"})
                 dimension = _json(
@@ -303,7 +303,7 @@ class Store:
         with self.connection() as con:
             for event in events:
                 if not event.get("title") or not event.get("source_url", "").startswith("https://"):
-                    raise ValueError("Chaque événement exige un titre et une URL source HTTPS.")
+                    raise ValueError("Each event requires a title and an HTTPS source URL.")
                 timestamp = int(event["event_time"])
                 payload = {
                     **event,

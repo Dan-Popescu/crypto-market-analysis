@@ -24,36 +24,36 @@ from .venues import VENUES
 
 GLOSSARY = {
     "open_interest": {
-        "definition": "Contrats dérivés encore ouverts. Chaque contrat a un acheteur et un vendeur.",
-        "limit": "Une hausse ne prouve pas une demande spot ; les unités dépendent de la plateforme.",
+        "definition": "Derivative contracts still open. Every contract has a buyer and a seller.",
+        "limit": "An increase does not establish spot demand; units depend on the venue.",
     },
     "funding": {
-        "definition": "Paiement périodique entre détenteurs de positions sur contrats perpétuels.",
-        "limit": "Comparer uniquement des périodes identiques ; projeté et réalisé sont distincts.",
+        "definition": "Periodic payment between holders of perpetual contract positions.",
+        "limit": "Compare only identical periods; projected and realized values are distinct.",
     },
     "depth": {
-        "definition": "Montant des ordres affichés dans une bande de prix autour du milieu du carnet.",
-        "limit": "La liquidité peut disparaître. Une couverture incomplète donne une borne inférieure.",
+        "definition": "Amount of displayed orders within a price band around the order book midpoint.",
+        "limit": "Liquidity can disappear. Incomplete coverage gives a lower bound.",
     },
     "volatility": {
-        "definition": "Ampleur des variations ; la mesure réalisée sur 21 jours est annualisée avec 365 jours.",
-        "limit": "Elle ne donne pas la direction du prochain mouvement.",
+        "definition": "Magnitude of price changes; the 21-day realized measure is annualized using 365 days.",
+        "limit": "It does not give the direction of the next move.",
     },
     "implied_volatility": {
-        "definition": "Volatilité compatible avec les prix cotés des options.",
-        "limit": "Elle reflète aussi les primes de risque ; ce n'est pas une probabilité réelle calibrée.",
+        "definition": "Volatility consistent with quoted option prices.",
+        "limit": "It also reflects risk premiums; it is not a calibrated real-world probability.",
     },
     "spot_pressure": {
-        "definition": "Part du volume déclenchée par des achats agressifs contre des vendeurs.",
-        "limit": "Mesure locale à une plateforme ; toute transaction a un acheteur et un vendeur.",
+        "definition": "Share of volume initiated by aggressive buyers trading against sellers.",
+        "limit": "A venue-specific measure; every trade has a buyer and a seller.",
     },
     "brier": {
-        "definition": "Erreur quadratique moyenne entre probabilité prévue et événement observé ; plus petit est meilleur.",
-        "limit": "Comparer à une référence sur exactement les mêmes dates, sans information future.",
+        "definition": "Mean squared error between predicted probability and observed outcome; lower is better.",
+        "limit": "Compare with a baseline on exactly the same dates, without future information.",
     },
     "red": {
-        "definition": "Cours à l'échéance inférieur à la clôture horaire servant d'ancrage, sur des fenêtres de 24 heures.",
-        "limit": "Distinct d'une bougie calendaire rouge. Le cours instantané peut différer de l'ancrage.",
+        "definition": "Endpoint price below the anchor hourly close, over 24-hour windows.",
+        "limit": "Distinct from a red calendar candle. The current price may differ from the anchor.",
     },
 }
 
@@ -101,11 +101,11 @@ def create_server(
     auth = verifier = None
     if any((issuer, jwks, public_url)):
         if not all((issuer, jwks, public_url)):
-            raise ValueError("OAuth exige OBSERVER_OAUTH_ISSUER, OBSERVER_JWKS_URL et OBSERVER_PUBLIC_URL.")
+            raise ValueError("OAuth requires OBSERVER_OAUTH_ISSUER, OBSERVER_JWKS_URL and OBSERVER_PUBLIC_URL.")
         if any(urlparse(v).scheme != "https" or not urlparse(v).hostname for v in (issuer, jwks, public_url)):
-            raise ValueError("Les URL OAuth et publique doivent être en HTTPS.")
+            raise ValueError("OAuth and public URLs must use HTTPS.")
         if not public_url.rstrip("/").endswith("/mcp"):
-            raise ValueError("OBSERVER_PUBLIC_URL doit être l'URL HTTPS complète terminant par /mcp.")
+            raise ValueError("OBSERVER_PUBLIC_URL must be the full HTTPS URL ending in /mcp.")
         audience = os.getenv("OBSERVER_OAUTH_AUDIENCE", public_url)
         verifier = JWTVerifier(issuer, jwks, audience, public_url)
         auth = AuthSettings(
@@ -116,7 +116,7 @@ def create_server(
         )
     elif host not in ("127.0.0.1", "localhost", "::1"):
         raise ValueError(
-            "Une écoute réseau publique exige la configuration OAuth ; sinon utilisez 127.0.0.1."
+            "A public network listener requires OAuth configuration; otherwise use 127.0.0.1."
         )
     allowed_hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
     if public_url:
@@ -132,7 +132,7 @@ def create_server(
         transport_security=TransportSecuritySettings(
             enable_dns_rebinding_protection=True, allowed_hosts=allowed_hosts
         ),
-        instructions="Analyse BTC/ETH à 1–60 jours. Commencez par get_analysis_bundle pour connaître date, mode, couverture et sources. Les pourcentages sont expérimentaux ; ne les décrivez jamais comme calibrés ou comme un avantage démontré. Un manque de données n'est pas un signal neutre. Citez la source, l'unité et l'ancrage. Ne mélangez pas USD, EUR et stablecoins, ni démonstration et données réelles. Utilisez render_chart pour illustrer les observations. Expliquez clairement les contradictions et les conditions qui changeraient l'interprétation. Aucun passage d'ordre.",
+        instructions="Analyze BTC/ETH over 1–60 days. Start with get_analysis_bundle to establish the date, mode, coverage and sources. Percentages are experimental; never describe them as calibrated or as a demonstrated edge. Missing data is not a neutral signal. Cite the source, unit and anchor. Keep USD, EUR and stablecoins separate, and distinguish demonstration data from real data. Use render_chart to illustrate observations. Explain contradictions and the conditions that would change the interpretation. No order execution.",
     )
     engine = Engine(settings, mode)
     readonly = ToolAnnotations(
@@ -164,7 +164,7 @@ def create_server(
     ) -> dict[str, Any]:
         """Experimental historical frequencies at 1–60 days: endpoint up/down, intraperiod up/down barriers. Not calibrated probabilities; include hourly anchor, 24-hour window alignment and sample size."""
         if not 1 <= horizon <= 60:
-            raise ValueError("Horizon entre 1 et 60 jours.")
+            raise ValueError("Horizon must be between 1 and 60 days.")
         return engine.predictions(asset, [horizon], threshold, source, quote)
 
     @server.tool(annotations=readonly)
@@ -177,7 +177,7 @@ def create_server(
     ) -> dict[str, Any]:
         """Chronological, non-overlapping evaluation against an unconditional base, with Brier and observed calibration. No claim of profitability."""
         if not 1 <= horizon <= 60:
-            raise ValueError("Horizon entre 1 et 60 jours.")
+            raise ValueError("Horizon must be between 1 and 60 days.")
         result = engine.evaluation(asset, horizon, 0.10, source, quote, validation=validation)
         return {
             **result,
@@ -194,7 +194,7 @@ def create_server(
     ) -> dict[str, Any]:
         """Read up to 500 observed points with source, unit, native quote, timestamps and coverage metadata. No currency conversion."""
         if not 1 <= limit <= 500:
-            raise ValueError("limit doit être entre 1 et 500.")
+            raise ValueError("limit must be between 1 and 500.")
         rows = [
             o
             for o in engine.store.observations(asset, mode=mode)
@@ -210,7 +210,7 @@ def create_server(
 
     @server.tool(annotations=readonly)
     def explain_metric(metric: str) -> dict[str, Any]:
-        """Use for plain French definitions and interpretation limits. Without a matching key, returns available glossary keys."""
+        """Use for plain English definitions and interpretation limits. Without a matching key, returns available glossary keys."""
         return GLOSSARY.get(metric, {"available_metrics": list(GLOSSARY), "unknown_metric": metric})
 
     @server.tool(annotations=readonly)

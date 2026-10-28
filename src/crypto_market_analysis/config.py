@@ -37,7 +37,7 @@ def load_settings(path: Path | None = None, data_dir: Path | None = None) -> Set
             raw = tomllib.load(f)
     known = set(Settings.__dataclass_fields__)
     if set(raw) - known:
-        raise ValueError(f"Options de configuration inconnues : {sorted(set(raw) - known)}")
+        raise ValueError(f"Unknown configuration options: {sorted(set(raw) - known)}")
     if "data_dir" in raw:
         directory = Path(raw["data_dir"]).expanduser()
         raw["data_dir"] = directory if directory.is_absolute() else path.resolve().parent / directory
@@ -45,9 +45,9 @@ def load_settings(path: Path | None = None, data_dir: Path | None = None) -> Set
     if data_dir is not None:
         settings.data_dir = data_dir.expanduser().resolve()
     if not settings.assets or set(settings.assets) - {"BTC", "ETH"}:
-        raise ValueError("assets doit contenir BTC et/ou ETH.")
+        raise ValueError("assets must contain BTC and/or ETH.")
     if not settings.venues or set(settings.venues) - set(VENUES):
-        raise ValueError("Plateforme inconnue ; utilisez la commande venues.")
+        raise ValueError("Unknown venue; use the venues command.")
     for name, low, high in (
         ("workers", 1, 8),
         ("history_days", 1, 3650),
@@ -60,5 +60,5 @@ def load_settings(path: Path | None = None, data_dir: Path | None = None) -> Set
     ):
         value = getattr(settings, name)
         if not isinstance(value, int) or isinstance(value, bool) or not low <= value <= high:
-            raise ValueError(f"{name} doit être un entier entre {low} et {high}.")
+            raise ValueError(f"{name} must be an integer between {low} and {high}.")
     return settings

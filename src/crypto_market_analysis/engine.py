@@ -23,7 +23,7 @@ def stamp(value: int) -> str:
 class Engine:
     def __init__(self, settings: Settings, mode: str = "live"):
         if mode not in ("live", "demo", "import"):
-            raise ValueError("Mode invalide.")
+            raise ValueError("Invalid mode.")
         self.settings = settings
         self.store = Store(settings.database)
         self.mode = mode
@@ -37,7 +37,7 @@ class Engine:
         watermark: dict | None = None,
     ) -> tuple[list[Candle], list[dict]]:
         if asset not in ("BTC", "ETH"):
-            raise ValueError("Choisissez BTC ou ETH.")
+            raise ValueError("Choose BTC or ETH.")
         candles = self.store.candles(
             asset, source, quote, as_of, self.mode, max_id=watermark["candles"] if watermark else None
         )
@@ -170,10 +170,10 @@ class Engine:
             "events": self.store.events(now),
             "source_health": self.status(now),
             "limitations": [
-                "Aucune conversion implicite USD/USDT/USDC/EUR ni moyenne de prix entre plateformes.",
-                "Prévisions ancrées à la dernière clôture horaire connue, sur des fenêtres de 24 heures ; ce n'est pas le prix instantané.",
-                "Calendrier et flux ETF : import manuel sourcé ; aucun flux complet automatisé revendiqué.",
-                "Une donnée manquante ne constitue pas un signal neutre.",
+                "No implicit USD/USDT/USDC/EUR conversion or price averaging across venues.",
+                "Forecasts use 24-hour windows anchored to the last known hourly close, which may differ from the current price.",
+                "Calendar and ETF flows: sourced manual imports; no claim of a complete automated feed.",
+                "Missing data is not a neutral signal.",
             ],
         }
 
@@ -240,47 +240,47 @@ class Engine:
 
 
 def render_brief(bundle: dict, cadence: str = "daily") -> str:
-    """Concise deterministic French receipt; the host LLM can expand from evidence."""
+    """Concise deterministic English report; the host LLM can expand from evidence."""
     analysis = bundle["analysis"]
     evidence = analysis["evidence"]
     market = bundle["selected_market"]
     lines = [
-        f"# {bundle['asset']} — bilan {'hebdomadaire' if cadence == 'weekly' else 'quotidien'}",
-        f"Au {bundle['as_of']} · mode **{bundle['data_mode']}** · référence {bundle['snapshot_id']}",
+        f"# {bundle['asset']} — {'weekly' if cadence == 'weekly' else 'daily'} report",
+        f"As of {bundle['as_of']} · mode **{bundle['data_mode']}** · reference {bundle['snapshot_id']}",
         "",
     ]
     if bundle["data_mode"] == "demo":
-        lines += ["**DÉMONSTRATION SYNTHÉTIQUE — aucune analyse du marché réel.**", ""]
+        lines += ["**SYNTHETIC DEMONSTRATION — no real-market analysis.**", ""]
     if not market:
-        lines += ["Données de prix insuffisantes : collectez ou importez des bougies horaires closes."]
+        lines += ["Insufficient price data: collect or import completed hourly candles."]
     else:
         lines += [
-            f"Marché de référence : {market['source']} · {bundle['asset']}/{market['quote']}.",
-            f"Historique : {analysis['coverage']['complete_days']} journées UTC complètes.",
+            f"Reference market: {market['source']} · {bundle['asset']}/{market['quote']}.",
+            f"History: {analysis['coverage']['complete_days']} complete UTC days.",
         ]
         if evidence.get("latest_close") is not None:
             lines += [
-                f"Dernière clôture quotidienne : {evidence['latest_close']:,.2f} {market['quote']} (journée du {evidence['latest_day'][:10]}, UTC)."
+                f"Latest daily close: {evidence['latest_close']:,.2f} {market['quote']} on {evidence['latest_day'][:10]}, UTC."
             ]
-        lines += ["", "## Ce qui est observé", ""]
+        lines += ["", "## Observed evidence", ""]
         for day, value in evidence["returns"].items():
             if value is not None:
-                lines.append(f"- Variation sur {day} jours : {value:+.1%}.")
+                lines.append(f"- {day}-day return: {value:+.1%}.")
         if evidence["volatility_21d"] is not None:
             lines.append(
-                f"- Volatilité réalisée sur 21 jours, annualisée : {evidence['volatility_21d']:.1%} ; elle décrit l'amplitude, pas la direction."
+                f"- Annualized 21-day realized volatility: {evidence['volatility_21d']:.1%}; it describes magnitude, not direction."
             )
         for fact in analysis["facts"]:
             lines.append(f"- {fact}")
     if analysis["contradictions"]:
-        lines += ["", "## Points contradictoires", "", *[f"- {x}" for x in analysis["contradictions"]]]
+        lines += ["", "## Contradictory evidence", "", *[f"- {x}" for x in analysis["contradictions"]]]
     labels = {
-        "DFII10": "Taux réel américain à dix ans",
-        "DTWEXBGS": "Indice large du dollar",
-        "stablecoin_supply": "Offre de stablecoins indexés sur le dollar",
-        "funding_rate_projected": "Financement projeté des contrats perpétuels",
-        "open_interest_value": "Positions ouvertes",
-        "option_atm_iv_30d": "Volatilité implicite proche de 30 jours",
+        "DFII10": "US ten-year real yield",
+        "DTWEXBGS": "Broad dollar index",
+        "stablecoin_supply": "Dollar-pegged stablecoin supply",
+        "funding_rate_projected": "Projected perpetual funding",
+        "open_interest_value": "Open interest",
+        "option_atm_iv_30d": "Implied volatility near 30 days",
     }
     shown = set()
     context_lines = []
@@ -293,73 +293,73 @@ def render_brief(bundle: dict, cadence: str = "daily") -> str:
         if unit == "rate":
             formatted = f"{value:.3%}"
             period = point["metadata"].get("funding_interval_hours")
-            formatted += f" sur {period:g} heures" if period else " (période non documentée)"
+            formatted += f" over {period:g} hours" if period else " (undocumented period)"
         elif unit == "percent":
             formatted = f"{value:.2f} %"
         elif unit == "index":
-            formatted = f"{value:.2f} points d'indice"
+            formatted = f"{value:.2f} index points"
         elif unit == "unknown":
-            formatted = "unité non documentée ; valeur non interprétable"
+            formatted = "undocumented unit; value cannot be interpreted"
         else:
             formatted = f"{value:,.2f} {unit}"
         change = point.get("changes", {}).get("7")
         delta = (
-            f" ; variation sur 7 jours : {change['relative']:+.1%}"
+            f"; 7-day change: {change['relative']:+.1%}"
             if change and change.get("relative") is not None and metric == "stablecoin_supply"
             else ""
         )
         context_lines.append(
-            f"- {labels[metric]} : {formatted}{delta} — {point['source']}, observation du {point['event_time'][:10]}."
+            f"- {labels[metric]}: {formatted}{delta} — {point['source']}, observed on {point['event_time'][:10]}."
         )
     if context_lines:
-        lines += ["", "## Contexte observé", "", *context_lines]
+        lines += ["", "## Observed context", "", *context_lines]
     prediction = bundle.get("forecast")
     if prediction:
         lines += [
             "",
-            "## Scénarios expérimentaux",
+            "## Experimental scenarios",
             "",
-            "Avantage prédictif non démontré ; fenêtres de 24 heures alignées sur la dernière clôture horaire connue.",
+            "Predictive edge not demonstrated; 24-hour windows aligned with the last known hourly close.",
             "",
         ]
         if prediction.get("anchor_price") is not None:
             currency = market["quote"] if market else ""
             lines.append(
-                f"Ancrage des scénarios : {prediction['anchor_price']:,.2f} {currency}, au {prediction['anchor_time']}."
+                f"Scenario anchor: {prediction['anchor_price']:,.2f} {currency}, as of {prediction['anchor_time']}."
             )
         if prediction.get("stale"):
-            lines.append("Attention : la dernière clôture disponible est ancienne ; actualisez la collecte.")
+            lines.append("Warning: the latest available close is stale; refresh collection.")
         lines.append("")
         for horizon, row in prediction["horizons"].items():
             probabilities = row.get("probabilities")
             if probabilities:
                 lines.append(
-                    f"- {horizon} j : clôture en baisse {probabilities['red']:.0%}, en hausse {probabilities['up']:.0%} ; passage à −{prediction['threshold']:.0%} {probabilities['down_barrier']:.0%}, à +{prediction['threshold']:.0%} {probabilities['up_barrier']:.0%}. Échantillons historiques distincts : {row['effective_samples']}."
+                    f"- {horizon} d: endpoint down {probabilities['red']:.0%}, up {probabilities['up']:.0%}; touch −{prediction['threshold']:.0%} {probabilities['down_barrier']:.0%}, +{prediction['threshold']:.0%} {probabilities['up_barrier']:.0%}. Distinct historical samples: {row['effective_samples']}."
                 )
             else:
-                lines.append(f"- {horizon} j : historique insuffisant pour une estimation.")
+                lines.append(f"- {horizon} d: insufficient history for an estimate.")
         lines += [
             "",
-            "Fréquences observées dans les cas historiques comparables ; 0 % observé ne signifie pas impossible. Les événements peuvent se recouper. Ces estimations ne sont pas des probabilités calibrées."
+            "Observed frequencies in comparable historical cases; an observed 0% does not mean impossible. Events may overlap. These estimates are not calibrated probabilities."
         ]
     health = bundle["source_health"]
     failures = [r for r in health["runs"] if r["status"] in ("error", "partial")]
     lines += [
         "",
-        "## Couverture et limites",
+        "## Coverage and limitations",
         "",
-        f"- Marchés de prix disponibles pour cet actif : {len(bundle['market_coverage'])}.",
-        f"- Sources jamais collectées : {', '.join(health['never_collected']) or 'aucune'}.",
+        f"- Price markets available for this asset: {len(bundle['market_coverage'])}.",
+        f"- Sources never collected: {', '.join(health['never_collected']) or 'none'}.",
     ]
     for run in failures[:6]:
         detail = (
-            "Une partie des données est inaccessible."
+            "Some data is inaccessible."
             if run["status"] == "partial"
-            else "Données inaccessibles lors de la dernière collecte."
+            else "Data was inaccessible during the last collection."
         )
         if any("451" in error for error in run["errors"]):
-            detail = "Accès restreint depuis l'environnement de collecte."
-        lines.append(f"- {run['source']} : {detail}")
+            detail = "Access restricted from the collection environment."
+        lines.append(f"- {run['source']}: {detail}")
     for limit in [*analysis["limitations"], *bundle["limitations"]][:9]:
         lines.append(f"- {limit}")
     return "\n".join(lines) + "\n"

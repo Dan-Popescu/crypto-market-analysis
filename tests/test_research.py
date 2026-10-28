@@ -204,3 +204,26 @@ def test_evaluation_delayed_aligned_hour():
     assert result["anchor_hour_utc"] == 17
     assert pd.Timestamp(result["origins"][0]["anchor_time"]).hour == 17
     assert result["origins"][0]["data_availability_delay_seconds"] == 120
+
+
+@pytest.mark.parametrize("direction,close", [("up", 200), ("down", 50), ("flat", 100)])
+def test_analysis_direction_values_are_english(direction, close):
+    data = [replace(c, close=close, high=max(c.high, close), low=min(c.low, close)) for c in candles(43)]
+    # The first 22 days provide a distinct baseline; the remaining period sets direction.
+    data = [replace(c, close=100) if c.open_time < 22 * 86400 else c for c in data]
+    analysis = build_analysis(data, [], 43 * 86400)
+    assert analysis["evidence"]["daily_trend"] == direction
+    # A constant close across complete weeks is a flat weekly trend.
+    assert analysis["evidence"]["weekly_trend"]["direction"] == "flat"
+    assert f"21-day trend: {direction}." in analysis["facts"]
+
+
+def test_imported_text_and_legacy_unknown_unit_are_preserved():
+    from crypto_market_analysis.models import Observation
+
+    original = Observation(
+        "feed", "BTC", "metric", 0, 0, 1, "inconnu", metadata={"provider_note": "Donnée brute"}
+    )
+    point = build_analysis([], [original], 0)["evidence"]["observations"][0]
+    assert point["unit"] == "inconnu" and point["unit_unknown"]
+    assert point["metadata"]["provider_note"] == "Donnée brute"

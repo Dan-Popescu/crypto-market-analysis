@@ -34,7 +34,7 @@ def _valid_observations(observations: list[Observation], as_of: int) -> list[Obs
 def _identity(candles: list[Candle], observations: list[Observation]) -> str:
     assets = {x.asset for x in [*candles, *observations]}
     if len(assets) > 1:
-        raise ValueError("Un graphique doit contenir un seul actif ; filtrez les données par actif.")
+        raise ValueError("A chart must contain a single asset; filter the data by asset.")
     return next(iter(assets), "")
 
 
@@ -69,7 +69,7 @@ def _complete_daily(candles: list[Candle], as_of: int):
     candidates = [(key, bars) for key, bars in candidates if not bars.empty]
     if not candidates:
         raise ValueError(
-            "Prix indisponible : collectez 24 bougies horaires alignées pour au moins une journée UTC complète."
+            "Price unavailable: collect 24 aligned hourly candles for at least one complete UTC day."
         )
     return max(sorted(candidates, key=lambda item: item[0]), key=lambda item: len(item[1]))
 
@@ -87,7 +87,7 @@ def _price(fig, candles: list[Candle], as_of: int, weekly: bool = False):
                 weeks.append((start, week))
         if not weeks:
             raise ValueError(
-                "Prix hebdomadaire indisponible : collectez sept journées UTC complètes du lundi au dimanche."
+                "Weekly price unavailable: collect seven complete UTC days from Monday through Sunday."
             )
         dates = [start.to_pydatetime() for start, _ in weeks]
         closes = [float(w.close.iloc[-1]) for _, w in weeks]
@@ -125,22 +125,22 @@ def _price(fig, candles: list[Candle], as_of: int, weekly: bool = False):
             color="#60a5fa",
             linewidth=1.8,
             marker="o" if len(dates) == 1 else None,
-            label="Clôture journalière complète",
+            label="Complete daily close",
         )
     asset = candles[0].asset
-    ax.set_ylabel(f"Prix ({key[1]})")
+    ax.set_ylabel(f"Price ({key[1]})")
     vol = ax.twinx()
     vol.bar(dates, volumes, color="#94a3b8", alpha=0.22, width=4 if weekly else 0.7)
-    vol.set_ylabel(f"Volume {'hebdomadaire' if weekly else 'journalier'} ({asset})", color="#a3adbd")
+    vol.set_ylabel(f"{'Weekly' if weekly else 'Daily'} volume ({asset})", color="#a3adbd")
     peak, drawdowns = 0.0, []
     for close in closes:
         peak = max(peak, close)
         drawdowns.append(close / peak - 1)
     dd.plot(dates, drawdowns, color="#fb7185", marker="o" if len(dates) == 1 else None)
     dd.yaxis.set_major_formatter(PercentFormatter(1))
-    dd.set_ylabel("Repli depuis\nle plus haut")
+    dd.set_ylabel("Drawdown from\npeak")
     ax.set_title(
-        f"{'Bougies hebdomadaires' if weekly else 'Prix journalier'} et repli · {asset}/{key[1]} · {key[0]} · UTC",
+        f"{'Weekly candles' if weekly else 'Daily price'} and drawdown · {asset}/{key[1]} · {key[0]} · UTC",
         loc="left",
     )
     return {key[3]}
@@ -148,37 +148,37 @@ def _price(fig, candles: list[Candle], as_of: int, weekly: bool = False):
 
 def _observed_chart(fig, kind: str, observations: list[Observation]):
     if kind == "liquidity":
-        allowed = {"depth_bid_1pct": "Achats", "depth_ask_1pct": "Ventes"}
+        allowed = {"depth_bid_1pct": "Bids", "depth_ask_1pct": "Asks"}
     elif kind == "leverage":
         allowed = {
-            "open_interest_amount": "Intérêt ouvert",
-            "open_interest_value": "Intérêt ouvert",
-            "funding_rate_actual": "Financement réalisé",
-            "funding_rate_projected": "Financement projeté",
+            "open_interest_amount": "Open interest",
+            "open_interest_value": "Open interest",
+            "funding_rate_actual": "Realized funding",
+            "funding_rate_projected": "Projected funding",
         }
     else:
-        allowed = {f"option_atm_iv_{d}d": f"IV ATM cible {d} j" for d in (7, 30, 60)}
+        allowed = {f"option_atm_iv_{d}d": f"Target ATM IV {d} d" for d in (7, 30, 60)}
     rows = [o for o in observations if o.metric in allowed]
     if kind == "options":
         rows = [o for o in rows if o.metadata.get("expiry") is not None]
     if not rows:
         raise ValueError(
-            f"Données {kind} indisponibles : collectez les métriques correspondantes avec leurs métadonnées."
+            f"{kind} data unavailable: collect the corresponding metrics with their metadata."
         )
     # Separate units and native quote to avoid implicit conversion or normalization.
     panels = defaultdict(list)
     for o in rows:
         if kind == "leverage":
             period = o.metadata.get("funding_interval_hours")
-            period_label = f"{period} h" if period is not None else "période inconnue"
+            period_label = f"{period} h" if period is not None else "unknown period"
             panel = (
-                f"Financement · {period_label}" if o.metric.startswith("funding") else "Intérêt ouvert",
-                o.unit or "unité inconnue",
+                f"Funding · {period_label}" if o.metric.startswith("funding") else "Open interest",
+                o.unit or "unknown unit",
                 o.quote or "—",
             )
         else:
             panel = (
-                "Profondeur à 1 %" if kind == "liquidity" else "Volatilité implicite ATM",
+                "Depth within 1%" if kind == "liquidity" else "ATM implied volatility",
                 o.unit,
                 o.quote or "—",
             )
@@ -191,34 +191,34 @@ def _observed_chart(fig, kind: str, observations: list[Observation]):
             label = f"{o.source} · {allowed[o.metric]} · {o.data_mode}"
             if kind == "leverage" and o.metric.startswith("funding"):
                 period = o.metadata.get("funding_interval_hours")
-                label += f" · {period} h" if period is not None else " · période inconnue"
+                label += f" · {period} h" if period is not None else " · unknown period"
             if kind == "liquidity" and not o.metadata.get("coverage_complete", False):
-                label += " · borne inférieure (couverture incomplète)"
+                label += " · lower bound (incomplete coverage)"
             if kind == "options":
                 expiry = o.metadata["expiry"]
                 try:
-                    label += f" · échéance {_dt(int(expiry)).strftime('%Y-%m-%d')}"
+                    label += f" · expiry {_dt(int(expiry)).strftime('%Y-%m-%d')}"
                 except (TypeError, ValueError, OverflowError, OSError):
                     continue
             series[label].append((o.event_time, o.value))
         if not series:
-            raise ValueError("Options indisponibles : aucune échéance valide dans les métadonnées.")
+            raise ValueError("Options unavailable: no valid expiry in the metadata.")
         for label, points in sorted(series.items()):
-            _series(ax, points, label, linestyle="--" if "borne inférieure" in label else "-")
+            _series(ax, points, label, linestyle="--" if "lower bound" in label else "-")
         unit = panel[1]
         if kind == "leverage" and unit == "rate":
             ax.yaxis.set_major_formatter(PercentFormatter(1))
-            unit = "% par période de financement"
+            unit = "% per funding period"
         elif kind == "options" and unit == "percent":
-            unit = "% annualisé"
+            unit = "% annualized"
         ax.set_ylabel(f"{panel[0]}\n({unit})")
-        ax.set_title(f"{panel[0]} · cotation {panel[2]}", loc="left", fontsize=11)
+        ax.set_title(f"{panel[0]} · quote {panel[2]}", loc="left", fontsize=11)
         ax.legend(loc="best", fontsize=8)
     fig.suptitle(
         {
-            "liquidity": "Liquidité observée",
-            "leverage": "Marchés à effet de levier",
-            "options": "Options · volatilité implicite cotée",
+            "liquidity": "Observed liquidity",
+            "leverage": "Leveraged markets",
+            "options": "Options · quoted implied volatility",
         }[kind],
         x=0.09,
         ha="left",
@@ -229,7 +229,7 @@ def _observed_chart(fig, kind: str, observations: list[Observation]):
 
 def _calibration(fig, evaluation: dict | None):
     if not evaluation:
-        raise ValueError("Calibration indisponible : exécutez une évaluation empirique walk-forward.")
+        raise ValueError("Calibration unavailable: run an empirical walk-forward evaluation.")
     metric = (evaluation.get("metrics") or {}).get("red") or {}
     bins = metric.get("calibration_bins", [])
     points = []
@@ -243,23 +243,23 @@ def _calibration(fig, evaluation: dict | None):
         except (KeyError, ValueError, TypeError):
             continue
     if not points:
-        raise ValueError("Calibration indisponible : aucune classe empirique remplie dans l'évaluation.")
+        raise ValueError("Calibration unavailable: no populated empirical bins in the evaluation.")
     ax = fig.subplots()
     validation_label = (
-        "simulation rétrospective"
+        "retrospective simulation"
         if evaluation.get("validation_mode") == "retrospective"
-        else "données connues à chaque origine"
+        else "data known at each origin"
     )
-    ax.plot([0, 1], [0, 1], color="#94a3b8", linestyle="--", label="Calibration parfaite")
-    ax.scatter([p[0] for p in points], [p[1] for p in points], color="#60a5fa", label="Classes observées")
+    ax.plot([0, 1], [0, 1], color="#94a3b8", linestyle="--", label="Perfect calibration")
+    ax.scatter([p[0] for p in points], [p[1] for p in points], color="#60a5fa", label="Observed bins")
     for x, y, n in points:
         ax.annotate(f"n={n}", (x, y), xytext=(5, 5), textcoords="offset points", fontsize=8)
     ax.set(
         xlim=(0, 1),
         ylim=(0, 1),
-        xlabel="Probabilité prévue moyenne",
-        ylabel="Fréquence observée",
-        title=f"Fiabilité observée · {validation_label}\nClôture en baisse · {evaluation.get('horizon', '?')} j · {evaluation.get('source', 'source non précisée')} / {evaluation.get('quote', 'cotation non précisée')}",
+        xlabel="Mean predicted probability",
+        ylabel="Observed frequency",
+        title=f"Observed reliability · {validation_label}\nEndpoint down · {evaluation.get('horizon', '?')} d · {evaluation.get('source', 'unspecified source')} / {evaluation.get('quote', 'unspecified quote')}",
     )
     ax.xaxis.set_major_formatter(PercentFormatter(1))
     ax.yaxis.set_major_formatter(PercentFormatter(1))
@@ -282,11 +282,11 @@ def render_chart(
     """
     if kind not in {"price", "weekly", "liquidity", "leverage", "options", "calibration"}:
         raise ValueError(
-            "Type inconnu : choisissez price, weekly, liquidity, leverage, options ou calibration."
+            "Unknown kind: choose price, weekly, liquidity, leverage, options or calibration."
         )
     output = Path(output)
     if output.suffix.lower() not in {".png", ".svg"}:
-        raise ValueError("Le fichier de sortie doit avoir l'extension .png ou .svg.")
+        raise ValueError("The output file must have the extension .png or .svg.")
     asset = _identity(candles, observations)
     rows = _valid_observations(observations, as_of)
     with plt.style.context("dark_background"), matplotlib.rc_context({"svg.hashsalt": "crypto-market-analysis"}):
@@ -309,12 +309,12 @@ def render_chart(
                         ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m %H:%M", tz=UTC))
                     else:
                         ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d", tz=UTC))
-            mode = "DÉMONSTRATION" if modes & {"demo", "synthetic"} else ", ".join(sorted(modes)).upper()
+            mode = "DEMONSTRATION" if modes & {"demo", "synthetic"} else ", ".join(sorted(modes)).upper()
             fig.get_layout_engine().set(rect=(0, 0.055, 1, 0.945))
             fig.text(
                 0.01,
                 0.012,
-                f"{asset} · UTC · Au {_dt(as_of).strftime('%Y-%m-%d %H:%M')} · Mode : {mode}",
+                f"{asset} · UTC · As of {_dt(as_of).strftime('%Y-%m-%d %H:%M')} · Mode: {mode}",
                 fontsize=8,
                 color="#cbd5e1",
             )
