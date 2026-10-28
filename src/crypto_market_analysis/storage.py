@@ -338,11 +338,12 @@ class Store:
                 "truncation": {"candles": len(candles) > 500000, "observations": len(observations) > observation_limit,
                                "events": len(events) > 100, "runs": len(runs) > 100}}
 
-    def latest_candle_time(self, source: str, asset: str, mode: str = "live") -> int | None:
+    def latest_candle_time(self, source: str, asset: str, mode: str = "live", *, quote: str | None = None) -> int | None:
         with self.connection() as con:
             return con.execute(
-                "SELECT MAX(open_time) FROM candles WHERE source=? AND asset=? AND data_mode=?",
-                (source, asset, mode),
+                "SELECT MAX(open_time) FROM candles WHERE source=? AND asset=? AND data_mode=?"
+                + (" AND quote=?" if quote is not None else ""),
+                (source, asset, mode, quote) if quote is not None else (source, asset, mode),
             ).fetchone()[0]
 
     def put_events(self, events: list[dict], now: int) -> int:
