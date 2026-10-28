@@ -59,6 +59,11 @@ All registered tools declare read-only behavior. Chart rendering uses temporary 
 
 | Tool | Purpose |
 | --- | --- |
+| `get_accumulation_brief` | One captured next-tranche review with explicit source/native EUR or USD quote, or a matching plan object. |
+| `construct_purchase_plan` | Pure UTC recurrence constructor; returns normalized schema-1 JSON without saving it. |
+| `preview_purchase_funding` | Price-free dated funding constraints and fees; no account balance or assumed fill. |
+| `compare_cost_sensitivity` | One to three caller-declared cost cases on frozen policies and cashflows, without optimization. |
+| `get_journal_summary` | Bounded issued-event cohorts with first definite outcomes and pending/missing/excluded denominators; no performance score. |
 | `get_analysis_bundle` | Establish as-of time, mode, reference market, observations, source coverage and limitations. |
 | `get_market_context` | Descriptive context, complete UTC periods and explicit lookback coverage. |
 | `get_purchase_windows` | Experimental 1/3/7/14-day endpoint/touch frequencies, reference rates, support and expiry. |
@@ -73,6 +78,17 @@ All registered tools declare read-only behavior. Chart rendering uses temporary 
 | `render_chart` | Native MCP image for existing charts or `context`, `windows` and `plans`. |
 
 Arguments are bounded: up to 16 lookbacks, 16 purchase horizons, 12 decline thresholds and 24 evaluation origins. Plan/policy inputs must be finite JSON objects within documented limits. No arbitrary SQL, code execution or unrestricted file path interface is exposed. The endpoint/rights catalogue is available through CLI `sources` and MCP `get_source_catalog`. Assessment lookups summarize frozen evidence and return at most 20 appended outcomes; full evidence stays in the local journal.
+
+For a next-tranche review, call `get_accumulation_brief` with
+`{"asset":"BTC","source":"demo","quote":"EUR","as_of":1793145600}` in the
+synthetic server, optionally adding `plan_config` as an object. For sensitivity,
+provide `config` and `cost_cases`, such as
+`[{"name":"declared"},{"name":"higher-fee","fees":{"fixed":"2"}}]`.
+The first cost case is an arithmetic reference, never a recommendation.
+`get_journal_summary` accepts `limit` from 1 through 100, selects the most recent
+originals and reports outcome truncation. Event counts are not independent sample
+counts. New observable hourly endpoints remain separate from exact endpoints and
+are not scored against unmatched historical forecasts. See [IMPROVEMENTS.md](IMPROVEMENTS.md).
 
 An assistant request can be: “Compare regular, split and deferred BTC purchases using this synthetic EUR plan. Start with coverage and the same as-of time. Show holdings plus reserve at 90 and 180 days, underperformance and waiting costs. Distinguish observations, assumed fills and insufficient evidence. Explain contradictory context and never invent a calibrated probability.”
 
