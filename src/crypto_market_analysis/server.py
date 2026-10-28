@@ -20,6 +20,7 @@ from mcp.types import ToolAnnotations
 
 from .config import Settings
 from .engine import Engine
+from .reporting import bounded_integers, bounded_object, bounded_origins, bounded_thresholds
 from .venues import VENUES
 
 GLOSSARY = {
@@ -101,7 +102,9 @@ def create_server(
     auth = verifier = None
     if any((issuer, jwks, public_url)):
         if not all((issuer, jwks, public_url)):
-            raise ValueError("OAuth requires OBSERVER_OAUTH_ISSUER, OBSERVER_JWKS_URL and OBSERVER_PUBLIC_URL.")
+            raise ValueError(
+                "OAuth requires OBSERVER_OAUTH_ISSUER, OBSERVER_JWKS_URL and OBSERVER_PUBLIC_URL."
+            )
         if any(urlparse(v).scheme != "https" or not urlparse(v).hostname for v in (issuer, jwks, public_url)):
             raise ValueError("OAuth and public URLs must use HTTPS.")
         if not public_url.rstrip("/").endswith("/mcp"):
@@ -115,9 +118,7 @@ def create_server(
             validate_token_resource=True,
         )
     elif host not in ("127.0.0.1", "localhost", "::1"):
-        raise ValueError(
-            "A public network listener requires OAuth configuration; otherwise use 127.0.0.1."
-        )
+        raise ValueError("A public network listener requires OAuth configuration; otherwise use 127.0.0.1.")
     allowed_hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
     if public_url:
         allowed_hosts.append(urlparse(public_url).netloc)
@@ -132,7 +133,7 @@ def create_server(
         transport_security=TransportSecuritySettings(
             enable_dns_rebinding_protection=True, allowed_hosts=allowed_hosts
         ),
-        instructions="Analyze BTC/ETH over 1–60 days. Start with get_analysis_bundle to establish the date, mode, coverage and sources. Percentages are experimental; never describe them as calibrated or as a demonstrated edge. Missing data is not a neutral signal. Cite the source, unit and anchor. Keep USD, EUR and stablecoins separate, and distinguish demonstration data from real data. Use render_chart to illustrate observations. Explain contradictions and the conditions that would change the interpretation. No order execution.",
+        instructions="Analyze BTC/ETH over 1–60 days. For accumulation use descriptive context through 730 days, experimental 1/3/7/14-day purchase windows and hypothetical plans assessed at 90/180 days. All tools are read-only; assessment issuance and outcome observation require explicit local CLI operations. Start with get_analysis_bundle to establish the date, mode, coverage and sources. Percentages are experimental; never describe them as calibrated or as a demonstrated edge. Missing data is not a neutral signal. Cite the source, unit and anchor. Keep USD, EUR and stablecoins separate, and distinguish demonstration data from real data. Use render_chart to illustrate observations. Explain contradictions and the conditions that would change the interpretation. No order execution.",
     )
     engine = Engine(settings, mode)
     readonly = ToolAnnotations(
@@ -148,6 +149,85 @@ def create_server(
     ) -> dict[str, Any]:
         """Use first for a concise research dossier: observations, scenarios, coverage, sources and limits. as_of is UTC epoch seconds; never invent missing evidence."""
         return engine.bundle(asset, source, quote, as_of)
+
+    @server.tool(annotations=readonly)
+    def get_market_context(
+        asset: Literal["BTC", "ETH"] = "BTC",
+        source: str | None = None,
+        quote: str | None = None,
+        as_of: int | None = None,
+        lookbacks: list[int] | None = None,
+    ) -> dict[str, Any]:
+        """Descriptive native-quote historical context, complete UTC calendar periods and coverage. Up to 16 lookbacks of 1–3650 days; low historical rank is not undervaluation."""
+        return engine.context(asset, source, quote, as_of, bounded_integers(lookbacks, "lookbacks", 3650, 16))
+
+    @server.tool(annotations=readonly)
+    def get_purchase_windows(
+        asset: Literal["BTC", "ETH"] = "BTC",
+        source: str | None = None,
+        quote: str | None = None,
+        as_of: int | None = None,
+        horizons: list[int] | None = None,
+        thresholds: list[float] | None = None,
+    ) -> dict[str, Any]:
+        """Experimental endpoint and below-anchor touch frequencies, reference rates, uncertainty and expiry. Defaults: 1/3/7/14 days; up to 16 horizons and 12 decline fractions. No fill or calibrated purchase signal is implied."""
+        horizons = bounded_integers(horizons, "horizons", 365, 16)
+        thresholds = bounded_thresholds(thresholds)
+        return engine.purchase_windows(asset, source, quote, as_of, horizons, thresholds)
+
+    @server.tool(annotations=readonly)
+    def compare_purchase_plans(
+        config: dict[str, Any],
+        as_of: int | None = None,
+        validation: Literal["known_at", "retrospective"] = "retrospective",
+    ) -> dict[str, Any]:
+        """Read-only regular/split/deferred purchase simulation, including reserve, fees, holdings plus reserve and pending 90/180-day outcomes. Supply a bounded JSON object, never a path. Money uses decimal strings."""
+        return engine.compare_plans(bounded_object(config), as_of=as_of, validation=validation)
+
+    @server.tool(annotations=readonly)
+    def evaluate_purchase_plans(
+        config: dict[str, Any],
+        as_of: int | None = None,
+        origins: list[int] | None = None,
+        validation: Literal["known_at", "retrospective"] = "known_at",
+        held_out_start: int | None = None,
+        policy_frozen_at: int | None = None,
+    ) -> dict[str, Any]:
+        """Read-only paired multi-origin evaluation with baseline underperformance, reserve and contribution-adjusted drawdown. Up to 24 UTC origin timestamps; strict empty availability remains empty."""
+        return engine.evaluate_plans(
+            bounded_object(config),
+            as_of=as_of,
+            origins=bounded_origins(origins),
+            validation=validation,
+            held_out_start=held_out_start,
+            policy_frozen_at=policy_frozen_at,
+        )
+
+    @server.tool(annotations=readonly)
+    def get_assessment(assessment_id: str) -> dict[str, Any]:
+        """Read an immutable previously issued local assessment and its appended outcomes. This lookup does not issue assessments or append observations."""
+        if not 1 <= len(assessment_id) <= 200:
+            raise ValueError("assessment_id must contain 1–200 characters.")
+        return {**engine.assessment(assessment_id), "outcomes": engine.assessment_outcomes(assessment_id)}
+
+    @server.tool(annotations=readonly)
+    def get_vigilance(
+        asset: Literal["BTC", "ETH"] = "BTC",
+        source: str | None = None,
+        quote: str | None = None,
+        as_of: int | None = None,
+        horizon_hours: Literal[4, 8] = 4,
+        policy: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Read-only exceptional 4/8-hour observed fragility, reasons, contradictions, missing evidence and expiry. No persistent watch, notification, state transition or crash probability is created."""
+        return engine.vigilance(
+            asset,
+            source,
+            quote,
+            as_of,
+            horizon_hours,
+            bounded_object(policy, "policy") if policy is not None else None,
+        )
 
     @server.tool(annotations=readonly)
     def get_source_status() -> dict[str, Any]:
@@ -216,23 +296,43 @@ def create_server(
     @server.tool(annotations=readonly)
     def render_chart(
         asset: Literal["BTC", "ETH"] = "BTC",
-        kind: Literal["price", "weekly", "liquidity", "leverage", "options", "calibration"] = "weekly",
+        kind: Literal[
+            "price",
+            "weekly",
+            "liquidity",
+            "leverage",
+            "options",
+            "calibration",
+            "context",
+            "windows",
+            "plans",
+        ] = "weekly",
         source: str | None = None,
         quote: str | None = None,
         validation: Literal["known_at", "retrospective"] = "known_at",
+        as_of: int | None = None,
+        plan_config: dict[str, Any] | None = None,
     ) -> Image:
         """Create a sourced PNG from observed data: weekly candles, daily price, liquidity, leverage, options or empirical calibration. Missing data returns an error, never a simulated chart."""
         # Temporary output is returned as native MCP image content, no public file hosting needed.
         with tempfile.TemporaryDirectory(prefix="crypto-market-analysis-") as folder:
-            path = engine.chart(
-                kind,
-                asset,
-                Path(folder) / "chart.png",
-                source,
-                quote,
-                int(time.time()),
-                validation=validation,
-            )
+            if kind == "plans":
+                from .charts import render_result_chart
+
+                if plan_config is None:
+                    raise ValueError("A plans chart requires plan_config.")
+                result = engine.compare_plans(bounded_object(plan_config), as_of=as_of, validation=validation)
+                path = render_result_chart("plans", result, Path(folder) / "chart.png")
+            else:
+                path = engine.chart(
+                    kind,
+                    asset,
+                    Path(folder) / "chart.png",
+                    source,
+                    quote,
+                    as_of if as_of is not None else int(time.time()),
+                    validation=validation,
+                )
             return Image(data=path.read_bytes(), format="png")
 
     return server

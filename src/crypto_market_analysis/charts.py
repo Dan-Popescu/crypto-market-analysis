@@ -52,13 +52,19 @@ def _series(ax, points, label: str, *, color=None, linestyle="-"):
     )
 
 
-def _complete_daily(candles: list[Candle], as_of: int):
+def _complete_daily(candles: list[Candle], as_of: int, lookback_days: int = 365):
+    if (
+        isinstance(lookback_days, bool)
+        or not isinstance(lookback_days, int)
+        or not 1 <= lookback_days <= 3650
+    ):
+        raise ValueError("lookback_days must be between 1 and 3650.")
     groups = defaultdict(dict)
     for c in sorted(candles, key=lambda item: item.observed_at):
         if (
             c.close_time <= as_of
             and c.observed_at <= as_of
-            and c.open_time >= as_of - 365 * 86400
+            and c.open_time >= as_of - lookback_days * 86400
             and c.timeframe == "1h"
             and c.close > 0
             and c.volume >= 0
@@ -162,9 +168,7 @@ def _observed_chart(fig, kind: str, observations: list[Observation]):
     if kind == "options":
         rows = [o for o in rows if o.metadata.get("expiry") is not None]
     if not rows:
-        raise ValueError(
-            f"{kind} data unavailable: collect the corresponding metrics with their metadata."
-        )
+        raise ValueError(f"{kind} data unavailable: collect the corresponding metrics with their metadata.")
     # Separate units and native quote to avoid implicit conversion or normalization.
     panels = defaultdict(list)
     for o in rows:
@@ -281,15 +285,16 @@ def render_chart(
     ``forecast`` is accepted for the shared interface but is never plotted as observed data.
     """
     if kind not in {"price", "weekly", "liquidity", "leverage", "options", "calibration"}:
-        raise ValueError(
-            "Unknown kind: choose price, weekly, liquidity, leverage, options or calibration."
-        )
+        raise ValueError("Unknown kind: choose price, weekly, liquidity, leverage, options or calibration.")
     output = Path(output)
     if output.suffix.lower() not in {".png", ".svg"}:
         raise ValueError("The output file must have the extension .png or .svg.")
     asset = _identity(candles, observations)
     rows = _valid_observations(observations, as_of)
-    with plt.style.context("dark_background"), matplotlib.rc_context({"svg.hashsalt": "crypto-market-analysis"}):
+    with (
+        plt.style.context("dark_background"),
+        matplotlib.rc_context({"svg.hashsalt": "crypto-market-analysis"}),
+    ):
         fig = plt.figure(figsize=(11, 6), facecolor="#101827", layout="constrained")
         try:
             if kind in {"price", "weekly"}:
@@ -316,6 +321,219 @@ def render_chart(
                 0.012,
                 f"{asset} · UTC · As of {_dt(as_of).strftime('%Y-%m-%d %H:%M')} · Mode: {mode}",
                 fontsize=8,
+                color="#cbd5e1",
+            )
+            output.parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(
+                output,
+                dpi=150,
+                facecolor=fig.get_facecolor(),
+                metadata={"Date": None}
+                if output.suffix.lower() == ".svg"
+                else {"Software": "crypto-market-analysis"},
+            )
+        finally:
+            plt.close(fig)
+    return output
+
+
+def _result_time(value) -> int:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            return int(parsed.timestamp())
+    raise ValueError("Chart timestamps require UTC epochs or timezone-aware ISO dates.")
+
+
+def _finite_points(rows: list[dict], field: str, as_of: int) -> list[tuple[int, float]]:
+    points = []
+    for row in rows:
+        if row.get(field) is None:
+            continue
+        time = _result_time(row["time"])
+        value = float(row[field])
+        if not isfinite(value):
+            raise ValueError("Chart values must be finite.")
+        if time <= as_of:
+            points.append((time, value))
+    return points
+
+
+def _context_result(fig, result: dict, as_of: int, quote: str):
+    history = result.get("price_history", [])
+    points = _finite_points(history, "close", as_of)
+    if not points:
+        raise ValueError("Context chart unavailable: no complete observed daily price history.")
+    ax, measures = fig.subplots(2, 1, gridspec_kw={"height_ratios": [3, 1]})
+    _series(ax, points, "Complete daily close", color="#60a5fa")
+    ax.set_ylabel(f"Price ({quote})")
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d", tz=UTC))
+    ax.set_title("Observed long-history context · complete UTC days", loc="left")
+    labels, returns, declines = [], [], []
+    for name, row in result.get("lookbacks", {}).items():
+        labels.append(str(row.get("lookback_days", name)))
+        returns.append((row.get("return") or {}).get("value"))
+        declines.append((row.get("decline_from_high") or {}).get("value"))
+    for values, label, color, offset in (
+        (returns, "Return", "#60a5fa", -0.18),
+        (declines, "Decline from observed high", "#fb7185", 0.18),
+    ):
+        available = [
+            (i, float(value))
+            for i, value in enumerate(values)
+            if value is not None and isfinite(float(value))
+        ]
+        if available:
+            measures.bar(
+                [i + offset for i, _ in available],
+                [value for _, value in available],
+                width=0.35,
+                label=label,
+                color=color,
+            )
+    measures.set_xticks(range(len(labels)), labels)
+    measures.set_xlabel("Observed lookback (complete UTC days); absent bars mean unavailable")
+    measures.set_ylabel("Fraction")
+    measures.yaxis.set_major_formatter(PercentFormatter(1))
+    if measures.containers:
+        measures.legend(fontsize=8)
+
+
+def _windows_result(fig, result: dict, as_of: int, quote: str):
+    anchor = result.get("anchor_price")
+    if anchor is None or not isfinite(float(anchor)) or float(anchor) <= 0:
+        raise ValueError("Purchase-window chart unavailable: no finite observed anchor.")
+    ax, frequency = fig.subplots(2, 1)
+    ax.axhline(float(anchor), label="Observed anchor", color="#60a5fa")
+    levels = sorted({float(t) for levels in result.get("windows", {}).values() for t in levels})
+    for threshold in levels:
+        ax.axhline(
+            float(anchor) * (1 - threshold), linestyle="--", label=f"Below-anchor threshold {threshold:.1%}"
+        )
+    ax.set_xticks([])
+    ax.set_ylabel(f"Price ({quote})")
+    ax.set_title("Purchase thresholds · no future price path", loc="left")
+    ax.legend(fontsize=8)
+    index = 0
+    labels = []
+    for horizon, thresholds in result.get("windows", {}).items():
+        for threshold, row in thresholds.items():
+            conditional = (row.get("conditional_frequencies") or {}).get("below_anchor_touch")
+            reference = (row.get("reference_frequencies") or {}).get("below_anchor_touch")
+            uncertainty = (row.get("uncertainty") or {}).get("below_anchor_touch")
+            if conditional is not None:
+                kwargs = {}
+                if isinstance(uncertainty, (list, tuple)) and len(uncertainty) == 2:
+                    lower, upper = map(float, uncertainty)
+                    kwargs["yerr"] = [[max(0, conditional - lower)], [max(0, upper - conditional)]]
+                frequency.errorbar(
+                    index - 0.08,
+                    conditional,
+                    fmt="o",
+                    color="#60a5fa",
+                    label="Conditional" if index == 0 else None,
+                    **kwargs,
+                )
+            if reference is not None:
+                frequency.plot(
+                    index + 0.08,
+                    reference,
+                    marker="s",
+                    color="#fbbf24",
+                    label="Reference" if index == 0 else None,
+                )
+            labels.append(f"{horizon}d / {float(threshold):.0%}\nn={row.get('effective_samples', 0)}")
+            index += 1
+    frequency.set_xticks(range(len(labels)), labels, fontsize=7)
+    frequency.set_ylim(0, 1)
+    frequency.yaxis.set_major_formatter(PercentFormatter(1))
+    frequency.set_ylabel("Touch frequency")
+    frequency.set_title(
+        "Experimental historical frequencies; absent points mean insufficient support", loc="left", fontsize=9
+    )
+    if frequency.lines:
+        frequency.legend(fontsize=8)
+
+
+def _plans_result(fig, result: dict, as_of: int, quote: str):
+    wealth, purchases = fig.subplots(2, 1, sharex=True)
+    found = False
+    for name, plan in result.get("plans", {}).items():
+        trajectory = plan.get("trajectory", [])
+        total = _finite_points(trajectory, "total_wealth", as_of)
+        reserve = _finite_points(trajectory, "reserve", as_of)
+        if total:
+            _series(wealth, total, f"{name}: holdings plus reserve")
+            found = True
+        if reserve:
+            _series(wealth, reserve, f"{name}: reserve", linestyle="--")
+        history = _finite_points(plan.get("history", []), "price", as_of)
+        if history:
+            purchases.scatter(
+                [_dt(t) for t, _ in history],
+                [price for _, price in history],
+                label=f"{name}: hypothetical purchases",
+                s=20,
+            )
+    if not found:
+        raise ValueError("Plan comparison chart unavailable: no observed valuation trajectory.")
+    wealth.set_ylabel(f"Holdings plus reserve ({quote})")
+    costs = "; ".join(
+        f"{name}: {plan.get('new_purchases_all_in_cost') or 'unknown'} {quote}"
+        for name, plan in result.get("plans", {}).items()
+    )
+    wealth.set_title(
+        f"Hypothetical purchase plans · non-interest-bearing reserve\nNew purchase all-in acquisition cost — {costs}",
+        loc="left",
+        fontsize=10,
+    )
+    wealth.legend(fontsize=7)
+    purchases.set_ylabel(f"Purchase price ({quote})")
+    purchases.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d", tz=UTC))
+    if purchases.collections:
+        purchases.legend(fontsize=7)
+    else:
+        purchases.text(
+            0.5, 0.5, "No hypothetical purchases available", transform=purchases.transAxes, ha="center"
+        )
+
+
+def render_result_chart(kind: str, result: dict, output: Path) -> Path:
+    """Render shared-engine context/windows/plans evidence without recalculating it."""
+    if kind not in {"context", "windows", "plans"}:
+        raise ValueError("Unknown result chart kind: choose context, windows or plans.")
+    output = Path(output)
+    if output.suffix.lower() not in {".png", ".svg"}:
+        raise ValueError("The output file must have the extension .png or .svg.")
+    as_of = _result_time(result.get("as_of"))
+    market = result.get("market") or result.get("config") or result
+    asset, quote, source = (
+        market.get(key) or result.get(key) or "unknown" for key in ("asset", "quote", "source")
+    )
+    mode = market.get("data_mode", result.get("data_mode", "unknown"))
+    mode = "SYNTHETIC DEMONSTRATION" if mode in {"demo", "synthetic"} else mode.upper()
+    reference = result.get("input_reference", result.get("input_fingerprint", "unavailable"))
+    with (
+        plt.style.context("dark_background"),
+        matplotlib.rc_context({"svg.hashsalt": "crypto-market-analysis", "svg.fonttype": "none"}),
+    ):
+        fig = plt.figure(figsize=(12, 8), facecolor="#101827", layout="constrained")
+        try:
+            {"context": _context_result, "windows": _windows_result, "plans": _plans_result}[kind](
+                fig, result, as_of, quote
+            )
+            for ax in fig.axes:
+                ax.set_facecolor("#172235")
+                ax.grid(alpha=0.17)
+            fig.get_layout_engine().set(rect=(0, 0.07, 1, 0.96))
+            fig.suptitle(f"{asset}/{quote} · {source} · {mode}", fontsize=12)
+            fig.text(
+                0.01,
+                0.025,
+                f"UTC · As of {_dt(as_of).isoformat()}\nInput reference: {reference}",
+                fontsize=7,
                 color="#cbd5e1",
             )
             output.parent.mkdir(parents=True, exist_ok=True)

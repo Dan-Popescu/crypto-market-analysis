@@ -15,6 +15,13 @@ from . import __version__
 from .config import load_settings
 from .engine import Engine, render_brief
 from .models import Candle
+from .reporting import (
+    bounded_integers,
+    bounded_object,
+    bounded_origins,
+    bounded_thresholds,
+    render_accumulation_report,
+)
 from .venues import VENUES
 
 EXAMPLE = """# Crypto Market Analysis — no paid collection APIs
@@ -54,6 +61,33 @@ def write_json(value: object, output: str | None = None) -> None:
         print(text, end="")
 
 
+def _json_file(path: Path) -> dict:
+    if path.stat().st_size > 2_000_000:
+        raise ValueError("Configuration exceeds the 2 MB limit.")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except RecursionError as exc:
+        raise ValueError("Configuration exceeds the JSON nesting limit.") from exc
+    return bounded_object(value)
+
+
+def _csv_numbers(value: str | None, cast):
+    return None if value is None else [cast(item) for item in value.split(",")]
+
+
+def _write_result(result: dict, args) -> None:
+    if args.format == "json":
+        write_json(result, args.output)
+    else:
+        text = render_accumulation_report(result, args.command)
+        if args.output:
+            path = Path(args.output)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        else:
+            print(text, end="")
+
+
 def _common(parser: argparse.ArgumentParser, sub: bool = False) -> None:
     default = argparse.SUPPRESS if sub else None
     parser.add_argument("--config", type=Path, default=default, help="TOML configuration")
@@ -81,11 +115,11 @@ def parser() -> argparse.ArgumentParser:
         _common(p, True)
         return p
 
-    init = command("init", "Create an editable configuration.", "crypto-market-analysis init --file observer.toml")
-    init.add_argument("--file", type=Path, default=Path("observer.toml"))
-    command(
-        "venues", "Venue catalogue and documented regulatory status.", "crypto-market-analysis venues"
+    init = command(
+        "init", "Create an editable configuration.", "crypto-market-analysis init --file observer.toml"
     )
+    init.add_argument("--file", type=Path, default=Path("observer.toml"))
+    command("venues", "Venue catalogue and documented regulatory status.", "crypto-market-analysis venues")
     collect = command(
         "collect",
         "Collect public endpoints once.",
@@ -140,11 +174,22 @@ def parser() -> argparse.ArgumentParser:
     )
     chart.add_argument(
         "--kind",
-        choices=("price", "weekly", "liquidity", "leverage", "options", "calibration"),
+        choices=(
+            "price",
+            "weekly",
+            "liquidity",
+            "leverage",
+            "options",
+            "calibration",
+            "context",
+            "windows",
+            "plans",
+        ),
         default="weekly",
     )
     chart.add_argument("--output", type=Path, required=True)
     chart.add_argument("--horizon", type=int, default=7)
+    chart.add_argument("--plan-config", type=Path, help="Required JSON configuration for a plans chart")
     chart.add_argument(
         "--validation",
         choices=("known_at", "retrospective"),
@@ -191,16 +236,104 @@ def parser() -> argparse.ArgumentParser:
     )
     demo.add_argument("--days", type=int, default=1800)
     serve = command(
-        "serve", "MCP server using STDIO or Streamable HTTP.", "crypto-market-analysis serve --transport stdio"
+        "serve",
+        "MCP server using STDIO or Streamable HTTP.",
+        "crypto-market-analysis serve --transport stdio",
     )
     serve.add_argument("--transport", choices=("stdio", "streamable-http"), default="stdio")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
-    for p in (brief, forecast, evaluation, chart):
-        p.add_argument("--asset", choices=("BTC", "ETH"), default="BTC")
+    context = command(
+        "context",
+        "Descriptive native-quote context through two years.",
+        "crypto-market-analysis context --asset BTC --lookbacks 30,365,730",
+    )
+    context.add_argument("--lookbacks", help="At most 16 unique day windows, 1–3650")
+    windows = command(
+        "windows",
+        "Experimental purchase windows with reference frequencies.",
+        "crypto-market-analysis windows --horizons 1,3,7,14",
+    )
+    windows.add_argument("--horizons", help="At most 16 unique horizons, 1–365 days")
+    windows.add_argument("--thresholds", help="At most 12 unique decline fractions, for example 0.02,0.05")
+    comparison = command(
+        "compare-plans",
+        "Compare hypothetical regular, split and deferred purchases.",
+        "crypto-market-analysis compare-plans --plan-config plan.json",
+    )
+    plan_evaluation = command(
+        "evaluate-plans",
+        "Paired chronological purchase-plan evaluation.",
+        "crypto-market-analysis evaluate-plans --plan-config plan.json --validation known_at",
+    )
+    for p in (comparison, plan_evaluation):
+        p.add_argument("--plan-config", type=Path, required=True, help="Finite JSON object, at most 2 MB")
         p.add_argument(
-            "--source", help="Reference venue; otherwise the most usable complete history"
+            "--validation",
+            choices=("known_at", "retrospective"),
+            default="known_at" if p is plan_evaluation else "retrospective",
         )
+    plan_evaluation.add_argument("--origins", help="At most 24 comma-separated UTC epochs or ISO dates")
+    plan_evaluation.add_argument("--held-out-start", type=parse_time)
+    plan_evaluation.add_argument("--policy-frozen-at", type=parse_time)
+    issue = command(
+        "issue",
+        "Explicitly save an immutable local assessment.",
+        "crypto-market-analysis issue --idempotency-key local-001 --asset BTC",
+    )
+    issue.add_argument("--idempotency-key", required=True)
+    issue.add_argument("--plan-config", type=Path)
+    assessment = command(
+        "assessment",
+        "Read an issued local assessment and appended outcomes.",
+        "crypto-market-analysis assessment --id ASSESSMENT_ID",
+    )
+    assessment.add_argument("--id", required=True)
+    observe = command(
+        "observe",
+        "Explicitly append observed outcomes to a local assessment.",
+        "crypto-market-analysis observe --id ASSESSMENT_ID",
+    )
+    observe.add_argument("--id", required=True)
+    vigilance = command(
+        "vigilance",
+        "Optional bounded 4/8-hour observational vigilance.",
+        "crypto-market-analysis vigilance --asset BTC --horizon-hours 4",
+    )
+    vigilance.add_argument("--horizon-hours", type=int, choices=(4, 8), default=4)
+    vigilance.add_argument("--policy", type=Path, help="Optional finite JSON policy object, at most 2 MB")
+    vigilance.add_argument("--state-key", help="Explicitly persist a local transition; omission is read-only")
+    command(
+        "sources",
+        "Source access, reuse rights and purchase-eligibility catalogue.",
+        "crypto-market-analysis sources",
+    )
+    history = command(
+        "import-history",
+        "Explicitly import a bounded sourced history archive.",
+        "crypto-market-analysis import-history --file history.csv --source kraken --quote EUR",
+    )
+    history.add_argument("--file", type=Path, required=True)
+    history.add_argument("--member", help="Explicit ZIP member name when needed")
+    history.add_argument("--expected-sha256", help="Optional expected archive SHA-256")
+    calendar = command(
+        "import-calendar",
+        "Import an explicitly sourced calendar file.",
+        "crypto-market-analysis import-calendar --file calendar.ics --kind bls",
+    )
+    calendar.add_argument("--file", type=Path, required=True)
+    calendar.add_argument("--kind", choices=("bls", "fed"), default="bls")
+    command(
+        "collect-calendar",
+        "Collect the bounded verified public calendar source once.",
+        "crypto-market-analysis collect-calendar --mode live",
+    )
+    for p in (context, windows, comparison, plan_evaluation, issue, assessment, observe, vigilance):
+        p.add_argument("--format", choices=("json", "markdown"), default="json")
+        p.add_argument("--output")
+    for p in (brief, forecast, evaluation, chart, context, windows, issue, vigilance, history):
+        p.add_argument("--asset", choices=("BTC", "ETH"), default="BTC")
+        p.add_argument("--source", help="Reference venue; otherwise the most usable complete history")
         p.add_argument("--quote", help="Native quote currency; no implicit conversion")
     return root
 
@@ -224,14 +357,100 @@ def main(argv: list[str] | None = None) -> int:
                 }
             )
             return 0
+        if args.command == "sources":
+            from .source_catalog import source_catalog
+
+            write_json(source_catalog())
+            return 0
         config_path = args.config or (Path("observer.toml") if Path("observer.toml").exists() else None)
         settings = load_settings(config_path, args.data_dir)
         engine = Engine(settings, args.mode)
-        now = args.as_of or int(datetime.now(UTC).timestamp())
-        if args.command == "collect":
+        now = args.as_of if args.as_of is not None else int(datetime.now(UTC).timestamp())
+        if args.command == "context":
+            lookbacks = bounded_integers(_csv_numbers(args.lookbacks, int), "lookbacks", 3650, 16)
+            _write_result(engine.context(args.asset, args.source, args.quote, args.as_of, lookbacks), args)
+        elif args.command == "windows":
+            horizons = bounded_integers(_csv_numbers(args.horizons, int), "horizons", 365, 16)
+            thresholds = bounded_thresholds(_csv_numbers(args.thresholds, float))
+            _write_result(
+                engine.purchase_windows(
+                    args.asset, args.source, args.quote, args.as_of, horizons, thresholds
+                ),
+                args,
+            )
+        elif args.command == "compare-plans":
+            _write_result(
+                engine.compare_plans(
+                    _json_file(args.plan_config), as_of=args.as_of, validation=args.validation
+                ),
+                args,
+            )
+        elif args.command == "evaluate-plans":
+            origins = bounded_origins(_csv_numbers(args.origins, parse_time))
+            _write_result(
+                engine.evaluate_plans(
+                    _json_file(args.plan_config),
+                    as_of=args.as_of,
+                    origins=origins,
+                    validation=args.validation,
+                    held_out_start=args.held_out_start,
+                    policy_frozen_at=args.policy_frozen_at,
+                ),
+                args,
+            )
+        elif args.command == "issue":
+            result = engine.issue_assessment(
+                args.idempotency_key,
+                asset=args.asset,
+                source=args.source,
+                quote=args.quote,
+                as_of=args.as_of,
+                plan_config=_json_file(args.plan_config) if args.plan_config else None,
+            )
+            _write_result(result, args)
+        elif args.command == "assessment":
+            result = engine.assessment(args.id)
+            _write_result({**result, "outcomes": engine.assessment_outcomes(args.id)}, args)
+        elif args.command == "observe":
+            _write_result(engine.observe_assessment(args.id, as_of=args.as_of), args)
+        elif args.command == "vigilance":
+            arguments = dict(
+                asset=args.asset,
+                source=args.source,
+                quote=args.quote,
+                as_of=args.as_of,
+                horizon_hours=args.horizon_hours,
+                policy=_json_file(args.policy) if args.policy else None,
+            )
+            result = (
+                engine.record_vigilance(args.state_key, **arguments)
+                if args.state_key
+                else engine.vigilance(**arguments)
+            )
+            _write_result(result, args)
+        elif args.command == "import-history":
+            if not args.source or not args.quote:
+                raise ValueError("History import requires explicit --source and --quote.")
+            write_json(
+                engine.import_history(
+                    args.file,
+                    args.source,
+                    args.asset,
+                    args.quote,
+                    member=args.member,
+                    expected_sha256=args.expected_sha256,
+                )
+            )
+        elif args.command == "import-calendar":
+            write_json(engine.import_calendar(args.file, kind=args.kind))
+        elif args.command == "collect-calendar":
+            if args.mode != "live" or args.as_of is not None:
+                raise ValueError("Network collection requires --mode live without --as-of.")
+            write_json(engine.collect_calendar())
+        elif args.command == "collect":
             from .pipeline import collect
 
-            if args.mode != "live" or args.as_of:
+            if args.mode != "live" or args.as_of is not None:
                 raise ValueError("Network collection requires --mode live without --as-of.")
             if args.venues:
                 settings.venues = args.venues.split(",")
@@ -252,7 +471,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "run":
             from .pipeline import run_scheduler
 
-            if args.mode != "live" or args.as_of:
+            if args.mode != "live" or args.as_of is not None:
                 raise ValueError("The continuous collector requires --mode live without --as-of.")
             run_scheduler(settings, engine.store)
         elif args.command == "status":
@@ -292,16 +511,26 @@ def main(argv: list[str] | None = None) -> int:
                 args.output,
             )
         elif args.command == "chart":
-            path = engine.chart(
-                args.kind,
-                args.asset,
-                args.output,
-                args.source,
-                args.quote,
-                args.as_of,
-                args.horizon,
-                args.validation,
-            )
+            if args.kind == "plans":
+                from .charts import render_result_chart
+
+                if args.plan_config is None:
+                    raise ValueError("A plans chart requires --plan-config.")
+                result = engine.compare_plans(
+                    _json_file(args.plan_config), as_of=args.as_of, validation=args.validation
+                )
+                path = render_result_chart("plans", result, args.output)
+            else:
+                path = engine.chart(
+                    args.kind,
+                    args.asset,
+                    args.output,
+                    args.source,
+                    args.quote,
+                    args.as_of,
+                    args.horizon,
+                    args.validation,
+                )
             write_json({"path": str(path.resolve()), "data_mode": args.mode})
         elif args.command == "export":
             write_json(engine.store.export_parquet(args.output))
@@ -393,7 +622,8 @@ def main(argv: list[str] | None = None) -> int:
     except (ValueError, KeyError, TypeError, OSError) as exc:
         print(
             json.dumps(
-                {"error": str(exc), "hint": "Use crypto-market-analysis <command> --help."}, ensure_ascii=False
+                {"error": str(exc), "hint": "Use crypto-market-analysis <command> --help."},
+                ensure_ascii=False,
             ),
             file=sys.stderr,
         )
