@@ -6,6 +6,8 @@ from dataclasses import replace
 
 import pytest
 
+from crypto_market_analysis.config import Settings
+from crypto_market_analysis.engine import Engine
 from crypto_market_analysis.history_dataset import (
     ArchivePart,
     DatasetConfig,
@@ -143,7 +145,7 @@ def test_foreign_dataset_identity_and_mode_are_rejected(tmp_path):
         DatasetConfig("bad", str(tmp_path / "bad"), 0, 3600, data_mode="live")
     other = tmp_path / "other"
     other.mkdir()
-    (other / "history.sqlite3").touch()
+    (other / "observer.sqlite").touch()
     with pytest.raises(ValueError, match="empty directory"):
         HistoryDataset(replace(ds.config, directory=str(other)))
 
@@ -160,7 +162,9 @@ def test_public_adapter_native_symbol_and_raw_response():
             return [row(1)]
 
     adapter = KrakenRESTCapture(Client())
-    assert adapter("BTC", "EUR", 3600, 720).raw == b'{"result":"synthetic"}'
+    captured = adapter("BTC", "EUR", 3600, 720)
+    assert captured.raw == b'{"result":"synthetic"}'
+    assert captured.capture_evidence == "injected_client_unqualified"
     with pytest.raises(UnsupportedMarket):
         adapter("BTC", "USD", 3600, 720)
 
@@ -193,3 +197,16 @@ def test_restart_recovers_capture_journal_before_gap_resume(tmp_path, monkeypatc
     assert len(recovered.manifest()["captures"]) == 1
     assert len(recovered.store.candles("BTC", mode="import", as_of=NOW + 100)) == 1
     assert not list(ds.directory.glob("pending-*.json"))
+
+
+def test_normal_import_engine_reads_dataset_directory_without_mode_union(tmp_path):
+    ds = dataset(tmp_path)
+    ds.append_rest("BTC", "EUR", lambda *_: RESTCapture([row(0)]), since=0)
+    settings = Settings(data_dir=ds.directory)
+    assert ds.store.path == settings.database
+    candles, _ = Engine(settings, "import").selected_candles("BTC", "kraken", "EUR", as_of=NOW)
+    assert len(candles) == 1
+    assert Engine(settings, "live").selected_candles("BTC", "kraken", "EUR", as_of=NOW)[0] == []
+    evidence = ds.manifest()["markets"][0]["capture_evidence"]
+    assert evidence == {"public_rest_captures_observed": 0, "injected_unqualified_captures": 1,
+                        "report_qualification": "unverified"}

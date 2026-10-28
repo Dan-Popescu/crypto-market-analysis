@@ -90,6 +90,7 @@ class RESTCapture:
     rows: list[list]
     raw: bytes | None = None
     endpoint: str = "https://api.kraken.com/0/public/OHLC"
+    capture_evidence: str = "injected_fetch_unqualified"
 
 
 class UnsupportedMarket(ValueError):
@@ -103,6 +104,7 @@ class KrakenRESTCapture:
     final OHLC response, not catalogue bytes. Budgets count OHLC fetch calls.
     """
     def __init__(self, client=None):
+        self.capture_evidence = "public_rest_adapter" if client is None else "injected_client_unqualified"
         if client is None:
             import ccxt
             client = ccxt.kraken({"enableRateLimit": True, "timeout": 10000,
@@ -116,7 +118,8 @@ class KrakenRESTCapture:
             raise UnsupportedMarket(f"Unsupported Kraken native spot market: {symbol}")
         rows = self.client.fetch_ohlcv(symbol, "1h", since=since * 1000, limit=limit)
         raw = getattr(self.client, "last_http_response", None)
-        return RESTCapture(rows, raw.encode() if isinstance(raw, str) else raw)
+        return RESTCapture(rows, raw.encode() if isinstance(raw, str) else raw,
+                           capture_evidence=self.capture_evidence)
 
 
 class _Parts(io.RawIOBase):
@@ -175,7 +178,7 @@ class HistoryDataset:
             if any(self.directory.iterdir()):
                 raise ValueError("A new dataset requires its own empty directory.")
             identity.write_text(encoded)
-        self.store = Store(self.directory / "history.sqlite3")
+        self.store = Store(self.directory / "observer.sqlite")
         with self.store.connection() as con:
             con.executescript("""
                 CREATE TABLE IF NOT EXISTS history_captures (
@@ -399,6 +402,7 @@ class HistoryDataset:
             result = self._materialize(candles, {
                 "source": "kraken", "asset": asset, "quote": quote, "timeframe": "1h",
                 "acquisition": "public_rest", "original_mode": "public_rest_capture",
+                "capture_evidence": capture.capture_evidence,
                 "captured_at": received, "endpoint": capture.endpoint, "since": since,
                 "response_rows_sha256": _hash(encoded)}, raw=capture.raw)
             attempt.update(status="success", captured_at=received, count=len(candles),
@@ -492,12 +496,21 @@ class HistoryDataset:
                     cursor += 3600
                 gaps.append({"start": start, "end": cursor, "status": "unknown"})
             own_attempts = [json.loads(a["payload"]) for a in attempts if (a["asset"], a["quote"]) == (asset, quote)]
+            own_captures = [c for c in captures if (c["asset"], c["quote"]) == (asset, quote)]
+            public_captures = sum(c.get("capture_evidence") == "public_rest_adapter" and c["rows"] > 0
+                                  for c in own_captures)
+            injected_captures = sum(c.get("capture_evidence", "").startswith("injected_")
+                                    for c in own_captures)
             records.append({"asset": asset, "quote": quote, "source": "kraken", "data_mode": "import",
                             "count": len(rows), "first_open_time": rows[0].open_time if rows else None,
                             "last_close_time": rows[-1].close_time if rows else None, "gaps": gaps,
                             "target_hours": (self.config.target_end - self.config.target_start) // 3600,
                             "coverage_status": "complete" if not gaps else "incomplete" if rows else "unavailable",
-                            "real_acceptance": "unverified", "intended_use": "local_research_unqualified",
+                            "real_acceptance": "unverified",
+                            "capture_evidence": {"public_rest_captures_observed": public_captures,
+                                                 "injected_unqualified_captures": injected_captures,
+                                                 "report_qualification": "unverified"},
+                            "intended_use": "local_research_unqualified",
                             "attempts": own_attempts, "repair": repairs.get(asset + quote)})
         return {"dataset": self.config.name, "source": "kraken", "data_mode": "import",
                 "dataset_version": "sha256:" + _hash(_json([c["id"] for c in captures]).encode()),
