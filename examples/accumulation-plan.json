@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "asset": "BTC",
+  "quote": "EUR",
+  "source": "synthetic-reference",
+  "data_mode": "demo",
+  "start_time": 1767225600,
+  "contributions": [
+    {"time": 1767225600, "amount": "100"},
+    {"time": 1769904000, "amount": "100"}
+  ],
+  "schedule": [
+    {"time": 1767225600, "amount": "90"},
+    {"time": 1769904000, "amount": "90"}
+  ],
+  "starting_holdings": {"quantity": "0", "cost": null},
+  "fees": {"rate": "0.002", "fixed": "0", "asset": "quote"},
+  "execution": {
+    "assumption": "historical_configured_costs",
+    "timeframe": "1h",
+    "spread_bps": "10",
+    "slippage_bps": "5",
+    "quantity_step": "0.00000001",
+    "price_step": "0.01",
+    "max_price_age_seconds": 3600
+  },
+  "plans": {
+    "split": {
+      "initial_fraction": "0.5",
+      "levels": [{"decline": "0.05", "fraction": "0.5"}],
+      "max_wait_days": 7,
+      "fallback": "buy_at_deadline"
+    },
+    "deferred": {
+      "fraction": "0.5",
+      "decline": "0.05",
+      "max_wait_days": 7,
+      "fallback": "buy_at_deadline"
+    }
+  }
+}
