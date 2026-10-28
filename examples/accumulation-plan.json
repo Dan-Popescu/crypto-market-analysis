@@ -29,12 +29,14 @@
       "initial_fraction": "0.5",
       "levels": [{"decline": "0.05", "fraction": "0.5"}],
       "max_wait_days": 7,
+      "max_deferred_reserve_quote": "50",
       "fallback": "buy_at_deadline"
     },
     "deferred": {
       "fraction": "0.5",
       "decline": "0.05",
       "max_wait_days": 7,
+      "max_deferred_reserve_quote": "50",
       "fallback": "buy_at_deadline"
     }
   }

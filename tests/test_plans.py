@@ -124,3 +124,34 @@ def test_rounding_dust_and_quote_fee_do_not_overdraw():
     assert result['net_quantity'] == '0.3'
     assert result['reserve'] == '0'
     assert result['fees_quote'] == '0.1'
+
+
+def test_terminal_drawdown_excludes_next_bar_open_and_cutoff_purchase():
+    data = [replace(c, open=5, high=10, low=5) if c.open_time == 90 * DAY else c for c in bars()]
+    cfg = config(schedule=[{'time': 0, 'amount': '50'}, {'time': 90 * DAY, 'amount': '40'}])
+    result = compare_plans(cfg, data, 181 * DAY)['plans']['regular']
+    assert result['terminals']['90']['maximum_drawdown'] == '0'
+    assert result['terminals']['90']['net_quantity'] == '5'
+    assert result['terminals']['90']['reserve'] == '50'
+
+
+def test_unknown_fields_are_rejected_instead_of_silently_ignoring_risk_rules():
+    with pytest.raises(ValueError, match='Unsupported'):
+        compare_plans(config(reserve_limit='10'), bars(), DAY)
+
+
+def test_future_versions_do_not_change_earlier_comparison():
+    baseline = compare_plans(config(), bars(), 10 * DAY)
+    changed = [replace(c, open=100, high=100, low=100, close=100)
+               if c.close_time > 10 * DAY else c for c in bars()]
+    assert compare_plans(config(), changed, 10 * DAY) == baseline
+
+
+def test_deferred_cash_cap_overflow_buys_immediately_without_reusing_cash():
+    cfg = config(plans={'deferred': {'fraction': '1', 'decline': '0.2', 'max_wait_days': 7,
+                                    'fallback': 'reserve', 'max_deferred_reserve_quote': '20'}})
+    result = compare_plans(cfg, bars(), DAY)['plans']['deferred']
+    assert result['amount_spent'] == '70'
+    assert result['locked_reserve'] == '20'
+    assert result['reserve'] == '30'
+    assert result['waiting_targets'][0]['waiting_seconds'] == DAY

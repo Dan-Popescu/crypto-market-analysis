@@ -13,6 +13,7 @@ it. All historical execution is a configurable cost assumption.
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from dataclasses import dataclass
 from decimal import ROUND_CEILING, ROUND_DOWN, Decimal, InvalidOperation, localcontext
 
@@ -51,6 +52,9 @@ def validate_config(config: dict) -> dict:
     """Return an independent, JSON-safe normalized v1 request."""
     if not isinstance(config, dict) or type(config.get('schema_version')) is not int or config['schema_version'] != 1:
         raise ValueError('schema_version must be 1')
+    if set(config) - {'schema_version', 'asset', 'quote', 'source', 'data_mode', 'start_time',
+                      'contributions', 'schedule', 'starting_holdings', 'fees', 'execution', 'plans'}:
+        raise ValueError('Unsupported configuration fields')
     if config.get('asset') not in ('BTC', 'ETH') or config.get('quote') not in ('EUR', 'USD'):
         raise ValueError('Only BTC/ETH and native EUR/USD quotes are supported')
     if not isinstance(config.get('source'), str) or not 1 <= len(config['source']) <= 100:
@@ -67,7 +71,7 @@ def validate_config(config: dict) -> dict:
             raise ValueError(f'{name} must have at most {MAX_ACTIONS} rows')
         result[name] = []
         for row in rows:
-            if not isinstance(row, dict):
+            if not isinstance(row, dict) or set(row) != {'time', 'amount'}:
                 raise ValueError(f'{name} rows must be objects')
             t = _time(row.get('time'), f'{name}.time')
             if not start <= t <= start + 180 * DAY:
@@ -78,6 +82,8 @@ def validate_config(config: dict) -> dict:
     fees = config.get('fees', {})
     if not isinstance(fees, dict) or fees.get('asset', 'quote') not in ('quote', 'base'):
         raise ValueError('Unsupported fee asset; third-asset inventory/conversion is unavailable')
+    if set(fees) - {'rate', 'fixed', 'asset'}:
+        raise ValueError('Unsupported fee fields')
     result['fees'] = {'asset': fees.get('asset', 'quote')}
     for name in ('fixed', 'rate'):
         result['fees'][name] = decimal_string(_decimal(fees.get(name, '0'), f'fees.{name}'))
@@ -110,6 +116,8 @@ def validate_config(config: dict) -> dict:
     holdings = config.get('starting_holdings', {})
     if not isinstance(holdings, dict):
         raise ValueError('starting_holdings must be an object')
+    if set(holdings) - {'quantity', 'cost'}:
+        raise ValueError('Unsupported starting holdings fields')
     result['starting_holdings'] = {'quantity': decimal_string(_decimal(holdings.get('quantity', '0'), 'quantity')),
                                    'cost': None}
     if holdings.get('cost') is not None:
@@ -121,6 +129,8 @@ def validate_config(config: dict) -> dict:
     deferred = plans.get('deferred', {})
     if not isinstance(split, dict) or not isinstance(deferred, dict):
         raise ValueError('Policies must be objects')
+    if set(split) - {'initial_fraction', 'levels', 'max_wait_days', 'fallback', 'max_deferred_reserve_quote'} or set(deferred) - {'fraction', 'decline', 'max_wait_days', 'fallback', 'max_deferred_reserve_quote'}:
+        raise ValueError('Unsupported policy fields')
     result['plans'] = {}
     for name, policy in [('split', split), ('deferred', deferred)]:
         wait = policy.get('max_wait_days', 7)
@@ -129,13 +139,19 @@ def validate_config(config: dict) -> dict:
         fallback = policy.get('fallback', 'buy_at_deadline')
         if fallback not in ('buy_at_deadline', 'reserve'):
             raise ValueError('fallback must be buy_at_deadline or reserve')
-        result['plans'][name] = {'max_wait_days': wait, 'fallback': fallback}
+        cap = policy.get('max_deferred_reserve_quote')
+        if cap is not None:
+            cap = decimal_string(_decimal(cap, 'max_deferred_reserve_quote'))
+        result['plans'][name] = {'max_wait_days': wait, 'fallback': fallback,
+                                 'max_deferred_reserve_quote': cap}
     initial = _decimal(split.get('initial_fraction', '0.5'), 'initial_fraction')
     levels = split.get('levels', [{'decline': '0.05', 'fraction': '0.5'}])
     if not isinstance(levels, list) or not 1 <= len(levels) <= 8:
         raise ValueError('split levels must contain 1 to 8 entries')
     normalized = []
     for row in levels:
+        if not isinstance(row, dict) or set(row) != {'decline', 'fraction'}:
+            raise ValueError('Each split level requires decline and fraction')
         decline = _decimal(row.get('decline'), 'decline', positive=True)
         fraction = _decimal(row.get('fraction'), 'fraction', positive=True)
         if decline >= 1 or fraction > 1:
@@ -149,7 +165,8 @@ def validate_config(config: dict) -> dict:
     if fraction > 1 or decline >= 1:
         raise ValueError('Deferred fraction or decline is outside supported bounds')
     result['plans']['deferred'].update(fraction=decimal_string(fraction), decline=decimal_string(decline))
-    if len(result['schedule']) * (len(normalized) + 1) > MAX_ACTIONS:
+    cap_factor = 2 if any(p['max_deferred_reserve_quote'] is not None for p in result['plans'].values()) else 1
+    if len(result['schedule']) * (len(normalized) + 1) * cap_factor > MAX_ACTIONS:
         raise ValueError(f'Expanded purchase intents must not exceed {MAX_ACTIONS}')
     return result
 
@@ -212,6 +229,17 @@ def _simulate(config, bars, as_of, family, validation):
     terminals, trajectory = {}, []
     units, nav, peak, max_drawdown = ZERO, ONE, ONE, ZERO
     last_mark = None
+    close_times = [c.close_time for c in bars]
+
+    def anchor_at(time):
+        index = bisect_right(close_times, time) - 1
+        while index >= 0:
+            candidate = bars[index]
+            if validation == 'retrospective' or candidate.observed_at <= time:
+                return candidate
+            index -= 1
+        return None
+
     by_open = {c.open_time: c for c in bars}
     by_close = {c.close_time: c for c in bars}
     contributions, schedules = {}, {}
@@ -257,14 +285,24 @@ def _simulate(config, bars, as_of, family, validation):
         funding.append({'time': time, 'requested_notional': decimal_string(notional),
                         'allocated_cash': decimal_string(budget), 'funding_shortfall': budget < needed})
         if budget:
-            intents.append(_Intent(time, budget, target, deadline, fallback))
+            if target is not None:
+                cap = config['plans'][family]['max_deferred_reserve_quote']
+                if cap is not None:
+                    locked = sum((i.budget for i in intents if i.status == 'waiting' and i.target is not None), ZERO)
+                    deferred_budget = min(budget, max(ZERO, Decimal(cap) - locked))
+                    if budget > deferred_budget:
+                        intents.append(_Intent(time, budget - deferred_budget, None, None, 'buy_at_deadline'))
+                    budget = deferred_budget
+            if budget:
+                intents.append(_Intent(time, budget, target, deadline, fallback))
 
     for time in sorted(t for t in times if config['start_time'] <= t <= simulation_end):
         bar = by_open.get(time)
         closing = by_close.get(time)
         if closing:
             mark(Decimal(str(closing.close)))
-        if bar:
+        terminal_boundary = time in (config['start_time'] + 90 * DAY, config['start_time'] + 180 * DAY)
+        if bar and not terminal_boundary:
             mark(Decimal(str(bar.open)))
         for amount in contributions.get(time, []):
             # Unit issuance at the immediately preceding portfolio NAV prevents
@@ -280,8 +318,8 @@ def _simulate(config, bars, as_of, family, validation):
             deposits += amount
         for days in (90, 180):
             if time == config['start_time'] + days * DAY:
-                candidates = [c for c in bars if c.close_time <= time]
-                valuation = candidates[-1] if candidates else None
+                index = bisect_right(close_times, time) - 1
+                valuation = bars[index] if index >= 0 else None
                 if valuation and time - valuation.close_time <= settings['max_price_age_seconds']:
                     price = Decimal(str(valuation.close))
                     terminals[str(days)] = {'status': 'complete', 'time': time,
@@ -294,9 +332,10 @@ def _simulate(config, bars, as_of, family, validation):
                         'maximum_drawdown': decimal_string(max_drawdown)}
                 else:
                     terminals[str(days)] = {'status': 'pending', 'time': time, 'reason': 'terminal_price_unavailable'}
+        if bar and terminal_boundary:
+            mark(Decimal(str(bar.open)))
         for amount in schedules.get(time, []):
-            anchors = [c for c in bars if c.close_time <= time and (validation == 'retrospective' or c.observed_at <= time)]
-            anchor_bar = anchors[-1] if anchors else None
+            anchor_bar = anchor_at(time)
             anchor = Decimal(str(anchor_bar.close)) if anchor_bar and time - anchor_bar.close_time <= settings['max_price_age_seconds'] else None
             if family == 'regular':
                 allocate(time, amount, None, None, 'buy_at_deadline')
@@ -360,6 +399,7 @@ def _simulate(config, bars, as_of, family, validation):
                             'fee_quote': decimal_string(quote_fee), 'fee_base': decimal_string(base_fee),
                             'waiting_seconds': time - intent.created, 'deadline_fallback': intent.expired,
                             'execution': 'assumed_full_bar_open'})
+        intents = [intent for intent in intents if intent.status == 'waiting']
         if last_mark is not None:
             mark(last_mark)
         if time in contributions or time in schedules or time % DAY == 0 or time == simulation_end or (history and history[-1]['time'] == time):
@@ -372,7 +412,13 @@ def _simulate(config, bars, as_of, family, validation):
                                         'reason': 'future_horizon'})
     total_cost = spent + fees_quote
     known_cost = config['starting_holdings']['cost']
-    return {'status': 'simulated', 'contributions': decimal_string(deposits),
+    valuation = bars[-1] if bars and as_of - bars[-1].close_time <= settings['max_price_age_seconds'] else None
+    valuation_price = Decimal(str(valuation.close)) if valuation else None
+    return {'status': 'simulated' if bars else 'insufficient',
+            'total_wealth': decimal_string(wealth(valuation_price)) if valuation_price is not None else None,
+            'valuation': {'time': as_of, 'status': 'available' if valuation else 'unavailable',
+                          'price_time': valuation.close_time if valuation else None,
+                          'price': decimal_string(valuation_price) if valuation_price is not None else None}, 'contributions': decimal_string(deposits),
             'amount_spent': decimal_string(spent), 'fees_quote': decimal_string(fees_quote),
             'fees_base': decimal_string(fees_base), 'reserve': decimal_string(reserve()),
             'unallocated_reserve': decimal_string(free),
@@ -386,7 +432,12 @@ def _simulate(config, bars, as_of, family, validation):
             'maximum_drawdown': decimal_string(max_drawdown),
             'drawdown_method': 'unitized_NAV_deposits_issue_units_at_pre_deposit_NAV',
             'trajectory': trajectory,
-            'pending_targets': sum(i.status == 'waiting' for i in intents)}
+            'pending_targets': sum(i.status == 'waiting' for i in intents),
+            'waiting_targets': [{'created': i.created, 'deadline': i.deadline,
+                                 'target': decimal_string(i.target) if i.target is not None else None,
+                                 'allocated_cash': decimal_string(i.budget),
+                                 'waiting_seconds': simulation_end - i.created}
+                                for i in intents if i.status == 'waiting']}
 
 
 def compare_plans(config: dict, candles: list[Candle], as_of: int, *, validation: str = 'retrospective') -> dict:
@@ -409,6 +460,8 @@ def compare_plans(config: dict, candles: list[Candle], as_of: int, *, validation
                     'Full post-activation bar opens only; low touches never imply fills; gaps wait for the next eligible bar.',
                     'Reserve is non-interest-bearing native quote cash; no conversion or third-asset fees.',
                     'Purchase amount means quote notional excluding quote fees; cash allocation is exclusive.',
+                    'Optional max_deferred_reserve_quote caps locked target cash; overflow buys at the next eligible open.',
+                    'Maximum 2000 expanded intents and 100000 candle versions; schedules/contributions span at most 180 days.',
                     ('Strict mode uses earliest timely candle vintages and anchors available at activation; execution remains hypothetical.' if validation == 'known_at' else 'Latest versions available at as_of provide retrospective reference prices; this is not a point-in-time availability claim.'),
                     'Terminals include contributions at the cutoff and purchases strictly before it.'],
                 'coverage': {'complete_bars': len(bars), 'start': bars[0].open_time if bars else None,
