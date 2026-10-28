@@ -93,7 +93,9 @@ Default limits are 256 MiB per input file, 64 MiB per selected uncompressed memb
 2,000 members and 200,000 CSV rows. `ImportLimits` permits explicit local adjustment
 for official large Kraken archives. Choose the exact hourly member; archive paths,
 duplicate member names, encrypted entries and traversal paths are rejected. The
-parser reads bounded bytes without writing archive contents to disk.
+parser hashes and reads the same bounded temporary input snapshot even if the
+original file changes during import. The snapshot may spill to a temporary file;
+archive members are never extracted.
 
 Every candle has `data_mode="import"` and `observed_at` equal to the supplied
 import capture time. Provenance records the file and member SHA256, immutable

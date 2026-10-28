@@ -148,3 +148,20 @@ def test_input_file_size_and_member_count_are_bounded(tmp_path):
         import_history(path, **kwargs, limits=ImportLimits(max_members=1))
     with pytest.raises(ValueError, match="file-size"):
         import_history(path, **kwargs, limits=ImportLimits(max_file_bytes=1))
+
+
+def test_import_hash_and_candles_use_same_snapshot_during_source_replacement(tmp_path, monkeypatch):
+    path = tmp_path / "history.zip"
+    name = "XBTUSD_60.csv"
+    original_hash = write_zip(path, name, "0,10,12,8,11,2,3\n")
+    is_zipfile = zipfile.is_zipfile
+
+    def replace_original_after_capture(stream):
+        write_zip(path, name, "0,20,22,18,21,2,3\n")
+        return is_zipfile(stream)
+
+    monkeypatch.setattr(zipfile, "is_zipfile", replace_original_after_capture)
+    result = import_history(path, source="kraken", asset="BTC", quote="USD", observed_at=3600, member=name)
+    assert result.candles[0].close == 11
+    assert result.provenance["file_sha256"] == original_hash
+    assert hashlib.sha256(path.read_bytes()).hexdigest() != original_hash

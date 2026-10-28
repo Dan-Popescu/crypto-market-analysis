@@ -33,6 +33,7 @@ class EndpointProfile:
     units: str = "OHLC in native quote; volume in base asset"
     rights: str = "unresolved; public access is not a redistribution licence"
     rights_url: str = ""
+    rights_checked_at: str = CHECKED_AT
     documentation_checked_at: str = CHECKED_AT
     access_status: str = "untested"
     access_checked_at: str | None = None
@@ -785,7 +786,13 @@ def etf_flow_row(
     values = [number(value) for value in fund_values]
     reported = sum(value is not None for value in values)
     parsed_total = number(total)
-    status = "pending" if reported == 0 else "partial" if reported < len(values) else "reported"
+    status = (
+        "pending"
+        if reported == 0
+        else "partial"
+        if reported < len(values) or parsed_total is None
+        else "reported"
+    )
     value = parsed_total if status == "reported" else None
     return {
         "asset": asset,

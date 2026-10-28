@@ -140,3 +140,15 @@ def test_funding_interval_aliases_require_explicit_units_and_agree():
     assert known["funding_interval_seconds"] == 28800 and known["change"] == 1
     unknown = next(row for row in result["observations"] if row["event_time"] == 40)
     assert unknown["funding_interval_seconds"] is None and unknown["change"] is None
+
+
+def test_etf_fund_values_without_source_total_remain_partial():
+    row = etf_flow_row(
+        asset="ETH",
+        session_date="2026-10-28",
+        fund_values=[1, 2],
+        total="-",
+        observed_at=100,
+        source_url="https://example.test/synthetic-table",
+    )
+    assert row["status"] == "partial" and row["value"] is None and row["reported_fund_count"] == 2

@@ -11,7 +11,9 @@ import hashlib
 import io
 import math
 import re
+import tempfile
 import zipfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -38,16 +40,21 @@ class HistoryImportResult:
     provenance: dict[str, Any]
 
 
-def _digest(path: Path, limit: int) -> str:
+@contextmanager
+def _snapshot(path: Path, limit: int):
+    """Hash and parse the same bounded bytes even if the original file changes."""
     digest = hashlib.sha256()
     size = 0
-    with path.open("rb") as stream:
-        while block := stream.read(1024 * 1024):
-            size += len(block)
-            if size > limit:
-                raise ValueError("History file exceeds the file-size limit.")
-            digest.update(block)
-    return digest.hexdigest()
+    with tempfile.SpooledTemporaryFile(max_size=1024 * 1024) as snapshot:
+        with path.open("rb") as stream:
+            while block := stream.read(1024 * 1024):
+                size += len(block)
+                if size > limit:
+                    raise ValueError("History file exceeds the file-size limit.")
+                digest.update(block)
+                snapshot.write(block)
+        snapshot.seek(0)
+        yield snapshot, digest.hexdigest()
 
 
 def _checksum(expected: str, filename: str) -> str:
@@ -90,40 +97,39 @@ def import_history(
         raise ValueError("Import observation time must be a nonnegative UTC epoch second.")
     if path.stat().st_size > limits.max_file_bytes:
         raise ValueError("History file exceeds the file-size limit.")
-    file_hash = _digest(path, limits.max_file_bytes)
-    if source == "binance" and expected_sha256 is None:
-        raise ValueError("Binance Vision imports require a SHA256 checksum.")
-    if expected_sha256 is not None and file_hash != _checksum(expected_sha256, path.name):
-        raise ValueError("History file SHA256 checksum mismatch.")
-    if zipfile.is_zipfile(path):
-        if member is None:
-            raise ValueError("Select the exact hourly CSV archive member.")
-        with zipfile.ZipFile(path) as archive:
-            entries = archive.infolist()
-            if len(entries) > limits.max_members:
-                raise ValueError("Archive exceeds the member-count limit.")
-            matches = [entry for entry in entries if entry.filename == member]
-            if len(matches) != 1:
-                raise ValueError("Archive member is missing or duplicated.")
-            entry = matches[0]
-            safe = PurePosixPath(member)
-            if (
-                safe.is_absolute()
-                or ".." in safe.parts
-                or "\\" in member
-                or entry.is_dir()
-                or entry.flag_bits & 1
-                or entry.file_size > limits.max_member_bytes
-            ):
-                raise ValueError("Archive member is unsafe, encrypted or exceeds the size limit.")
-            with archive.open(entry) as stream:
-                payload = stream.read(limits.max_member_bytes + 1)
-    else:
-        if member is not None:
-            raise ValueError("Member selection is only valid for ZIP archives.")
-        if path.stat().st_size > limits.max_member_bytes:
-            raise ValueError("CSV exceeds the member-size limit.")
-        payload = path.read_bytes()
+    with _snapshot(path, limits.max_file_bytes) as (snapshot, file_hash):
+        if source == "binance" and expected_sha256 is None:
+            raise ValueError("Binance Vision imports require a SHA256 checksum.")
+        if expected_sha256 is not None and file_hash != _checksum(expected_sha256, path.name):
+            raise ValueError("History file SHA256 checksum mismatch.")
+        if zipfile.is_zipfile(snapshot):
+            if member is None:
+                raise ValueError("Select the exact hourly CSV archive member.")
+            with zipfile.ZipFile(snapshot) as archive:
+                entries = archive.infolist()
+                if len(entries) > limits.max_members:
+                    raise ValueError("Archive exceeds the member-count limit.")
+                matches = [entry for entry in entries if entry.filename == member]
+                if len(matches) != 1:
+                    raise ValueError("Archive member is missing or duplicated.")
+                entry = matches[0]
+                safe = PurePosixPath(member)
+                if (
+                    safe.is_absolute()
+                    or ".." in safe.parts
+                    or "\\" in member
+                    or entry.is_dir()
+                    or entry.flag_bits & 1
+                    or entry.file_size > limits.max_member_bytes
+                ):
+                    raise ValueError("Archive member is unsafe, encrypted or exceeds the size limit.")
+                with archive.open(entry) as stream:
+                    payload = stream.read(limits.max_member_bytes + 1)
+        else:
+            if member is not None:
+                raise ValueError("Member selection is only valid for ZIP archives.")
+            snapshot.seek(0)
+            payload = snapshot.read(limits.max_member_bytes + 1)
     if len(payload) > limits.max_member_bytes:
         raise ValueError("CSV exceeds the member-size limit.")
     name = PurePosixPath(member or path.name).name

@@ -109,3 +109,11 @@ def test_calendar_size_limit_and_duplicate_fields():
         parse_bls_ics("x" * (2 * 1024 * 1024 + 1), 100)
     with pytest.raises(ValueError, match="Duplicate ICS"):
         parse_bls_ics(ics(":20260114T083000", "UID:second\r\n"), 100)
+
+
+def test_cancelled_utc_cpi_entry_retains_schedule_without_publication_claim():
+    [event] = parse_bls_ics(ics(":20260714T123000Z", "STATUS:CANCELLED\r\n"), 100)
+    assert event["status"] == "cancelled"
+    assert event["original_timezone"] == "UTC"
+    assert event["event_time"] == epoch("2026-07-14T12:30:00")
+    assert event["publication_status"] == "unknown"
