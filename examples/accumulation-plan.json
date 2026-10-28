@@ -33,11 +33,11 @@
       "fallback": "buy_at_deadline"
     },
     "deferred": {
-      "fraction": "0.5",
-      "decline": "0.05",
-      "max_wait_days": 7,
-      "max_deferred_reserve_quote": "50",
-      "fallback": "buy_at_deadline"
+      "fraction": "1",
+      "decline": "0.10",
+      "max_wait_days": 14,
+      "max_deferred_reserve_quote": "100",
+      "fallback": "reserve"
     }
   }
 }
