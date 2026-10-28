@@ -335,8 +335,10 @@ class HistoryDataset:
                     raise ValueError("Archive member is encrypted or exceeds the configured bound.")
                 self._space(entry.file_size * 5)
                 staged = self.directory / expected_member
+                created = False
                 try:
                     with archive.open(entry) as source, staged.open("xb") as target:
+                        created = True
                         total = 0
                         while block := source.read(1024**2):
                             total += len(block)
@@ -360,7 +362,8 @@ class HistoryDataset:
                         "member_sha256": imported.provenance["member_sha256"],
                         "build_metadata": build_metadata or {}}, raw=staged.read_bytes())
                 finally:
-                    staged.unlink(missing_ok=True)
+                    if created:
+                        staged.unlink(missing_ok=True)
 
     def append_rest(self, asset: str, quote: str, fetch: Callable, *, since: int, limit: int = 720) -> dict:
         self._market(asset, quote)
@@ -476,13 +479,31 @@ class HistoryDataset:
         self._save_repair(asset, quote, state)
         return state
 
-    def manifest(self) -> dict:
-        """Four separate coverage records; no access/rights/success inferred from code."""
-        records = []
+    def manifest(self, *, max_records: int = 100, max_conflicts: int = 100) -> dict:
+        """Bounded recent evidence and complete coverage, with explicit omitted counts."""
+        if any(type(v) is not int or not 1 <= v <= 1000 for v in (max_records, max_conflicts)):
+            raise ValueError("Manifest record/conflict bounds must be between 1 and 1000.")
+        records, captures = [], []
         with self.store.connection() as con:
-            captures = [json.loads(r[0]) for r in con.execute("SELECT payload FROM history_captures ORDER BY rowid")]
-            attempts = [dict(r) for r in con.execute("SELECT asset,quote,payload FROM history_attempts ORDER BY id")]
+            capture_count = con.execute("SELECT COUNT(*) FROM history_captures").fetchone()[0]
+            # Strip potentially large conflict arrays inside SQLite before decoding.
+            for row in con.execute("""SELECT id,json_remove(payload,'$.conflicts'),
+                    json_array_length(payload,'$.conflicts') FROM history_captures
+                    ORDER BY rowid DESC LIMIT ?""", (max_records,)):
+                capture = json.loads(row[1])
+                capture["conflicts"] = [json.loads(r[0]) for r in con.execute("""
+                    SELECT value FROM history_captures,json_each(history_captures.payload,'$.conflicts')
+                    WHERE history_captures.id=? LIMIT ?""", (row[0], max_conflicts))]
+                capture["conflicts_total"] = row[2]
+                capture["conflicts_omitted"] = row[2] - len(capture["conflicts"])
+                captures.append(capture)
+            captures.reverse()
+            version = hashlib.sha256(b"[")
+            for index, row in enumerate(con.execute("SELECT id FROM history_captures ORDER BY rowid")):
+                version.update(("," if index else "").encode() + _json(row[0]).encode())
+            version.update(b"]")
             repairs = {r[0]: json.loads(r[1]) for r in con.execute("SELECT market,payload FROM history_repairs")}
+
         for asset, quote in MARKETS:
             rows = self.store.candles(asset, source="kraken", quote=quote, mode="import", as_of=self._now())
             present = {c.open_time for c in rows}
@@ -495,12 +516,18 @@ class HistoryDataset:
                 while cursor < self.config.target_end and cursor not in present:
                     cursor += 3600
                 gaps.append({"start": start, "end": cursor, "status": "unknown"})
-            own_attempts = [json.loads(a["payload"]) for a in attempts if (a["asset"], a["quote"]) == (asset, quote)]
-            own_captures = [c for c in captures if (c["asset"], c["quote"]) == (asset, quote)]
-            public_captures = sum(c.get("capture_evidence") == "public_rest_adapter" and c["rows"] > 0
-                                  for c in own_captures)
-            injected_captures = sum(c.get("capture_evidence", "").startswith("injected_")
-                                    for c in own_captures)
+            with self.store.connection() as con:
+                attempt_count = con.execute("SELECT COUNT(*) FROM history_attempts WHERE asset=? AND quote=?",
+                                            (asset, quote)).fetchone()[0]
+                own_attempts = [json.loads(r[0]) for r in con.execute("""SELECT payload FROM history_attempts
+                    WHERE asset=? AND quote=? ORDER BY id DESC LIMIT ?""", (asset, quote, max_records))]
+                own_attempts.reverse()
+                public_captures, injected_captures = con.execute("""SELECT
+                    COALESCE(SUM(json_extract(payload,'$.capture_evidence')='public_rest_adapter'
+                        AND json_extract(payload,'$.rows')>0),0),
+                    COALESCE(SUM(json_extract(payload,'$.capture_evidence') LIKE 'injected_%'),0)
+                    FROM history_captures WHERE asset=? AND quote=?""", (asset, quote)).fetchone()
+
             records.append({"asset": asset, "quote": quote, "source": "kraken", "data_mode": "import",
                             "count": len(rows), "first_open_time": rows[0].open_time if rows else None,
                             "last_close_time": rows[-1].close_time if rows else None, "gaps": gaps,
@@ -511,9 +538,12 @@ class HistoryDataset:
                                                  "injected_unqualified_captures": injected_captures,
                                                  "report_qualification": "unverified"},
                             "intended_use": "local_research_unqualified",
-                            "attempts": own_attempts, "repair": repairs.get(asset + quote)})
+                            "attempts": own_attempts, "attempts_total": attempt_count,
+                            "attempts_omitted": attempt_count - len(own_attempts),
+                            "repair": repairs.get(asset + quote)})
         return {"dataset": self.config.name, "source": "kraken", "data_mode": "import",
-                "dataset_version": "sha256:" + _hash(_json([c["id"] for c in captures]).encode()),
+                "dataset_version": "sha256:" + version.hexdigest(),
+                "captures_total": capture_count, "captures_omitted": capture_count - len(captures),
                 "database": str(self.store.path), "target_start": self.config.target_start,
                 "target_end": self.config.target_end, "markets": records, "captures": captures,
                 "revision_rule": "latest_materialization_then_insertion_wins"}

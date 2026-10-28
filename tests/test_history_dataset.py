@@ -210,3 +210,38 @@ def test_normal_import_engine_reads_dataset_directory_without_mode_union(tmp_pat
     evidence = ds.manifest()["markets"][0]["capture_evidence"]
     assert evidence == {"public_rest_captures_observed": 0, "injected_unqualified_captures": 1,
                         "report_qualification": "unverified"}
+
+
+def test_archive_cleanup_preserves_preexisting_staging_name(tmp_path):
+    ds = dataset(tmp_path)
+    archive, _, _ = parts(tmp_path)
+    existing = ds.directory / "XBTEUR_60.csv"
+    existing.write_bytes(b"preexisting local evidence")
+    with pytest.raises(FileExistsError):
+        ds.stage_archive(archive, member="XBTEUR_60.csv", asset="BTC", quote="EUR", captured_at=100)
+    assert existing.read_bytes() == b"preexisting local evidence"
+    assert ds.manifest()["captures"] == []
+
+
+def test_manifest_bounds_captures_conflicts_attempts_without_changing_version(tmp_path):
+    clock = [NOW]
+    ds = dataset(tmp_path, clock=lambda: clock[0])
+    for close in (10, 11, 12):
+        ds.append_rest("BTC", "EUR", lambda *_, close=close: RESTCapture(
+            [row(0, close), row(1, close), row(2, close)]), since=0)
+        clock[0] += 1
+    complete = ds.manifest()
+    bounded = ds.manifest(max_records=1, max_conflicts=1)
+    assert bounded["dataset_version"] == complete["dataset_version"]
+    assert bounded["captures_total"] == 3
+    assert bounded["captures_omitted"] == 2
+    assert len(bounded["captures"]) == 1
+    capture = bounded["captures"][0]
+    assert len(capture["conflicts"]) == 1
+    assert capture["conflicts_total"] == 3
+    assert capture["conflicts_omitted"] == 2
+    market = bounded["markets"][0]
+    assert market["attempts_total"] == 3
+    assert market["attempts_omitted"] == 2
+    assert market["capture_evidence"]["injected_unqualified_captures"] == 3
+    assert len(market["attempts"]) == 1
