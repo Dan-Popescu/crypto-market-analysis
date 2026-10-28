@@ -248,7 +248,10 @@ class AccumulationService:
                     results.append(resolve_window(rows, anchor_price, anchor_time, original["issued_at"],
                                                   int(horizon), float(threshold), now,
                                                   **({"endpoint_convention": protocol["endpoint_convention"]} if protocol else {})))
-        outcome = {"as_of": now, "input_reference": {**reference, "content_hash": content_hash(rows)},
+        outcome = {"as_of": now, "original_input_reference": reference,
+                   "input_reference": {**reference, "as_of": now,
+                                       "available_at": max((row.observed_at for row in rows), default=0),
+                                       "content_hash": content_hash(rows)},
                    "windows": results, "status": "observed" if results else "insufficient"}
         frozen_plan = payload.get("plan")
         if frozen_plan is not None:
@@ -297,6 +300,8 @@ class AccumulationService:
                 result["input_reference"] = {
                     "as_of": now, "source": config["source"], "asset": config["asset"],
                     "quote": config["quote"], "data_mode": config["data_mode"],
+                    "available_at": max((row.observed_at for row in merged), default=0),
+                    **({"dataset_lineage": reference["dataset_lineage"]} if "dataset_lineage" in reference else {}),
                     "configuration_hash": content_hash(config), "content_hash": content_hash(merged),
                 }
                 result["replay"] = {

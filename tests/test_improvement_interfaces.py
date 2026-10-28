@@ -101,6 +101,24 @@ def test_dataset_lineage_is_visible_to_normal_import_engine(tmp_path):
     assert engine.context("BTC", "kraken", "USD", 7200)["status"] == "unavailable"
 
 
+def test_observed_references_describe_new_consumed_data_and_keep_training_separate(market, monkeypatch):
+    engine, config = market
+    monkeypatch.setattr("crypto_market_analysis.application.time.time", lambda: END)
+    original = engine.issue_assessment("outcome-provenance", "BTC", "fixture", "EUR", plan_config=config)
+    now = END + 26 * 3600
+    engine.store.put_candles([
+        Candle("fixture", "BTC", "EUR", "1h", t, t + 3600, 100, 101, 99, 100, 1,
+               t + 3600, data_mode="demo") for t in range(END, now, 3600)
+    ])
+    monkeypatch.setattr("crypto_market_analysis.application.time.time", lambda: now)
+    outcome = engine.observe_assessment(original["assessment_id"])["payload"]
+    assert outcome["input_reference"]["as_of"] == now
+    assert outcome["input_reference"]["available_at"] == now
+    assert outcome["original_input_reference"] == original["payload"]["input_reference"]
+    assert outcome["plan"]["input_reference"]["available_at"] == now
+    assert engine.assessment(original["assessment_id"]) == original
+
+
 def test_new_mcp_tools_compute_without_persisting(market):
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
