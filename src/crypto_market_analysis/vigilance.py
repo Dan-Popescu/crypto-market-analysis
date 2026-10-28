@@ -19,7 +19,7 @@ import math
 import statistics
 from dataclasses import asdict
 
-from .evidence import metric_identity
+from .evidence import funding_period_seconds, metric_identity
 from .models import Candle, Observation
 
 DEFAULT_POLICY = {
@@ -174,8 +174,8 @@ def _derivatives(observations: list[Observation], as_of: int, policy: dict) -> t
         current = series[-1]
         native = current.unit not in ("unknown", "", None) and bool(current.metadata.get("symbol"))
         if current.metric.startswith("funding_rate_"):
-            period = current.metadata.get("funding_interval_hours", current.metadata.get("funding_period_hours"))
-            native = native and current.unit == "rate" and _finite(period) and period > 0
+            period = funding_period_seconds(current.metadata)
+            native = native and current.unit == "rate" and period is not None
         valid = native and _known_event(current)
         expiry = current.event_time + policy["derivatives_max_age"]
         result = {"current": _sample(current), "status": "ok" if valid and as_of < expiry else
