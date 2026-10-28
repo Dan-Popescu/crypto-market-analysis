@@ -155,3 +155,12 @@ def test_deferred_cash_cap_overflow_buys_immediately_without_reusing_cash():
     assert result['locked_reserve'] == '20'
     assert result['reserve'] == '30'
     assert result['waiting_targets'][0]['waiting_seconds'] == DAY
+
+
+def test_deadline_release_precedes_new_schedule_at_identical_timestamp():
+    cfg = config(schedule=[{'time': 0, 'amount': '100'}, {'time': 7 * DAY, 'amount': '100'}],
+                 plans={'deferred': {'fraction': '1', 'decline': '0.2', 'max_wait_days': 7,
+                                     'fallback': 'reserve'}})
+    result = compare_plans(cfg, bars(), 8 * DAY)['plans']['deferred']
+    assert result['waiting_targets'][0]['created'] == 7 * DAY
+    assert result['waiting_targets'][0]['allocated_cash'] == '100'

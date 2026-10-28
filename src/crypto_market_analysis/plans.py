@@ -1,7 +1,7 @@
 """Deterministic spot-purchase scenarios; no orders or measured fill claims.
 
 Schema v1 amounts are quote notional, excluding quote fees. Deposits precede
-activation at equal timestamps. Cash is exclusively allocated at activation;
+deadline release, activation and fills at equal timestamps. Cash is exclusively allocated at activation;
 unfunded amounts are skipped and future deposits never revive them. Targets use
 an already completed close as anchor. Fully post-activation bars can simulate a
 purchase at their open only; a low touch is evidence, never an executable fill.
@@ -334,6 +334,19 @@ def _simulate(config, bars, as_of, family, validation):
                     terminals[str(days)] = {'status': 'pending', 'time': time, 'reason': 'terminal_price_unavailable'}
         if bar and terminal_boundary:
             mark(Decimal(str(bar.open)))
+        # Deadline releases precede new allocations at the same timestamp.
+        for intent in intents:
+            if intent.status != 'waiting' or intent.deadline is None or time < intent.deadline or intent.expired:
+                continue
+            intent.expired = True
+            expired.append({'created': intent.created, 'deadline': intent.deadline,
+                            'target': decimal_string(intent.target), 'fallback': intent.fallback,
+                            'waiting_seconds': intent.deadline - intent.created})
+            if intent.fallback == 'reserve':
+                free += intent.budget
+                intent.status = 'expired'
+            else:
+                intent.target = None
         for amount in schedules.get(time, []):
             anchor_bar = anchor_at(time)
             anchor = Decimal(str(anchor_bar.close)) if anchor_bar and time - anchor_bar.close_time <= settings['max_price_age_seconds'] else None
@@ -357,16 +370,6 @@ def _simulate(config, bars, as_of, family, validation):
         for intent in intents:
             if intent.status != 'waiting':
                 continue
-            if intent.deadline is not None and time >= intent.deadline and not intent.expired:
-                intent.expired = True
-                expired.append({'created': intent.created, 'deadline': intent.deadline,
-                                'target': decimal_string(intent.target), 'fallback': intent.fallback,
-                                'waiting_seconds': intent.deadline - intent.created})
-                if intent.fallback == 'reserve':
-                    free += intent.budget
-                    intent.status = 'expired'
-                    continue
-                intent.target = None
             if not bar or bar.open_time < intent.created:
                 continue
             raw_price = Decimal(str(bar.open))
