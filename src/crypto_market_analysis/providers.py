@@ -17,7 +17,7 @@ from .models import CollectionResult, Observation
 class PublicHTTP:
     def __init__(self, timeout: float = 10):
         self.client = httpx.Client(
-            timeout=timeout, follow_redirects=True, headers={"User-Agent": "crypto-market-analysis/0.1"}
+            timeout=timeout, follow_redirects=True, headers={"User-Agent": "crypto-market-analysis/0.2"}
         )
 
     def close(self):
