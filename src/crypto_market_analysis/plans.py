@@ -215,6 +215,7 @@ class _Intent:
     status: str = 'waiting'
     expired: bool = False
     touched: bool = False
+    expiry_record: dict | None = None
 
 
 def _simulate(config, bars, as_of, family, validation):
@@ -225,7 +226,7 @@ def _simulate(config, bars, as_of, family, validation):
     uplift = ONE + (Decimal(settings['spread_bps']) / 2 + Decimal(settings['slippage_bps'])) / 10000
     free = deposits = spent = fees_quote = fees_base = quantity = ZERO
     starting = Decimal(config['starting_holdings']['quantity'])
-    intents, history, expired, touches, funding = [], [], [], [], []
+    intents, history, expired, touches, funding, unfilled = [], [], [], [], [], []
     terminals, trajectory = {}, []
     units, nav, peak, max_drawdown = ZERO, ONE, ONE, ZERO
     last_mark = None
@@ -243,8 +244,8 @@ def _simulate(config, bars, as_of, family, validation):
     by_open = {c.open_time: c for c in bars}
     by_close = {c.close_time: c for c in bars}
     contributions, schedules = {}, {}
-    # All policy activity ends by day 270; terminal risk is assessed through day 180.
-    simulation_end = min(as_of, config['start_time'] + 270 * DAY)
+    # Schedules end by day 180, waits by day 270, and execution expiry by day 272.
+    simulation_end = min(as_of, config['start_time'] + 272 * DAY)
     times = {config['start_time'], simulation_end}
     for row in config['contributions']:
         contributions.setdefault(row['time'], []).append(Decimal(row['amount']))
@@ -252,8 +253,11 @@ def _simulate(config, bars, as_of, family, validation):
     for row in config['schedule']:
         schedules.setdefault(row['time'], []).append(Decimal(row['amount']))
         times.add(row['time'])
+        times.add(row['time'] + settings['max_price_age_seconds'] + 1)
         if family != 'regular':
-            times.add(row['time'] + config['plans'][family]['max_wait_days'] * DAY)
+            deadline = row['time'] + config['plans'][family]['max_wait_days'] * DAY
+            times.add(deadline)
+            times.add(deadline + settings['max_price_age_seconds'] + 1)
     for c in bars:
         times.update((c.open_time, c.close_time))
     times.update(config['start_time'] + d * DAY for d in (90, 180))
@@ -339,9 +343,11 @@ def _simulate(config, bars, as_of, family, validation):
             if intent.status != 'waiting' or intent.deadline is None or time < intent.deadline or intent.expired:
                 continue
             intent.expired = True
-            expired.append({'created': intent.created, 'deadline': intent.deadline,
-                            'target': decimal_string(intent.target), 'fallback': intent.fallback,
-                            'waiting_seconds': intent.deadline - intent.created})
+            intent.expiry_record = {'created': intent.created, 'deadline': intent.deadline,
+                                   'target': decimal_string(intent.target), 'fallback': intent.fallback,
+                                   'waiting_seconds': intent.deadline - intent.created,
+                                   'resolution': 'reserve' if intent.fallback == 'reserve' else 'fallback_pending'}
+            expired.append(intent.expiry_record)
             if intent.fallback == 'reserve':
                 free += intent.budget
                 intent.status = 'expired'
@@ -370,6 +376,17 @@ def _simulate(config, bars, as_of, family, validation):
         for intent in intents:
             if intent.status != 'waiting':
                 continue
+            execution_origin = intent.deadline if intent.expired else intent.created
+            if intent.target is None and time > execution_origin + settings['max_price_age_seconds']:
+                free += intent.budget
+                intent.status = 'expired_unfilled'
+                unfilled.append({'created': intent.created, 'time': time, 'status': 'expired_unfilled',
+                                 'released_cash': decimal_string(intent.budget),
+                                 'reason': 'no_eligible_price_within_execution_window',
+                                 'execution_deadline': execution_origin + settings['max_price_age_seconds']})
+                if intent.expiry_record is not None:
+                    intent.expiry_record['resolution'] = 'expired_unfilled'
+                continue
             if not bar or bar.open_time < intent.created:
                 continue
             raw_price = Decimal(str(bar.open))
@@ -389,9 +406,16 @@ def _simulate(config, bars, as_of, family, validation):
             if gross <= base_fee or gross == 0:
                 free += intent.budget
                 intent.status = 'dust'
+                unfilled.append({'created': intent.created, 'time': time, 'status': 'dust',
+                                 'released_cash': decimal_string(intent.budget),
+                                 'reason': 'quantity_below_step_or_base_fee'})
+                if intent.expiry_record is not None:
+                    intent.expiry_record['resolution'] = 'expired_unfilled'
                 continue
             free += intent.budget - notional - quote_fee
             intent.status = 'filled'
+            if intent.expiry_record is not None:
+                intent.expiry_record['resolution'] = 'fallback_filled'
             spent += notional
             fees_quote += quote_fee
             fees_base += base_fee
@@ -430,9 +454,9 @@ def _simulate(config, bars, as_of, family, validation):
             'new_purchases_total_cost': decimal_string(total_cost),
             'new_purchases_all_in_cost': decimal_string(total_cost / quantity) if quantity else None,
             'whole_portfolio_historical_cost': decimal_string(Decimal(known_cost) + total_cost) if known_cost is not None else None,
-            'history': history, 'expired_targets': expired, 'touches': touches,
+            'history': history, 'expired_targets': expired, 'touches': touches, 'unfilled_purchases': unfilled,
             'funding': funding, 'terminals': terminals,
-            'maximum_drawdown': decimal_string(max_drawdown),
+            'maximum_drawdown': decimal_string(max_drawdown), 'risk_measurement_end': simulation_end,
             'drawdown_method': 'unitized_NAV_deposits_issue_units_at_pre_deposit_NAV',
             'trajectory': trajectory,
             'pending_targets': sum(i.status == 'waiting' for i in intents),
@@ -464,6 +488,7 @@ def compare_plans(config: dict, candles: list[Candle], as_of: int, *, validation
                     'Reserve is non-interest-bearing native quote cash; no conversion or third-asset fees.',
                     'Purchase amount means quote notional excluding quote fees; cash allocation is exclusive.',
                     'Optional max_deferred_reserve_quote caps locked target cash; overflow buys at the next eligible open.',
+                    'Immediate execution expires after creation plus max_price_age_seconds; deadline fallback expires after deadline plus that tolerance.',
                     'Maximum 2000 expanded intents and 100000 candle versions; schedules/contributions span at most 180 days.',
                     ('Strict mode uses earliest timely candle vintages and anchors available at activation; execution remains hypothetical.' if validation == 'known_at' else 'Latest versions available at as_of provide retrospective reference prices; this is not a point-in-time availability claim.'),
                     'Terminals include contributions at the cutoff and purchases strictly before it.'],

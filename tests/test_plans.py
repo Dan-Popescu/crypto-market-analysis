@@ -164,3 +164,24 @@ def test_deadline_release_precedes_new_schedule_at_identical_timestamp():
     result = compare_plans(cfg, bars(), 8 * DAY)['plans']['deferred']
     assert result['waiting_targets'][0]['created'] == 7 * DAY
     assert result['waiting_targets'][0]['allocated_cash'] == '100'
+
+
+def test_missing_deadline_week_releases_fallback_cash_without_late_execution():
+    cfg = config(plans={'deferred': {'fraction': '1', 'decline': '0.2', 'max_wait_days': 7,
+                                    'fallback': 'buy_at_deadline'}})
+    # The last pre-deadline bar is followed by a whole missing week.
+    data = [c for c in bars(20) if c.open_time < 6 * DAY or c.open_time >= 14 * DAY]
+    result = compare_plans(cfg, data, 20 * DAY)['plans']['deferred']
+    assert result['history'] == []
+    assert result['reserve'] == '100'
+    assert result['locked_reserve'] == '0'
+    assert result['expired_targets'][0]['resolution'] == 'expired_unfilled'
+    assert result['unfilled_purchases'][0]['execution_deadline'] == 8 * DAY
+
+
+def test_regular_purchase_cannot_wait_through_missing_price_week():
+    data = [c for c in bars(20) if c.open_time < 0 or c.open_time >= 7 * DAY]
+    result = compare_plans(config(), data, 20 * DAY)['plans']['regular']
+    assert result['history'] == []
+    assert result['reserve'] == '100'
+    assert result['unfilled_purchases'][0]['reason'] == 'no_eligible_price_within_execution_window'
