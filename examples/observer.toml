@@ -1,0 +1,13 @@
+data_dir = "data"
+assets = ["BTC", "ETH"]
+venues = ["binance", "coinbase", "kraken", "okx", "bybit", "bitstamp", "bitfinex", "kucoin", "gate", "cryptocom", "gemini", "bitget", "mexc", "htx"]
+history_days = 30
+max_pages = 20
+workers = 3
+options = true
+context = true
+liquidity_interval = 300
+market_interval = 3600
+options_interval = 21600
+context_interval = 86400
+liquidity_retention_days = 7

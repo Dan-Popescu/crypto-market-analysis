@@ -1,0 +1,364 @@
+"""Versioned SQLite WAL store: a collector can write while MCP reads snapshots."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import sqlite3
+import time
+from contextlib import contextmanager
+from dataclasses import asdict
+from pathlib import Path
+
+from .models import Candle, CollectionResult, Observation
+
+
+def _json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False, separators=(",", ":"))
+
+
+def _hash(value: dict) -> str:
+    return hashlib.sha256(_json(value).encode()).hexdigest()
+
+
+class Store:
+    """Public boundary for idempotent, source-specific, known-at data access."""
+
+    def __init__(self, path: Path | str):
+        self.path = Path(path).expanduser().resolve()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.connection() as con:
+            con.executescript("""
+                CREATE TABLE IF NOT EXISTS candles (
+                    id INTEGER PRIMARY KEY, source TEXT NOT NULL, asset TEXT NOT NULL,
+                    quote TEXT NOT NULL, timeframe TEXT NOT NULL, open_time INTEGER NOT NULL,
+                    close_time INTEGER NOT NULL, observed_at INTEGER NOT NULL, data_mode TEXT NOT NULL,
+                    fingerprint TEXT NOT NULL, payload TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS candle_lookup ON candles
+                    (source,asset,quote,timeframe,open_time,data_mode,observed_at DESC,id DESC);
+                CREATE TABLE IF NOT EXISTS observations (
+                    id INTEGER PRIMARY KEY, source TEXT NOT NULL, asset TEXT NOT NULL,
+                    metric TEXT NOT NULL, event_time INTEGER NOT NULL, observed_at INTEGER NOT NULL,
+                    data_mode TEXT NOT NULL, dimension TEXT NOT NULL,
+                    fingerprint TEXT NOT NULL, payload TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS observation_lookup ON observations
+                    (source,asset,metric,event_time,data_mode,dimension,observed_at DESC,id DESC);
+                CREATE TABLE IF NOT EXISTS runs (
+                    id INTEGER PRIMARY KEY, source TEXT NOT NULL, task TEXT NOT NULL,
+                    observed_at INTEGER NOT NULL, payload TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS events (
+                    id TEXT NOT NULL, observed_at INTEGER NOT NULL, event_time INTEGER NOT NULL,
+                    payload TEXT NOT NULL, PRIMARY KEY(id,observed_at)
+                );
+            """)
+
+    @contextmanager
+    def connection(self):
+        con = sqlite3.connect(self.path, timeout=15)
+        con.row_factory = sqlite3.Row
+        try:
+            con.execute("PRAGMA journal_mode=WAL")
+            con.execute("PRAGMA busy_timeout=15000")
+            with con:
+                yield con
+        finally:
+            con.close()
+
+    def put_candles(self, rows: list[Candle]) -> int:
+        inserted = 0
+        with self.connection() as con:
+            for c in rows:
+                if c.asset not in ("BTC", "ETH") or c.data_mode not in ("live", "demo", "import"):
+                    raise ValueError("Actif ou mode de données non pris en charge.")
+                numeric = (c.open, c.high, c.low, c.close, c.volume)
+                if not all(math.isfinite(v) for v in numeric):
+                    raise ValueError("Bougie non finie.")
+                if min(c.open, c.high, c.low, c.close) <= 0 or c.volume < 0:
+                    raise ValueError("Prix/volume de bougie invalide.")
+                if c.high < max(c.open, c.low, c.close) or c.low > min(c.open, c.high, c.close):
+                    raise ValueError("Extrêmes de bougie incohérents.")
+                if c.timeframe != "1h" or c.open_time % 3600 or c.close_time != c.open_time + 3600:
+                    raise ValueError("Bougie attendue : une heure UTC alignée.")
+                if c.close_time > c.observed_at:
+                    raise ValueError("Une bougie ouverte ne peut pas être stockée.")
+                if c.quote_volume is not None and (not math.isfinite(c.quote_volume) or c.quote_volume < 0):
+                    raise ValueError("Volume coté invalide.")
+                if c.taker_buy_quote_volume is not None and (
+                    not math.isfinite(c.taker_buy_quote_volume)
+                    or c.taker_buy_quote_volume < 0
+                    or c.quote_volume is None
+                    or c.taker_buy_quote_volume > c.quote_volume * 1.000001
+                ):
+                    raise ValueError("Volume acheteur agressif incohérent.")
+                payload = asdict(c)
+                fingerprint = _hash({k: v for k, v in payload.items() if k != "observed_at"})
+                key = (c.source, c.asset, c.quote, c.timeframe, c.open_time, c.data_mode)
+                latest = con.execute(
+                    """SELECT fingerprint,observed_at FROM candles WHERE
+                    source=? AND asset=? AND quote=? AND timeframe=? AND open_time=? AND data_mode=?
+                    ORDER BY observed_at DESC,id DESC LIMIT 1""",
+                    key,
+                ).fetchone()
+                if latest and latest["fingerprint"] == fingerprint:
+                    continue
+                con.execute(
+                    """INSERT INTO candles(source,asset,quote,timeframe,open_time,close_time,
+                    observed_at,data_mode,fingerprint,payload) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                    (*key[:5], c.close_time, c.observed_at, c.data_mode, fingerprint, _json(payload)),
+                )
+                inserted += 1
+        return inserted
+
+    def put_observations(self, rows: list[Observation]) -> int:
+        inserted = 0
+        with self.connection() as con:
+            for o in rows:
+                if not math.isfinite(o.value) or o.event_time > o.observed_at:
+                    raise ValueError("Observation non finie ou datée dans le futur.")
+                if o.data_mode not in ("live", "demo", "import"):
+                    raise ValueError("Mode de données invalide.")
+                payload = asdict(o)
+                fingerprint = _hash({k: v for k, v in payload.items() if k != "observed_at"})
+                dimension = _json(
+                    {
+                        "quote": o.quote,
+                        "unit": o.unit,
+                        **{k: o.metadata[k] for k in ("expiry", "instrument", "symbol") if k in o.metadata},
+                    }
+                )
+                key = (o.source, o.asset, o.metric, o.event_time, o.data_mode, dimension)
+                latest = con.execute(
+                    """SELECT fingerprint FROM observations WHERE source=? AND asset=?
+                    AND metric=? AND event_time=? AND data_mode=? AND dimension=?
+                    ORDER BY observed_at DESC,id DESC LIMIT 1""",
+                    key,
+                ).fetchone()
+                if latest and latest[0] == fingerprint:
+                    continue
+                con.execute(
+                    """INSERT INTO observations(source,asset,metric,event_time,observed_at,
+                    data_mode,dimension,fingerprint,payload) VALUES(?,?,?,?,?,?,?,?,?)""",
+                    (
+                        o.source,
+                        o.asset,
+                        o.metric,
+                        o.event_time,
+                        o.observed_at,
+                        o.data_mode,
+                        dimension,
+                        fingerprint,
+                        _json(payload),
+                    ),
+                )
+                inserted += 1
+        return inserted
+
+    def record_run(self, result: CollectionResult, task: str, now: int) -> dict:
+        payload = {
+            "source": result.source,
+            "task": task,
+            "observed_at": now,
+            "candles": len(result.candles),
+            "observations": len(result.observations),
+            "warnings": result.warnings,
+            "errors": result.errors,
+            "status": "partial"
+            if result.errors and (result.candles or result.observations)
+            else "error"
+            if result.errors
+            else "ok"
+            if result.candles or result.observations
+            else "empty",
+        }
+        with self.connection() as con:
+            con.execute(
+                "INSERT INTO runs(source,task,observed_at,payload) VALUES(?,?,?,?)",
+                (result.source, task, now, _json(payload)),
+            )
+        return payload
+
+    def save_result(self, result: CollectionResult, task: str, now: int) -> dict:
+        candles = observations = 0
+        try:
+            candles = self.put_candles(result.candles)
+        except (ValueError, TypeError) as exc:
+            result.errors.append(f"Validation des bougies : {exc}")
+            result.candles = []
+        try:
+            observations = self.put_observations(result.observations)
+        except (ValueError, TypeError) as exc:
+            result.errors.append(f"Validation des observations : {exc}")
+            result.observations = []
+        return {
+            **self.record_run(result, task, now),
+            "inserted_candles": candles,
+            "inserted_observations": observations,
+        }
+
+    def candles(
+        self,
+        asset: str,
+        source: str | None = None,
+        quote: str | None = None,
+        as_of: int | None = None,
+        mode: str = "live",
+        max_id: int | None = None,
+        versions: bool = False,
+    ) -> list[Candle]:
+        cutoff = int(time.time()) if as_of is None else as_of
+        conditions, values = (
+            ["asset=?", "data_mode=?", "close_time<=?", "observed_at<=?"],
+            [asset, mode, cutoff, cutoff],
+        )
+        for name, value in (("source", source), ("quote", quote)):
+            if value is not None:
+                conditions.append(f"{name}=?")
+                values.append(value)
+        if max_id is not None:
+            conditions.append("id<=?")
+            values.append(max_id)
+        with self.connection() as con:
+            if versions:
+                rows = con.execute(
+                    f"SELECT payload FROM candles WHERE {' AND '.join(conditions)} ORDER BY open_time,observed_at,id",
+                    values,
+                ).fetchall()
+            else:
+                rows = con.execute(
+                    f"""SELECT payload FROM (SELECT payload,open_time,
+                ROW_NUMBER() OVER(PARTITION BY source,asset,quote,timeframe,open_time,data_mode
+                ORDER BY observed_at DESC,id DESC) rn FROM candles WHERE {" AND ".join(conditions)})
+                WHERE rn=1 ORDER BY open_time""",
+                    values,
+                ).fetchall()
+        return [Candle(**json.loads(row[0])) for row in rows]
+
+    def observations(
+        self,
+        asset: str | None = None,
+        as_of: int | None = None,
+        mode: str = "live",
+        days: int = 365,
+        limit: int = 200000,
+        max_id: int | None = None,
+    ) -> list[Observation]:
+        cutoff = int(time.time()) if as_of is None else as_of
+        conditions = ["data_mode=?", "event_time<=?", "observed_at<=?", "event_time>=?"]
+        values: list = [mode, cutoff, cutoff, cutoff - days * 86400]
+        if asset is not None:
+            conditions.append("asset=?")
+            values.append(asset)
+        if max_id is not None:
+            conditions.append("id<=?")
+            values.append(max_id)
+        values.append(max(1, min(limit, 500000)))
+        with self.connection() as con:
+            rows = con.execute(
+                f"""SELECT payload FROM (SELECT payload,event_time,
+                ROW_NUMBER() OVER(PARTITION BY source,asset,metric,event_time,data_mode,dimension
+                ORDER BY observed_at DESC,id DESC) rn FROM observations WHERE {" AND ".join(conditions)})
+                WHERE rn=1 ORDER BY event_time DESC LIMIT ?""",
+                values,
+            ).fetchall()
+        return [Observation(**json.loads(row[0])) for row in rows]
+
+    def runs(self, as_of: int | None = None, limit: int = 100) -> list[dict]:
+        cutoff = int(time.time()) if as_of is None else as_of
+        with self.connection() as con:
+            rows = con.execute(
+                """SELECT payload FROM (SELECT payload,observed_at,
+                ROW_NUMBER() OVER(PARTITION BY source,task ORDER BY observed_at DESC,id DESC) rn
+                FROM runs WHERE observed_at<=?) WHERE rn=1 ORDER BY observed_at DESC LIMIT ?""",
+                (cutoff, limit),
+            ).fetchall()
+        return [json.loads(r[0]) for r in rows]
+
+    def counts(self) -> dict:
+        with self.connection() as con:
+            return {
+                name: con.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0]
+                for name in ("candles", "observations", "events", "runs")
+            }
+
+    def watermark(self) -> dict:
+        with self.connection() as con:
+            return {
+                table: con.execute(f"SELECT COALESCE(MAX(rowid),0) FROM {table}").fetchone()[0]
+                for table in ("candles", "observations", "events", "runs")
+            }
+
+    def latest_candle_time(self, source: str, asset: str, mode: str = "live") -> int | None:
+        with self.connection() as con:
+            return con.execute(
+                "SELECT MAX(open_time) FROM candles WHERE source=? AND asset=? AND data_mode=?",
+                (source, asset, mode),
+            ).fetchone()[0]
+
+    def put_events(self, events: list[dict], now: int) -> int:
+        inserted = 0
+        with self.connection() as con:
+            for event in events:
+                if not event.get("title") or not event.get("source_url", "").startswith("https://"):
+                    raise ValueError("Chaque événement exige un titre et une URL source HTTPS.")
+                timestamp = int(event["event_time"])
+                payload = {
+                    **event,
+                    "event_time": timestamp,
+                    "observed_at": now,
+                    "origin": "manual_import",
+                    "publication_time_verified": False,
+                }
+                identity = _hash({k: event.get(k) for k in ("title", "event_time", "source_url")})
+                prior = con.execute(
+                    "SELECT payload FROM events WHERE id=? ORDER BY observed_at DESC LIMIT 1", (identity,)
+                ).fetchone()
+                if prior and {k: v for k, v in json.loads(prior[0]).items() if k != "observed_at"} == {
+                    k: v for k, v in payload.items() if k != "observed_at"
+                }:
+                    continue
+                con.execute(
+                    "INSERT OR REPLACE INTO events VALUES(?,?,?,?)",
+                    (identity, now, timestamp, _json(payload)),
+                )
+                inserted += 1
+        return inserted
+
+    def events(self, as_of: int, days: int = 60) -> list[dict]:
+        with self.connection() as con:
+            rows = con.execute(
+                """SELECT payload FROM (SELECT payload,event_time,
+                ROW_NUMBER() OVER(PARTITION BY id ORDER BY observed_at DESC) rn
+                FROM events WHERE observed_at<=? AND event_time>=? AND event_time<=?)
+                WHERE rn=1 ORDER BY event_time LIMIT 100""",
+                (as_of, as_of - 86400, as_of + days * 86400),
+            ).fetchall()
+        return [json.loads(r[0]) for r in rows]
+
+    def export_parquet(self, output: Path) -> dict:
+        """Export latest versions with provenance. SQL is internal, not agent-provided."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        output.mkdir(parents=True, exist_ok=True)
+        result = {}
+        with self.connection() as con:
+            for table, partition in (
+                ("candles", "source,asset,quote,timeframe,open_time,data_mode"),
+                ("observations", "source,asset,metric,event_time,data_mode,dimension"),
+            ):
+                records = con.execute(f"""SELECT payload FROM (SELECT payload,
+                    ROW_NUMBER() OVER(PARTITION BY {partition} ORDER BY observed_at DESC,id DESC) rn
+                    FROM {table}) WHERE rn=1""").fetchall()
+                rows = [json.loads(r[0]) for r in records]
+                for row in rows:
+                    if "metadata" in row:
+                        row["metadata_json"] = _json(row.pop("metadata"))
+                if rows:
+                    path = output / f"{table}.parquet"
+                    pq.write_table(pa.Table.from_pylist(rows), path, compression="zstd")
+                    result[table] = {"path": str(path.resolve()), "rows": len(rows)}
+        return result

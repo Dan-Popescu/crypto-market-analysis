@@ -1,0 +1,18 @@
+services:
+  collector:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["run", "--data-dir", "/data"]
+    volumes:
+      - ../data:/data
+    restart: unless-stopped
+  mcp:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    network_mode: host
+    command: ["serve", "--data-dir", "/data", "--transport", "streamable-http", "--host", "127.0.0.1", "--port", "8000"]
+    volumes:
+      - ../data:/data
+    restart: unless-stopped

@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "crypto-market-analysis": {
+      "command": "uv",
+      "args": [
+        "--directory", "/absolute/path/crypto-market-analysis",
+        "run", "--frozen", "crypto-market-analysis", "serve",
+        "--data-dir", "/absolute/path/crypto-market-analysis/data",
+        "--transport", "stdio"
+      ]
+    }
+  }
+}

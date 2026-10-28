@@ -1,0 +1,277 @@
+{
+  "method": "régimes historiques voisins, expérimental",
+  "bar_alignment": "rolling_24h_at_last_hourly_close",
+  "stale": false,
+  "as_of": "2026-10-28T18:07:44+00:00",
+  "data_mode": "demo",
+  "threshold": 0.1,
+  "anchor_price": 127874.72921396681,
+  "anchor_time": "2026-10-28T00:00:00+00:00",
+  "coverage": {
+    "complete_days": 1800,
+    "start": "2021-11-23T00:00:00+00:00",
+    "end": "2026-10-28T00:00:00+00:00"
+  },
+  "horizons": {
+    "1": {
+      "status": "experimental",
+      "origin": "2026-10-28T00:00:00+00:00",
+      "training_samples": 1738,
+      "effective_samples": 1738,
+      "neighbor_samples": 50,
+      "training_start": "2022-01-23T00:00:00+00:00",
+      "training_end": "2026-10-27T00:00:00+00:00",
+      "probabilities": {
+        "red": 0.44,
+        "up": 0.56,
+        "flat": 0.0,
+        "down_barrier": 0.0,
+        "up_barrier": 0.04
+      },
+      "base_rates": {
+        "red": 0.49769850402761795,
+        "up": 0.502301495972382,
+        "flat": 0.0,
+        "down_barrier": 0.0017261219792865361,
+        "up_barrier": 0.006904487917146145
+      },
+      "required_effective_samples": 20,
+      "confidence_intervals": {
+        "red": [
+          0.3116219921125717,
+          0.5769397197834315
+        ],
+        "up": [
+          0.4230602802165686,
+          0.6883780078874284
+        ],
+        "flat": [
+          6.938893903907228e-18,
+          0.07134759913335872
+        ],
+        "down_barrier": [
+          6.938893903907228e-18,
+          0.07134759913335872
+        ],
+        "up_barrier": [
+          0.011038884327619805,
+          0.1346009068750702
+        ]
+      },
+      "insufficient_reason": null
+    },
+    "7": {
+      "status": "experimental",
+      "origin": "2026-10-28T00:00:00+00:00",
+      "training_samples": 1732,
+      "effective_samples": 248,
+      "neighbor_samples": 47,
+      "training_start": "2022-01-23T00:00:00+00:00",
+      "training_end": "2026-10-25T00:00:00+00:00",
+      "probabilities": {
+        "red": 0.48936170212765956,
+        "up": 0.5106382978723404,
+        "flat": 0.0,
+        "down_barrier": 0.2553191489361702,
+        "up_barrier": 0.3617021276595745
+      },
+      "base_rates": {
+        "red": 0.46774193548387094,
+        "up": 0.532258064516129,
+        "flat": 0.0,
+        "down_barrier": 0.15725806451612903,
+        "up_barrier": 0.23790322580645162
+      },
+      "required_effective_samples": 20,
+      "confidence_intervals": {
+        "red": [
+          0.3527555503368215,
+          0.6275754625177314
+        ],
+        "up": [
+          0.3724245374822684,
+          0.6472444496631784
+        ],
+        "flat": [
+          0.0,
+          0.07555760416399632
+        ],
+        "down_barrier": [
+          0.152531540350547,
+          0.3950817553041745
+        ],
+        "up_barrier": [
+          0.23966213245714155,
+          0.5046410346520489
+        ]
+      },
+      "insufficient_reason": null
+    },
+    "21": {
+      "status": "experimental",
+      "origin": "2026-10-28T00:00:00+00:00",
+      "training_samples": 1718,
+      "effective_samples": 82,
+      "neighbor_samples": 27,
+      "training_start": "2022-01-23T00:00:00+00:00",
+      "training_end": "2026-10-11T00:00:00+00:00",
+      "probabilities": {
+        "red": 0.4444444444444444,
+        "up": 0.5555555555555556,
+        "flat": 0.0,
+        "down_barrier": 0.5185185185185185,
+        "up_barrier": 0.5555555555555556
+      },
+      "base_rates": {
+        "red": 0.45121951219512196,
+        "up": 0.5487804878048781,
+        "flat": 0.0,
+        "down_barrier": 0.3902439024390244,
+        "up_barrier": 0.5121951219512195
+      },
+      "required_effective_samples": 20,
+      "confidence_intervals": {
+        "red": [
+          0.27585858177023004,
+          0.6268697548677552
+        ],
+        "up": [
+          0.3731302451322448,
+          0.72414141822977
+        ],
+        "flat": [
+          0.0,
+          0.12455502974186705
+        ],
+        "down_barrier": [
+          0.3398561575495229,
+          0.6925677302378153
+        ],
+        "up_barrier": [
+          0.3731302451322448,
+          0.72414141822977
+        ]
+      },
+      "insufficient_reason": null
+    },
+    "30": {
+      "status": "experimental",
+      "origin": "2026-10-28T00:00:00+00:00",
+      "training_samples": 1709,
+      "effective_samples": 57,
+      "neighbor_samples": 22,
+      "training_start": "2022-01-23T00:00:00+00:00",
+      "training_end": "2026-09-29T00:00:00+00:00",
+      "probabilities": {
+        "red": 0.4090909090909091,
+        "up": 0.5909090909090909,
+        "flat": 0.0,
+        "down_barrier": 0.5,
+        "up_barrier": 0.5
+      },
+      "base_rates": {
+        "red": 0.43859649122807015,
+        "up": 0.5614035087719298,
+        "flat": 0.0,
+        "down_barrier": 0.40350877192982454,
+        "up_barrier": 0.543859649122807
+      },
+      "required_effective_samples": 20,
+      "confidence_intervals": {
+        "red": [
+          0.2325581619647187,
+          0.6126518152368488
+        ],
+        "up": [
+          0.3873481847631513,
+          0.7674418380352814
+        ],
+        "flat": [
+          0.0,
+          0.14865487460862087
+        ],
+        "down_barrier": [
+          0.3072210627372502,
+          0.6927789372627497
+        ],
+        "up_barrier": [
+          0.3072210627372502,
+          0.6927789372627497
+        ]
+      },
+      "insufficient_reason": null
+    },
+    "60": {
+      "status": "experimental",
+      "origin": "2026-10-28T00:00:00+00:00",
+      "training_samples": 1679,
+      "effective_samples": 28,
+      "neighbor_samples": 20,
+      "training_start": "2022-01-23T00:00:00+00:00",
+      "training_end": "2026-08-30T00:00:00+00:00",
+      "probabilities": {
+        "red": 0.5,
+        "up": 0.5,
+        "flat": 0.0,
+        "down_barrier": 0.65,
+        "up_barrier": 0.7
+      },
+      "base_rates": {
+        "red": 0.4642857142857143,
+        "up": 0.5357142857142857,
+        "flat": 0.0,
+        "down_barrier": 0.6071428571428571,
+        "up_barrier": 0.6785714285714286
+      },
+      "required_effective_samples": 20,
+      "confidence_intervals": {
+        "red": [
+          0.2992980081982123,
+          0.7007019918017877
+        ],
+        "up": [
+          0.2992980081982123,
+          0.7007019918017877
+        ],
+        "flat": [
+          0.0,
+          0.16112515805281938
+        ],
+        "down_barrier": [
+          0.43285427668523624,
+          0.818808175898918
+        ],
+        "up_barrier": [
+          0.4810271816464765,
+          0.8545227551323956
+        ]
+      },
+      "insufficient_reason": null
+    }
+  },
+  "edge": "non évalué",
+  "limitations": [
+    "Estimations expérimentales, non calibrées ; aucun avantage démontré.",
+    "Red, up et flat comparent la clôture finale à la clôture initiale ; ce ne sont pas des couleurs de bougies calendaires.",
+    "Les horizons partent de la dernière clôture horaire affichée. Les événements de barrière utilisent les extrêmes de périodes de 24 heures ; leur ordre est inconnu.",
+    "Les variables macro et réseau sont exclues faute de données historiques disponibles au bon moment.",
+    "Les fenêtres avec jours manquants sont exclues.",
+    "Les intervalles de Wilson décrivent les fréquences voisines sous hypothèse d’indépendance ; ils ne prouvent pas une calibration.",
+    "Les prix historiques disponibles peuvent comprendre des révisions ou remblayages inconnus à l’époque.",
+    "Données de démonstration synthétiques."
+  ],
+  "asset": "BTC",
+  "selected_market": {
+    "source": "demo",
+    "quote": "USD"
+  },
+  "market_coverage": [
+    {
+      "source": "demo",
+      "quote": "USD",
+      "hourly_candles": 43200,
+      "complete_days": 1800,
+      "last_close_time": 1793145600
+    }
+  ]
+}
