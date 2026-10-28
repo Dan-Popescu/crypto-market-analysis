@@ -62,11 +62,11 @@ class Store:
                 );
             """)
             # Add dimensions without dropping observations or rewriting their source payloads.
-            if con.execute("PRAGMA user_version").fetchone()[0] < 1:
+            if con.execute("PRAGMA user_version").fetchone()[0] < 2:
                 for row in con.execute("SELECT id,payload FROM observations").fetchall():
                     dimension = _json(metric_dimension(Observation(**json.loads(row["payload"]))))
                     con.execute("UPDATE observations SET dimension=? WHERE id=?", (dimension, row["id"]))
-                con.execute("PRAGMA user_version=1")
+                con.execute("PRAGMA user_version=2")
 
     @contextmanager
     def connection(self):

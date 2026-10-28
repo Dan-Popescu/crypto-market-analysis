@@ -7,11 +7,11 @@ The catalogue never filters global market analysis by purchase eligibility.
 from __future__ import annotations
 
 import math
-import re
 from dataclasses import asdict, dataclass, field
 from datetime import date
 from typing import Any
 
+from .evidence import funding_period_seconds, metric_identity
 from .models import Observation
 
 CHECKED_AT = "2026-10-28"
@@ -813,29 +813,7 @@ def etf_flow_row(
 
 
 def _funding_period(metadata: dict[str, Any]) -> float | None:
-    candidates = []
-    for key, multiplier in (
-        ("funding_interval_seconds", 1),
-        ("interval_seconds", 1),
-        ("funding_interval_hours", 3600),
-    ):
-        value = metadata.get(key)
-        if (
-            isinstance(value, (int, float))
-            and not isinstance(value, bool)
-            and math.isfinite(value)
-            and value > 0
-        ):
-            candidates.append(value * multiplier)
-    raw = metadata.get("funding_interval")
-    if isinstance(raw, str):
-        match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*(s|m|h|d)\s*", raw, re.I)
-        if match:
-            value = float(match[1]) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[match[2].lower()]
-            if math.isfinite(value) and value > 0:
-                candidates.append(value)
-    # Conflicting explicit units are unknown, never resolved by field preference.
-    return candidates[0] if candidates and all(item == candidates[0] for item in candidates) else None
+    return funding_period_seconds(metadata)
 
 
 def interpret_context(observations: list[Observation], as_of: int) -> dict[str, Any]:
@@ -860,18 +838,7 @@ def interpret_context(observations: list[Observation], as_of: int) -> dict[str, 
                 else "unknown"
             )
         period = _funding_period(metadata)
-        identity = (
-            observation.source,
-            observation.asset,
-            observation.metric,
-            observation.quote,
-            observation.unit,
-            metadata.get("instrument", metadata.get("symbol")),
-            period,
-            kind,
-            metadata.get("expiry"),
-            observation.data_mode,
-        )
+        identity = (metric_identity(observation), period, kind)
         groups.setdefault(identity, []).append(observation)
     rows = []
     for identity, group in sorted(groups.items(), key=lambda pair: repr(pair[0])):
@@ -883,8 +850,8 @@ def interpret_context(observations: list[Observation], as_of: int) -> dict[str, 
         latest = ordered[-1]
         funding = "funding" in latest.metric
         oi = "open_interest" in latest.metric
-        missing_unit = latest.unit.strip().lower() in {"", "unknown", "contracts_unknown", "none"}
-        period = identity[6]
+        missing_unit = latest.unit.strip().lower() in {"", "unknown", "contracts_unknown", "none", "inconnu", "unspecified"}
+        period = identity[1]
         valid_period = (
             isinstance(period, (int, float))
             and not isinstance(period, bool)
@@ -892,7 +859,7 @@ def interpret_context(observations: list[Observation], as_of: int) -> dict[str, 
             and period > 0
         )
         comparable = not missing_unit and (
-            not funding or (valid_period and identity[7] in {"actual", "projected"})
+            not funding or (valid_period and identity[2] in {"actual", "projected"})
         )
         status = latest.metadata.get("status", "observed")
         finite = math.isfinite(latest.value)
@@ -901,7 +868,7 @@ def interpret_context(observations: list[Observation], as_of: int) -> dict[str, 
             **asdict(latest),
             "event_age_seconds": as_of - latest.event_time,
             "ingestion_age_seconds": as_of - latest.observed_at,
-            "value_kind": identity[7],
+            "value_kind": identity[2],
             "funding_interval_seconds": period,
             "status": status if finite else "invalid",
             "change": None,
@@ -947,7 +914,8 @@ def interpret_context(observations: list[Observation], as_of: int) -> dict[str, 
         rows.append(row)
     return {
         "as_of": as_of,
-        "observations": rows,
+        "observations": rows[:150],
+        "observations_truncated": len(rows) > 150,
         "excluded_future_observations": excluded,
         "status": "available" if rows else "unavailable",
         "composite_score": None,

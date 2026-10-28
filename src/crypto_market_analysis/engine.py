@@ -109,6 +109,11 @@ class Engine:
                 latest[dimension] = {**asdict(observation), "age_seconds": freshness["age_seconds"],
                                      "stale": freshness["stale"], "freshness": freshness}
         reference = captured.reference
+        from .source_catalog import interpret_context
+        additional_context = interpret_context(observations, now)
+        for point in additional_context["observations"]:
+            observation = Observation(**{key: point[key] for key in Observation.__dataclass_fields__})
+            point["freshness"] = metric_freshness(observation, settings, now)
         prediction = forecast(candles, as_of=now) if include_forecast else None
         price_freshness = None
         if candles:
@@ -128,6 +133,7 @@ class Engine:
                 "market_selection_rule": "explicit filters, then recent usable complete history; not an execution venue",
                 "market_coverage": list(captured.coverage), "analysis": build_analysis(candles, observations, now),
                 "forecast": prediction, "price_freshness": price_freshness,
+                "additional_context": additional_context,
                 "latest_metrics": list(latest.values())[:150], "metrics_truncated": len(latest) > 150,
                 "input_truncation": dict(captured.truncation), "events": list(captured.events),
                 "calendar": list(captured.calendar),

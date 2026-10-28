@@ -19,6 +19,7 @@ import math
 import statistics
 from dataclasses import asdict
 
+from .evidence import metric_identity
 from .models import Candle, Observation
 
 DEFAULT_POLICY = {
@@ -92,14 +93,7 @@ def _policy(policy: dict | None) -> dict:
 
 
 def _identity(obs: Observation) -> tuple:
-    meta = obs.metadata
-    return (
-        obs.source, obs.asset, obs.metric, obs.unit, obs.quote, obs.data_mode,
-        json.dumps({key: meta.get(key) for key in (
-            "instrument", "symbol", "aggregation", "funding_interval_hours", "funding_period_hours",
-            "contract_size", "market_type", "settle", "band_percent",
-        )}, sort_keys=True, allow_nan=False),
-    )
+    return metric_identity(obs)
 
 
 def _sample(obs: Observation) -> dict:

@@ -99,3 +99,45 @@ def test_calendar_import_is_idempotent_and_included_in_captured_evidence(tmp_pat
     bundle = engine.bundle(include_forecast=False)
     assert len(bundle["calendar"]) == 1
     assert bundle["calendar"][0]["publication_time_verified"] is False
+
+
+def test_actual_mcp_accumulation_tools_compute_without_persisting(market):
+    import asyncio
+    import sys
+    from pathlib import Path
+
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    engine, config, end = market
+
+    async def check():
+        parameters = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "crypto_market_analysis", "serve", "--mode", "demo", "--data-dir", str(engine.settings.data_dir)],
+            env={"PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
+        )
+        async with stdio_client(parameters) as (read, write), ClientSession(read, write) as session:
+            await session.initialize()
+            listed = await session.list_tools()
+            assert all(tool.annotations.readOnlyHint for tool in listed.tools)
+            arguments = {"asset": "BTC", "source": "fixture", "quote": "EUR", "as_of": end}
+            context = await session.call_tool("get_market_context", arguments)
+            assert not context.isError
+            assert context.structuredContent["market"]["quote"] == "EUR"
+            windows = await session.call_tool("get_purchase_windows", {**arguments, "horizons": [1], "thresholds": [0.05]})
+            assert not windows.isError
+            comparison = await session.call_tool("compare_purchase_plans", {"config": config, "as_of": end})
+            assert not comparison.isError
+            assert comparison.structuredContent["plans"]["regular"]["reserve"] == "9"
+            evaluation = await session.call_tool("evaluate_purchase_plans", {"config": config, "as_of": end})
+            assert not evaluation.isError
+            vigilance = await session.call_tool("get_vigilance", arguments)
+            assert not vigilance.isError
+            assert vigilance.structuredContent["quality"] == "degraded"
+            missing = await session.call_tool("get_assessment", {"assessment_id": "missing"})
+            assert missing.isError
+
+    asyncio.run(check())
+    with engine.store.connection() as con:
+        assert con.execute("SELECT 1 FROM sqlite_master WHERE name='assessment_journal'").fetchone() is None

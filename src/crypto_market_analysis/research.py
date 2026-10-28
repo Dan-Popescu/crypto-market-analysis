@@ -125,13 +125,15 @@ def _summarize_observations(
     for group in groups.values():
         group.sort(key=lambda o: (o.event_time, o.observed_at))
         latest = group[-1]
+        from .source_catalog import interpret_context
+        comparable = interpret_context([latest], as_of)["observations"][0]["comparable"]
         source_counts[latest.source] = source_counts.get(latest.source, 0) + 1
         changes = {}
         for days in (7, 21):
             cutoff = latest.event_time - days * 86400
             prior = next((o for o in reversed(group) if o.event_time <= cutoff), None)
             # Do not silently turn arbitrarily stale readings into a 7/21-day change.
-            if prior is None or cutoff - prior.event_time > 86400:
+            if not comparable or prior is None or cutoff - prior.event_time > 86400:
                 changes[str(days)] = None
             else:
                 changes[str(days)] = {
@@ -147,6 +149,7 @@ def _summarize_observations(
                 "quote": latest.quote,
                 "unit": latest.unit,
                 "unit_unknown": latest.unit.lower() in ("", "unknown", "inconnu", "unspecified"),
+                "comparable": comparable,
                 "value": float(latest.value),
                 "event_time": _stamp(latest.event_time),
                 "observed_at": _stamp(latest.observed_at),

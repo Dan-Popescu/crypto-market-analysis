@@ -49,7 +49,10 @@ def metric_freshness(observation: Observation, settings: Settings, as_of: int) -
     release = observation.metadata.get("next_release_time")
     if isinstance(release, bool) or not isinstance(release, int):
         release = None
-    result = assess_freshness(observation.event_time, observation.observed_at, as_of, cadence,
+    timestamp_source = observation.metadata.get("timestamp_source", "event")
+    event_time = None if timestamp_source in ("observation", "unknown") else observation.event_time
+    result = assess_freshness(event_time, observation.observed_at, as_of, cadence,
                               next_release_time=release,
                               schedule_verified=family != "macro" or release is not None)
-    return {**result, "family": family, "timestamp_source": observation.metadata.get("timestamp_source", "event")}
+    return {**result, "family": family, "recorded_event_time": observation.event_time,
+            "timestamp_source": timestamp_source}

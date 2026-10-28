@@ -8,7 +8,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .config import Settings
-from .evidence import canonical_json, content_hash
+from .evidence import archive_evidence, canonical_json, content_hash
 
 
 class AccumulationService:
@@ -106,7 +106,10 @@ class AccumulationService:
             config, now, rows, reference = self._plan_inputs(plan_config, captured.as_of)
             from .plans import compare_plans
             payload["plan"] = {**compare_plans(config, rows, now), "input_reference": reference}
-            evidence["plan_candle_versions"] = [asdict(row) for row in rows]
+            consumed = set(captured.candles)
+            evidence["plan_candle_versions"] = [asdict(row) for row in rows if row not in consumed]
+            evidence["plan_uses_captured_candles"] = True
+        evidence = archive_evidence(evidence)
         try:
             return journal.issue(idempotency_key, payload, evidence, issued)
         except ValueError:

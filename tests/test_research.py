@@ -100,10 +100,10 @@ def test_observation_groups_revision_and_unknown_unit():
     result = build_analysis(candles(40), observations, end)
     group = result["evidence"]["observations"][0]
     assert group["value"] == 3
-    assert group["changes"]["7"]["absolute"] == 1
+    assert group["changes"]["7"] is None
     assert group["changes"]["21"] is None
     assert group["unit_unknown"] and group["metadata"]["coverage"] == 0.9
-    assert result["coverage"]["observations"]["groups_by_source"] == {"fred": 1}
+    assert result["coverage"]["observations"]["groups_by_source"] == {"fred": 2}
 
 
 def test_forecast_stale_and_wilson_interval():
