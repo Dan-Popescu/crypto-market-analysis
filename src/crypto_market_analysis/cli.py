@@ -27,7 +27,11 @@ from .venues import VENUES
 EXAMPLE = """# Crypto Market Analysis — no paid collection APIs
 data_dir = "data"
 assets = ["BTC", "ETH"]
-venues = ["binance", "coinbase", "kraken", "okx", "bybit", "bitstamp", "bitfinex", "kucoin", "gate", "cryptocom", "gemini", "bitget", "mexc", "htx"]
+venues = ["binance", "coinbase", "kraken", "okx", "bybit", "bitstamp", "bitfinex", "kucoin", "gate", "cryptocom", "gemini", "bitget", "mexc", "htx", "bitvavo"]
+quote_currencies = ["EUR", "USD", "USDT", "USDC"]
+purchase_jurisdiction = "France"
+purchase_candidates = ["kraken", "bitvavo", "coinbase"]
+liquidity_venues = ["kraken", "bitvavo", "coinbase"]
 history_days = 30
 max_pages = 20
 workers = 3
@@ -126,6 +130,7 @@ def parser() -> argparse.ArgumentParser:
         "crypto-market-analysis collect --venues kraken,coinbase --days 7",
     )
     collect.add_argument("--venues", help="Comma-separated identifiers")
+    collect.add_argument("--quotes", help="Explicit native quotes, for example EUR,USD; no conversion")
     collect.add_argument(
         "--tasks", default="market,liquidity,options,context", help="market,liquidity,options,context"
     )
@@ -235,6 +240,7 @@ def parser() -> argparse.ArgumentParser:
         "demo", "Load SYNTHETIC data in a separate mode.", "crypto-market-analysis demo --days 1800"
     )
     demo.add_argument("--days", type=int, default=1800)
+    demo.add_argument("--quotes", default="USD", help="Independent synthetic EUR,USD scenarios")
     serve = command(
         "serve",
         "MCP server using STDIO or Streamable HTTP.",
@@ -456,6 +462,11 @@ def main(argv: list[str] | None = None) -> int:
                 settings.venues = args.venues.split(",")
                 if set(settings.venues) - set(VENUES):
                     raise ValueError("Unknown venue. Example: --venues kraken,coinbase")
+            if args.quotes:
+                quotes = args.quotes.split(",")
+                if len(set(quotes)) != len(quotes) or any(q not in ("EUR", "USD", "USDT", "USDC") for q in quotes):
+                    raise ValueError("Use distinct native EUR, USD, USDT or USDC quotes.")
+                settings.quote_currencies = quotes
             if args.days is not None and not 1 <= args.days <= 3650:
                 raise ValueError("--days must be between 1 and 3650.")
             if args.max_pages is not None:
@@ -546,7 +557,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "demo":
             from .demo import seed_demo
 
-            write_json(seed_demo(engine.store, args.days, now))
+            write_json(seed_demo(engine.store, args.days, now, tuple(args.quotes.split(","))))
         elif args.command == "import-events":
             if args.file.stat().st_size > 2_000_000:
                 raise ValueError("Calendar too large (2 MB limit).")

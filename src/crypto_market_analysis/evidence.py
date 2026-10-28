@@ -55,6 +55,7 @@ class CapturedInputs:
     watermark: dict
     configuration: dict
     truncation: dict
+    calendar: tuple[dict, ...] = ()
 
     def evidence(self) -> dict:
         """Return an independent JSON envelope, suitable for immutable local issuance."""

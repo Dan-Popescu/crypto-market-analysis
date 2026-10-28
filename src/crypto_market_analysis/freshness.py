@@ -13,6 +13,9 @@ def assess_freshness(event_time: int | None, observed_at: int | None, as_of: int
         if isinstance(value, bool) or not isinstance(value, int) or (name == "cadence_seconds" and value <= 0):
             raise ValueError(f"{name} must be an integer with a positive cadence.")
     lifetime = cadence_seconds * 2 if max_age_seconds is None else max_age_seconds
+    for name, value in (("event_time", event_time), ("observed_at", observed_at), ("next_release_time", next_release_time)):
+        if value is not None and type(value) is not int:
+            raise ValueError(f"{name} must be integer UTC epoch seconds or unknown.")
     if isinstance(lifetime, bool) or not isinstance(lifetime, int) or lifetime <= 0:
         raise ValueError("max_age_seconds must be a positive integer.")
     known = event_time is not None and observed_at is not None

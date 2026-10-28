@@ -279,6 +279,7 @@ def render_chart(
     as_of: int,
     forecast: dict | None = None,
     evaluation: dict | None = None,
+    input_reference: dict | None = None,
 ) -> Path:
     """Render one PNG or SVG chart, raising ValueError when evidence is missing.
 
@@ -319,7 +320,8 @@ def render_chart(
             fig.text(
                 0.01,
                 0.012,
-                f"{asset} · UTC · As of {_dt(as_of).strftime('%Y-%m-%d %H:%M')} · Mode: {mode}",
+                f"{asset} · UTC · As of {_dt(as_of).strftime('%Y-%m-%d %H:%M')} · Mode: {mode}"
+                + (f" · Input: {input_reference['content_hash'][:16]}" if input_reference else ""),
                 fontsize=8,
                 color="#cbd5e1",
             )

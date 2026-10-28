@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 import numpy as np
 import pandas as pd
 
+from .evidence import metric_identity
 from .models import Candle, Observation
 
 _COLUMNS = ["open", "high", "low", "close", "volume", "quote_volume", "taker_buy_quote_volume"]
@@ -117,7 +118,7 @@ def _summarize_observations(
             if obs.metric in ("option_open_interest_expiry", "option_downside_minus_upside_iv")
             else None
         )
-        key = (obs.source, obs.asset, obs.metric, obs.quote, obs.unit, obs.data_mode, expiry)
+        key = (*metric_identity(obs), expiry)
         groups.setdefault(key, []).append(obs)
     summaries = []
     source_counts: dict[str, int] = {}
@@ -407,7 +408,7 @@ def forecast(
     stale = bool(
         as_of is not None
         and len(bars)
-        and as_of - int((bars.index[-1] + pd.Timedelta(days=1)).timestamp()) > 2 * 86400
+        and as_of - int((bars.index[-1] + pd.Timedelta(days=1)).timestamp()) >= 7200
     )
     return {
         "method": "neighboring historical regimes, experimental",
@@ -434,7 +435,7 @@ def forecast(
             "Wilson intervals describe neighboring frequencies under an independence assumption; they do not establish calibration.",
             "Available historical prices may include revisions or backfills unknown at the time.",
             *(
-                ["The latest complete close is more than two days old as of the requested date."]
+                ["The latest complete close is at least two hours old; interfaces apply their configured expiry."]
                 if stale
                 else []
             ),

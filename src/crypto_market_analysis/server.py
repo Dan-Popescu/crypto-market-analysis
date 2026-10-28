@@ -208,7 +208,13 @@ def create_server(
         """Read an immutable previously issued local assessment and its appended outcomes. This lookup does not issue assessments or append observations."""
         if not 1 <= len(assessment_id) <= 200:
             raise ValueError("assessment_id must contain 1–200 characters.")
-        return {**engine.assessment(assessment_id), "outcomes": engine.assessment_outcomes(assessment_id)}
+        original = engine.assessment(assessment_id)
+        evidence = original.pop("evidence", {})
+        outcomes = engine.assessment_outcomes(assessment_id)
+        return {**original, "evidence_summary": {"available_locally": True,
+                "candles": len(evidence.get("candles", [])), "observations": len(evidence.get("observations", [])),
+                "content_hash": original["content_hash"]},
+                "outcomes": outcomes[-20:], "outcomes_truncated": len(outcomes) > 20}
 
     @server.tool(annotations=readonly)
     def get_vigilance(
@@ -228,6 +234,12 @@ def create_server(
             horizon_hours,
             bounded_object(policy, "policy") if policy is not None else None,
         )
+
+    @server.tool(annotations=readonly)
+    def get_source_catalog() -> dict[str, Any]:
+        """Documented source access, native quotes, rights and dated French entity evidence; not a live availability check."""
+        from .source_catalog import source_catalog
+        return source_catalog()
 
     @server.tool(annotations=readonly)
     def get_source_status() -> dict[str, Any]:

@@ -87,7 +87,7 @@ class Engine:
                               candles[0].quote if candles else quote, tuple(candles), tuple(raw["observations"]),
                               tuple(coverage), tuple(raw["events"]),
                               self._health(now, raw["runs"], raw["counts"]), raw["watermark"],
-                              configuration, raw["truncation"])
+                              configuration, raw["truncation"], tuple(raw["calendar"]))
 
     def inputs(self, asset: str, source: str | None = None, quote: str | None = None,
                as_of: int | None = None) -> tuple[list[Candle], list[Observation], list[dict], dict]:
@@ -118,6 +118,9 @@ class Engine:
             if prediction is not None:
                 prediction["stale"] = price_freshness["stale"]
                 prediction["freshness"] = price_freshness
+                if not price_freshness["usable"]:
+                    for estimate in prediction["horizons"].values():
+                        estimate.update(status="stale", probabilities=None, confidence_intervals=None)
         return {"schema_version": "2.0", "snapshot_id": reference["content_hash"][:24],
                 "input_reference": reference, "as_of": stamp(now), "as_of_epoch": now,
                 "data_mode": captured.data_mode, "asset": captured.asset,
@@ -127,6 +130,7 @@ class Engine:
                 "forecast": prediction, "price_freshness": price_freshness,
                 "latest_metrics": list(latest.values())[:150], "metrics_truncated": len(latest) > 150,
                 "input_truncation": dict(captured.truncation), "events": list(captured.events),
+                "calendar": list(captured.calendar),
                 "source_health": captured.source_health,
                 "limitations": [
                     "No implicit USD/USDT/USDC/EUR conversion or cross-venue price averaging.",
@@ -134,6 +138,51 @@ class Engine:
                     "Hourly-close anchors are not current executable purchase prices.",
                     "Calendar and ETF coverage may be manual or incomplete; missing data is unknown.",
                     "Unverified macro release schedules cannot establish historical availability."]}
+
+    @property
+    def accumulation(self):
+        from .application import AccumulationService
+        return AccumulationService(self.settings, self.store, self.mode, self.capture_inputs)
+
+    def context(self, asset="BTC", source=None, quote=None, as_of=None, lookbacks=None):
+        return self.accumulation.context(asset, source, quote, as_of, lookbacks)
+
+    def purchase_windows(self, asset="BTC", source=None, quote=None, as_of=None, horizons=None, thresholds=None):
+        return self.accumulation.purchase_windows(asset, source, quote, as_of, horizons, thresholds)
+
+    def compare_plans(self, config, as_of=None, validation="retrospective"):
+        return self.accumulation.compare_plans(config, as_of, validation)
+
+    def evaluate_plans(self, config, as_of=None, origins=None, validation="known_at",
+                       held_out_start=None, policy_frozen_at=None):
+        return self.accumulation.evaluate_plans(config, as_of, origins, validation, held_out_start, policy_frozen_at)
+
+    def issue_assessment(self, idempotency_key, asset="BTC", source=None, quote=None, as_of=None, plan_config=None):
+        return self.accumulation.issue_assessment(idempotency_key, asset, source, quote, as_of, plan_config)
+
+    def assessment(self, assessment_id):
+        return self.accumulation.assessment(assessment_id)
+
+    def assessment_outcomes(self, assessment_id):
+        return self.accumulation.assessment_outcomes(assessment_id)
+
+    def observe_assessment(self, assessment_id, as_of=None):
+        return self.accumulation.observe_assessment(assessment_id, as_of)
+
+    def vigilance(self, asset="BTC", source=None, quote=None, as_of=None, horizon_hours=4, policy=None):
+        return self.accumulation.vigilance(asset, source, quote, as_of, horizon_hours, policy)
+
+    def record_vigilance(self, state_key, asset="BTC", source=None, quote=None, as_of=None, horizon_hours=4, policy=None):
+        return self.accumulation.record_vigilance(state_key, asset, source, quote, as_of, horizon_hours, policy)
+
+    def import_history(self, path, source, asset, quote, member=None, expected_sha256=None):
+        return self.accumulation.import_history(path, source, asset, quote, member, expected_sha256)
+
+    def import_calendar(self, path, kind="bls"):
+        return self.accumulation.import_calendar(path, kind)
+
+    def collect_calendar(self):
+        return self.accumulation.collect_calendar()
 
     def predictions(
         self,
@@ -147,6 +196,14 @@ class Engine:
         now = int(time.time()) if as_of is None else as_of
         rows, coverage = self.selected_candles(asset, source, quote, now)
         result = forecast(rows, horizons, threshold, now)
+        if rows:
+            from .freshness import assess_freshness
+            last = max(rows, key=lambda row: row.close_time)
+            freshness = assess_freshness(last.close_time, last.observed_at, now, self.settings.market_interval)
+            result.update(stale=freshness["stale"], freshness=freshness)
+            if not freshness["usable"]:
+                for estimate in result["horizons"].values():
+                    estimate.update(status="stale", probabilities=None, confidence_intervals=None)
         return {
             **result,
             "asset": asset,
@@ -163,11 +220,14 @@ class Engine:
         quote: str | None = None,
         as_of: int | None = None,
         validation: str = "known_at",
+        *,
+        captured: CapturedInputs | None = None,
     ) -> dict:
-        rows, _ = self.selected_candles(asset, source, quote, as_of)
+        rows = list(captured.candles) if captured else self.selected_candles(asset, source, quote, as_of)[0]
         alignment = max((c.close_time for c in rows), default=0) % 86400 // 3600
         if rows:
-            rows = self.store.candles(asset, rows[0].source, rows[0].quote, as_of, self.mode, versions=True)
+            rows = self.store.candles(asset, rows[0].source, rows[0].quote, as_of, self.mode, versions=True,
+                                      max_id=captured.watermark["candles"] if captured else None)
         return evaluate(rows, horizon, threshold, validation, anchor_hour_utc=alignment)
 
     def chart(
@@ -183,18 +243,27 @@ class Engine:
     ) -> Path:
         from .charts import render_chart
 
+        if kind in ("context", "windows"):
+            from .charts import render_result_chart
+            result = (self.context(asset, source, quote, as_of) if kind == "context"
+                      else self.purchase_windows(asset, source, quote, as_of))
+            return render_result_chart(kind, result, output)
+
         now = int(time.time()) if as_of is None else as_of
-        candles, observations, _, _ = self.inputs(asset, source, quote, now)
+        captured = self.capture_inputs(asset, source, quote, now)
+        candles = list(captured.candles)
+        observations = [row for row in captured.observations if row.asset == asset]
         if source:
             observations = [o for o in observations if o.source == source]
         if quote:
             observations = [o for o in observations if o.quote == quote]
         evaluation = (
-            self.evaluation(asset, horizon, 0.10, source, quote, now, validation)
+            self.evaluation(asset, horizon, 0.10, source, quote, now, validation, captured=captured)
             if kind == "calibration"
             else None
         )
-        return render_chart(kind, candles, observations, output, now, evaluation=evaluation)
+        return render_chart(kind, candles, observations, output, now, evaluation=evaluation,
+                            input_reference=captured.reference)
 
 
 def render_brief(bundle: dict, cadence: str = "daily") -> str:

@@ -2,7 +2,7 @@
   "schema_version": 1,
   "asset": "BTC",
   "quote": "EUR",
-  "source": "synthetic-reference",
+  "source": "demo",
   "data_mode": "demo",
   "start_time": 1767225600,
   "contributions": [

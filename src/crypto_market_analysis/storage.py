@@ -55,6 +55,11 @@ class Store:
                     id TEXT NOT NULL, observed_at INTEGER NOT NULL, event_time INTEGER NOT NULL,
                     payload TEXT NOT NULL, PRIMARY KEY(id,observed_at)
                 );
+                CREATE TABLE IF NOT EXISTS local_records (
+                    id INTEGER PRIMARY KEY, kind TEXT NOT NULL, identity TEXT NOT NULL,
+                    observed_at INTEGER NOT NULL, fingerprint TEXT NOT NULL, payload TEXT NOT NULL,
+                    UNIQUE(kind,fingerprint)
+                );
             """)
             # Add dimensions without dropping observations or rewriting their source payloads.
             if con.execute("PRAGMA user_version").fetchone()[0] < 1:
@@ -82,7 +87,9 @@ class Store:
                 if c.asset not in ("BTC", "ETH") or c.data_mode not in ("live", "demo", "import"):
                     raise ValueError("Unsupported asset or data mode.")
                 numeric = (c.open, c.high, c.low, c.close, c.volume)
-                if not all(math.isfinite(v) for v in numeric):
+                if any(type(getattr(c, key)) is not int for key in ("open_time", "close_time", "observed_at")):
+                    raise ValueError("Candle timestamps must be integer UTC epoch seconds.")
+                if any(isinstance(v, bool) for v in numeric) or not all(math.isfinite(v) for v in numeric):
                     raise ValueError("Bougie non finie.")
                 if min(c.open, c.high, c.low, c.close) <= 0 or c.volume < 0:
                     raise ValueError("Prix/volume de bougie invalide.")
@@ -124,7 +131,9 @@ class Store:
         inserted = 0
         with self.connection() as con:
             for o in rows:
-                if not math.isfinite(o.value) or o.event_time > o.observed_at:
+                if (isinstance(o.value, bool) or not math.isfinite(o.value)
+                    or type(o.event_time) is not int or type(o.observed_at) is not int
+                    or o.event_time > o.observed_at):
                     raise ValueError("Non-finite observation or observation dated in the future.")
                 if o.data_mode not in ("live", "demo", "import"):
                     raise ValueError("Invalid data mode.")
@@ -303,7 +312,7 @@ class Store:
         with self.connection() as con:
             con.execute("BEGIN")
             watermark = {table: con.execute(f"SELECT COALESCE(MAX(rowid),0) FROM {table}").fetchone()[0]
-                         for table in ("candles", "observations", "events", "runs")}
+                         for table in ("candles", "observations", "events", "runs", "local_records")}
             candles = con.execute("""SELECT payload FROM (SELECT payload,open_time,
                 ROW_NUMBER() OVER(PARTITION BY source,asset,quote,timeframe,open_time,data_mode
                 ORDER BY observed_at DESC,id DESC) rn FROM candles
@@ -326,6 +335,10 @@ class Store:
                 FROM runs WHERE observed_at<=?) WHERE rn=1 ORDER BY observed_at DESC LIMIT 101""",
                 (as_of,)).fetchall()
             counts = {}
+            calendar = con.execute("""SELECT payload FROM (SELECT payload,id,
+                ROW_NUMBER() OVER(PARTITION BY identity ORDER BY observed_at DESC,id DESC) rn
+                FROM local_records WHERE kind='calendar' AND observed_at<=?)
+                WHERE rn=1 ORDER BY id DESC LIMIT 501""", (as_of,)).fetchall()
             for table in ("candles", "observations"):
                 counts[table] = con.execute(f"SELECT COUNT(*) FROM {table} WHERE data_mode=? AND observed_at<=?",
                                             (mode, as_of)).fetchone()[0]
@@ -334,9 +347,11 @@ class Store:
         return {"watermark": watermark, "candles": [Candle(**json.loads(row[0])) for row in reversed(candles[:500000])],
                 "observations": [Observation(**json.loads(row[0])) for row in observations[:observation_limit]],
                 "events": [json.loads(row[0]) for row in events[:100]],
+                "calendar": [json.loads(row[0]) for row in calendar[:500]],
                 "runs": [json.loads(row[0]) for row in runs[:100]], "counts": counts,
                 "truncation": {"candles": len(candles) > 500000, "observations": len(observations) > observation_limit,
-                               "events": len(events) > 100, "runs": len(runs) > 100}}
+                               "events": len(events) > 100, "runs": len(runs) > 100,
+                               "calendar": len(calendar) > 500}}
 
     def latest_candle_time(self, source: str, asset: str, mode: str = "live", *, quote: str | None = None) -> int | None:
         with self.connection() as con:
@@ -345,6 +360,33 @@ class Store:
                 + (" AND quote=?" if quote is not None else ""),
                 (source, asset, mode, quote) if quote is not None else (source, asset, mode),
             ).fetchone()[0]
+
+    def save_local_record(self, kind: str, payload: dict) -> dict:
+        """Preserve sourced imports and date-only calendars without invented event times."""
+        if kind not in ("calendar", "history_import") or not isinstance(payload, dict):
+            raise ValueError("Unsupported local record kind or payload.")
+        encoded = _json(payload)
+        if len(encoded.encode()) > 2_000_000:
+            raise ValueError("Local record exceeds the 2 MB limit.")
+        semantic = {key: value for key, value in payload.items() if key not in ("observed_at", "imported_at")}
+        fingerprint = _hash(semantic)
+        identity = str(payload.get("event_id") or payload.get("uid") or payload.get("id") or fingerprint)
+        observed = payload.get("observed_at", int(time.time()))
+        with self.connection() as con:
+            cursor = con.execute("INSERT OR IGNORE INTO local_records(kind,identity,observed_at,fingerprint,payload) VALUES(?,?,?,?,?)",
+                                 (kind, identity, observed, fingerprint, encoded))
+        return {"inserted": cursor.rowcount, "identity": identity, "fingerprint": fingerprint}
+
+    def local_records(self, kind: str, as_of: int | None = None, limit: int = 500) -> list[dict]:
+        if kind not in ("calendar", "history_import") or type(limit) is not int or not 1 <= limit <= 1000:
+            raise ValueError("Use a supported record kind and a limit from 1 to 1000.")
+        now = int(time.time()) if as_of is None else as_of
+        with self.connection() as con:
+            rows = con.execute("""SELECT payload FROM (SELECT payload,id,
+                ROW_NUMBER() OVER(PARTITION BY identity ORDER BY observed_at DESC,id DESC) rn
+                FROM local_records WHERE kind=? AND observed_at<=?) WHERE rn=1 ORDER BY id DESC LIMIT ?""",
+                (kind, now, limit)).fetchall()
+        return [json.loads(row[0]) for row in rows]
 
     def put_events(self, events: list[dict], now: int) -> int:
         inserted = 0
