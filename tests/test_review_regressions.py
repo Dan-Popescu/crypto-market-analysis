@@ -85,7 +85,6 @@ def test_collector_funding_metrics_keep_explicit_actual_and_projected_comparison
 def test_legacy_evaluation_excludes_preissuance_barrier_ambiguity():
     from crypto_market_analysis.research import evaluate
 
-    day = 86400
     data = [Candle("fixture", "BTC", "USD", "1h", hour * 3600, (hour + 1) * 3600,
                    100, 101, 99, 100, 1, (hour + 1) * 3600 + 120) for hour in range(90 * 24)]
     first_hour = 82 * 24
