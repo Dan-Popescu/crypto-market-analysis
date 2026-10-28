@@ -1,6 +1,14 @@
 data_dir = "data"
 assets = ["BTC", "ETH"]
-venues = ["binance", "coinbase", "kraken", "okx", "bybit", "bitstamp", "bitfinex", "kucoin", "gate", "cryptocom", "gemini", "bitget", "mexc", "htx"]
+# Global market analysis is independent of purchase eligibility.
+venues = ["binance", "coinbase", "kraken", "okx", "bybit", "bitstamp", "bitfinex", "kucoin", "gate", "cryptocom", "gemini", "bitget", "mexc", "htx", "bitvavo"]
+quote_currencies = ["EUR", "USD", "USDT", "USDC"]
+purchase_jurisdiction = "France"
+# Candidates require entity/service checks; this is not a trading authorization.
+purchase_candidates = ["kraken", "coinbase", "bitvavo"]
+# Optional request budget for books only; market candles still use all venues.
+# Omit this key to sample books on every configured analytical venue.
+liquidity_venues = ["kraken", "coinbase", "bitvavo"]
 history_days = 30
 max_pages = 20
 workers = 3

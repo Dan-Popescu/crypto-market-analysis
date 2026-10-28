@@ -39,3 +39,34 @@ accepting an older value does not make it a supported new output value.
 Missing observations remain missing, and `live`, `import` and `demo` data remain
 separate. Do not rewrite external evidence or personal runtime records merely
 to translate their language.
+
+## Accumulation configuration and result schemas
+
+The accumulated-feature results and plan configuration use their own integer
+`schema_version: 1`; this is separate from the existing bundle's string `2.0`.
+Do not assume a version number applies across every operation. Preserve decimal
+strings in plan inputs/outputs and integer UTC epoch seconds in public time
+arguments. CLI `--as-of` additionally accepts timezone-aware ISO dates.
+
+Existing TOML files remain usable. New optional keys are:
+
+| Key | Default and behavior |
+| --- | --- |
+| `quote_currencies` | `["EUR", "USD", "USDT", "USDC"]`; requests distinct native markets, without conversion. |
+| `purchase_jurisdiction` | `"France"`; other jurisdictions are currently rejected. |
+| `purchase_candidates` | `["kraken", "coinbase", "bitvavo"]`; separates purchase candidates from global analytical venues. Entity/service evidence must still be checked. |
+| `liquidity_venues` | Omitted means all configured analytical venues. An explicit subset bounds book requests only; an empty list disables those requests. |
+
+The registry now includes Bitvavo alongside the previous 14 venues. A stored
+explicit `venues` list stays explicit: add `bitvavo` to opt that configuration
+in. The example keeps all 15 analytical venues and samples liquidity from the
+three purchase candidates to bound request volume. Settings reject unknown
+keys; do not add undocumented policy fields to TOML. Purchase policies belong
+in a separate schema-1 JSON plan file.
+
+No local database rename or destructive migration is required. Additional
+journal/calendar/local-record tables are initialized by the operations that
+need them. Preserve existing observation versions, modes and provenance.
+New `issue`, `observe`, imports, collection and explicit vigilance `--state-key`
+operations write locally. Existing and new MCP lookup/calculation tools remain
+read-only; there is no MCP issuance or outcome-append operation.
