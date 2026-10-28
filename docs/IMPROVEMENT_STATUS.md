@@ -5,6 +5,10 @@ Recorded October 28, 2026 (Europe/Paris). Implemented from the selected
 and shared-interface integration. The [workflow guide](IMPROVEMENTS.md) and
 [migration contract](MIGRATION.md) describe the public operations.
 
+The [architecture follow-up](#architecture-follow-up) below records the subsequent
+four-module implementation and its newer verification. The original 0.3.0
+delivery evidence remains separate.
+
 ## Delivery boundary
 
 | Lot | Delivered | Verification and remaining boundary |
@@ -114,3 +118,59 @@ probability or improvement over regular purchases is established. The journal
 overview exposes denominators but does not replace a prospective performance
 study. No permanent collector, order, fund transfer, notification, account
 connection, public deployment, push or pull request was activated by this work.
+
+## Architecture follow-up
+
+Implemented the four selected projects in the recommended integration order.
+[Architecture and invariant ownership](ARCHITECTURE.md) records the resulting
+responsibilities; [CONTEXT.md](../CONTEXT.md) defines the domain terms.
+
+| Project | Delivered behavior |
+| --- | --- |
+| Purchase-plan accounting | One activation calculation owns slice expansion, quote-fee requirements, cash clipping and target caps. The simulator, price-free preview and brief use it. A target's reserve release at the next tranche's exact timestamp is included: the reproduced EUR 100 case now allocates EUR 100 without a shortfall in all three views. Construction and compatible preview imports remain available from `plan_builder`. |
+| Captured evidence | Plan issuance freezes all required eligible candle vintages in the original SQLite read transaction. A post-capture correction, including an insertion that reuses a deleted physical ID, cannot change only the plan. Existing archive layout, old vintages, replay and actual availability remain intact. History capture is opt-in, requires an explicit native market and fails above 100,000 versions. |
+| Assessment journal | The journal owns noninitializing read lifecycle, bounded coherent projections and original retrieval for retries. Application code no longer queries journal tables. A concurrent retry recovers the complete original; the pure prospective reducer remains separate. |
+| Empirical samples | Research exposes descriptive reference frequencies and Wilson intervals before the conditional support gate. Purchase windows no longer duplicates sparse selection or imports private research helpers. The 20-effective-sample gate and existing numerical results remain unchanged. |
+
+### Integrated verification
+
+Exact tested and independently reviewed revision:
+`f72babe89bdfe760cbff1bd8acf3f4f9b7db6171`.
+Changes after this revision only record these verification results.
+Review baseline: `3a3fad3e637b21f5df9c3279c5c278aaa00b845d`.
+
+```bash
+UV_CACHE_DIR=/workspace/.cache/uv uv sync --frozen --extra dev --offline
+UV_CACHE_DIR=/workspace/.cache/uv MPLCONFIGDIR=/workspace/work/improvements/mpl-cache uv run --frozen python tools/check.py
+```
+
+- Offline lock coherent: 73 resolved packages; Ruff clean; **401 tests passed in
+  45.00 seconds**. Local socket permission enabled actual MCP transport tests.
+  No public-source qualification is inferred from those checks.
+- The existing 25-command actual CLI smoke passed on the integrated revision:
+  four independent synthetic BTC/ETH × EUR/USD contexts and briefs, funding,
+  three cost cases, immutable issuance/retry, observed outcomes and journal reads.
+  Local artifacts: `/workspace/work/improvements/verification/cli-f72babe8`.
+- A seeded differential check against the immutable baseline matched **768
+  complete simulation outputs and 384 funding previews**. Research checks matched
+  **48 forecast outputs**, excluding only the two additive descriptive fields,
+  **48 complete window outputs** and **3 complete evaluation outputs**.
+- An independent reviewer additionally matched 240 complete simulation outputs
+  across 120 scenarios and both validation modes, plus 15 research comparisons.
+- Static relative-import inspection found 34 modules, 97 edges and no cycle.
+  This does not establish the absence of dynamic dependencies or future debt.
+
+### Standards
+
+Independent review: **0 findings** against documented conventions and the named
+maintainability heuristics. Compatibility re-exports are intentional.
+
+### Spec
+
+Independent review: **0 findings** for missing requirements, scope creep or
+incorrect implementation across the four selected projects.
+
+The operational and analytical limits above still apply. In particular, the
+follow-up does not establish live-source access, paid-account eligibility,
+investment advantage or a new backup/replay CLI product. No dependency, paid API,
+schema migration or new plan rule version was introduced.
