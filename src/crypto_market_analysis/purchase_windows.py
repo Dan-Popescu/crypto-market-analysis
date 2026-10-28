@@ -22,6 +22,35 @@ from .research import _aligned_bars, _feature, _outcome, _wilson, forecast
 
 _DAY = 86400
 _EVENT_NAMES = {"red": "endpoint_below_anchor", "down_barrier": "below_anchor_touch"}
+OBSERVABLE_ENDPOINT = "hourly_after_deadline_v1"
+
+
+def resolve_observable_endpoint(
+    candles: list[Candle], anchor_price: float, issued_at: int,
+    horizon_days: int, as_of: int,
+) -> dict:
+    """Observe a declared hourly mark without claiming an exact intrahour price."""
+    _timestamp(issued_at, "issued_at")
+    _timestamp(as_of, "as_of")
+    anchor_price = _number(anchor_price, "anchor_price", positive=True)
+    horizon_days = _positive_ints([horizon_days], "horizon_days", 365, 1)[0]
+    deadline = issued_at + horizon_days * _DAY
+    mark_time = (deadline + 3599) // 3600 * 3600
+    _timestamp(mark_time, "mark_time")
+    eligible, _ = _eligible_candles(candles, as_of)
+    mark = next((row for row in eligible if row.close_time == mark_time), None)
+    state = "pending" if as_of < mark_time else "unavailable" if mark is None else (
+        "known_true" if mark.close < anchor_price else "known_false")
+    return {
+        **_event(state, price=float(mark.close) if mark else None),
+        "convention": OBSERVABLE_ENDPOINT,
+        "definition": "first aligned hourly close at or after the issuance-relative deadline < frozen anchor",
+        "nominal_deadline": _stamp(deadline), "mark_time": _stamp(mark_time),
+        "offset_seconds": mark_time - deadline, "maximum_offset_seconds": 3600,
+        "forecast_comparability": "not_established_for_anchor_relative_estimates",
+        "reason": "mark_not_yet_closed" if state == "pending" else
+            "declared_hourly_mark_missing" if state == "unavailable" else None,
+    }
 
 
 def _thresholds(values: list[float]) -> list[float]:
@@ -49,6 +78,8 @@ def resolve_window(
     horizon_days: int,
     threshold: float,
     as_of: int,
+    *,
+    endpoint_convention: str = "exact_deadline_v1",
 ) -> dict:
     """Resolve [issued_at, issued_at + horizon_days*86400] using known closed bars.
 
@@ -64,6 +95,8 @@ def resolve_window(
     threshold = _thresholds([threshold])[0]
     if anchor_time > issued_at:
         raise ValueError("anchor_time cannot follow issued_at")
+    if endpoint_convention not in ("exact_deadline_v1", OBSERVABLE_ENDPOINT):
+        raise ValueError("Unsupported endpoint observation convention.")
     end = issued_at + horizon_days * _DAY
     _timestamp(end, "window_end")
     eligible, market = _eligible_candles(candles, as_of)
@@ -159,6 +192,9 @@ def resolve_window(
         else "ambiguous",
         "interval_convention": "[issued_at, window_end]; only fully contained hourly bars prove touches",
         "endpoint_below_anchor": {**endpoint, "definition": "price at window_end < frozen anchor_price"},
+        **({"observable_endpoint": resolve_observable_endpoint(
+            eligible, anchor_price, issued_at, horizon_days, as_of)}
+            if endpoint_convention == OBSERVABLE_ENDPOINT else {}),
         "below_anchor_touch": {
             **_event(touch_state),
             "target_price": target,
