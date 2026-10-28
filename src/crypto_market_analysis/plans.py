@@ -13,14 +13,15 @@ it. All historical execution is a configurable cost assumption.
 
 from __future__ import annotations
 
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 from decimal import ROUND_CEILING, ROUND_DOWN, Decimal, InvalidOperation, localcontext
 
 from .models import Candle
 
 DAY = 86400
-RULE_VERSION = 'accumulation-v1'
+RULE_VERSION = 'accumulation-v2'
+EXECUTION_EVIDENCE_RULE = 'complete_funded_execution_paths_v1'
 MAX_ACTIONS = 2000
 ZERO = Decimal(0)
 ONE = Decimal(1)
@@ -216,6 +217,33 @@ class _Intent:
     expired: bool = False
     touched: bool = False
     expiry_record: dict | None = None
+    resolved_at: int | None = None
+
+
+def _waiting_summary(intents, cutoff):
+    """Count allocated cash until resolution, excluding subsequent free cash.
+
+    Quote-days and the cash-weighted mean are invariant to splitting an intent
+    into identical smaller intents. The legacy unweighted total is descriptive
+    only: it depends on the number of intents, rather than economic exposure.
+    """
+    durations, weighted, target_weighted, allocated = [], ZERO, ZERO, ZERO
+    for intent in intents:
+        if intent.created >= cutoff:
+            continue
+        end = min(cutoff, intent.resolved_at if intent.resolved_at is not None else cutoff)
+        duration = max(0, end - intent.created)
+        durations.append(duration)
+        weighted += intent.budget * duration
+        allocated += intent.budget
+        if intent.deadline is not None:
+            target_weighted += intent.budget * max(0, min(end, intent.deadline) - intent.created)
+    return {'maximum_waiting_seconds': max(durations, default=0),
+            'waiting_seconds_total': sum(durations),
+            'cash_waiting_quote_days': decimal_string(weighted / DAY),
+            'target_waiting_quote_days': decimal_string(target_weighted / DAY),
+            'execution_waiting_quote_days': decimal_string((weighted - target_weighted) / DAY),
+            'cash_weighted_waiting_seconds': decimal_string(weighted / allocated) if allocated else None}
 
 
 def _simulate(config, bars, as_of, family, validation):
@@ -226,7 +254,7 @@ def _simulate(config, bars, as_of, family, validation):
     uplift = ONE + (Decimal(settings['spread_bps']) / 2 + Decimal(settings['slippage_bps'])) / 10000
     free = deposits = spent = fees_quote = fees_base = quantity = ZERO
     starting = Decimal(config['starting_holdings']['quantity'])
-    intents, history, expired, touches, funding, unfilled = [], [], [], [], [], []
+    intents, all_intents, history, expired, touches, funding, unfilled = [], [], [], [], [], [], []
     terminals, trajectory = {}, []
     units, nav, peak, max_drawdown = ZERO, ONE, ONE, ZERO
     last_mark = None
@@ -243,6 +271,54 @@ def _simulate(config, bars, as_of, family, validation):
 
     by_open = {c.open_time: c for c in bars}
     by_close = {c.close_time: c for c in bars}
+    open_times = sorted(by_open)
+
+    def execution_coverage(cutoff):
+        # Eligibility depends on declared execution paths, never their returns.
+        # A target released into reserve has no further execution requirement.
+        duration = 3600 if settings['timeframe'] == '1h' else DAY
+        unavailable_windows = 0
+        intervals = []
+        for intent in all_intents:
+            if intent.created >= cutoff:
+                continue
+            end = cutoff
+            if intent.resolved_at is not None and intent.resolved_at < cutoff:
+                if intent.status == 'expired_unfilled':
+                    execution_origin = intent.deadline if intent.expired else intent.created
+                    end = min(end, execution_origin + settings['max_price_age_seconds'] + 1)
+                else:
+                    end = min(end, intent.resolved_at + (intent.status in ('filled', 'dust')))
+            first = -(-intent.created // duration) * duration
+            count = max(0, (end - 1 - first) // duration + 1)
+            if count:
+                intervals.append((first, first + count * duration))
+            if not count and intent.status == 'expired_unfilled' and intent.resolved_at < cutoff:
+                unavailable_windows += 1
+        # Count distinct required intervals, independent of equivalent splitting.
+        merged = []
+        for start, end in sorted(intervals):
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+            else:
+                merged.append((start, end))
+        expected = sum((end - start) // duration for start, end in merged)
+        observed = sum(bisect_left(open_times, end) - bisect_left(open_times, start)
+                       for start, end in merged)
+        missing_anchors = sum(row.get('reason') == 'anchor_price_unavailable' and row['time'] < cutoff
+                              for row in funding)
+        missing = expected - observed
+        reasons = []
+        if missing:
+            reasons.append('execution_path_bars_missing')
+        if missing_anchors:
+            reasons.append('activation_anchor_unavailable')
+        if unavailable_windows:
+            reasons.append('no_observable_execution_window')
+        return {'rule': EXECUTION_EVIDENCE_RULE, 'qualified': not reasons,
+                'expected_bars': expected, 'observed_bars': observed,
+                'missing_bars': missing, 'missing_activation_anchors': missing_anchors,
+                'unobservable_execution_windows': unavailable_windows, 'reasons': reasons}
     contributions, schedules = {}, {}
     # Schedules end by day 180, waits by day 270, and execution expiry by day 272.
     simulation_end = min(as_of, config['start_time'] + 272 * DAY)
@@ -295,10 +371,14 @@ def _simulate(config, bars, as_of, family, validation):
                     locked = sum((i.budget for i in intents if i.status == 'waiting' and i.target is not None), ZERO)
                     deferred_budget = min(budget, max(ZERO, Decimal(cap) - locked))
                     if budget > deferred_budget:
-                        intents.append(_Intent(time, budget - deferred_budget, None, None, 'buy_at_deadline'))
+                        immediate = _Intent(time, budget - deferred_budget, None, None, 'buy_at_deadline')
+                        intents.append(immediate)
+                        all_intents.append(immediate)
                     budget = deferred_budget
             if budget:
-                intents.append(_Intent(time, budget, target, deadline, fallback))
+                intent = _Intent(time, budget, target, deadline, fallback)
+                intents.append(intent)
+                all_intents.append(intent)
 
     for time in sorted(t for t in times if config['start_time'] <= t <= simulation_end):
         bar = by_open.get(time)
@@ -330,12 +410,19 @@ def _simulate(config, bars, as_of, family, validation):
                         'price_time': valuation.close_time, 'price': decimal_string(price),
                         'contributions': decimal_string(deposits), 'holdings_quantity': decimal_string(starting + quantity),
                         'reserve': decimal_string(reserve()), 'total_wealth': decimal_string(wealth(price)),
+                        'unallocated_reserve': decimal_string(free),
+                        'locked_reserve': decimal_string(reserve() - free),
                         'net_quantity': decimal_string(quantity), 'amount_spent': decimal_string(spent),
                         'fees_quote': decimal_string(fees_quote), 'fees_base': decimal_string(fees_base),
                         'new_purchases_all_in_cost': decimal_string((spent + fees_quote) / quantity) if quantity else None,
-                        'maximum_drawdown': decimal_string(max_drawdown)}
+                        'maximum_drawdown': decimal_string(max_drawdown),
+                        'execution_coverage': execution_coverage(time),
+                        **_waiting_summary(all_intents, time)}
                 else:
-                    terminals[str(days)] = {'status': 'pending', 'time': time, 'reason': 'terminal_price_unavailable'}
+                    terminals[str(days)] = {'status': 'pending', 'time': time,
+                                           'reason': 'terminal_price_unavailable',
+                                           'execution_coverage': execution_coverage(time),
+                                           **_waiting_summary(all_intents, time)}
         if bar and terminal_boundary:
             mark(Decimal(str(bar.open)))
         # Deadline releases precede new allocations at the same timestamp.
@@ -351,6 +438,7 @@ def _simulate(config, bars, as_of, family, validation):
             if intent.fallback == 'reserve':
                 free += intent.budget
                 intent.status = 'expired'
+                intent.resolved_at = time
             else:
                 intent.target = None
         for amount in schedules.get(time, []):
@@ -380,6 +468,7 @@ def _simulate(config, bars, as_of, family, validation):
             if intent.target is None and time > execution_origin + settings['max_price_age_seconds']:
                 free += intent.budget
                 intent.status = 'expired_unfilled'
+                intent.resolved_at = time
                 unfilled.append({'created': intent.created, 'time': time, 'status': 'expired_unfilled',
                                  'released_cash': decimal_string(intent.budget),
                                  'reason': 'no_eligible_price_within_execution_window',
@@ -406,6 +495,7 @@ def _simulate(config, bars, as_of, family, validation):
             if gross <= base_fee or gross == 0:
                 free += intent.budget
                 intent.status = 'dust'
+                intent.resolved_at = time
                 unfilled.append({'created': intent.created, 'time': time, 'status': 'dust',
                                  'released_cash': decimal_string(intent.budget),
                                  'reason': 'quantity_below_step_or_base_fee'})
@@ -414,6 +504,7 @@ def _simulate(config, bars, as_of, family, validation):
                 continue
             free += intent.budget - notional - quote_fee
             intent.status = 'filled'
+            intent.resolved_at = time
             if intent.expiry_record is not None:
                 intent.expiry_record['resolution'] = 'fallback_filled'
             spent += notional
@@ -436,7 +527,9 @@ def _simulate(config, bars, as_of, family, validation):
                                'total_wealth': decimal_string(wealth(last_mark)) if last_mark is not None else None})
     for days in (90, 180):
         terminals.setdefault(str(days), {'status': 'pending', 'time': config['start_time'] + days * DAY,
-                                        'reason': 'future_horizon'})
+                                        'reason': 'future_horizon',
+                                        'execution_coverage': execution_coverage(simulation_end),
+                                        **_waiting_summary(all_intents, simulation_end)})
     total_cost = spent + fees_quote
     known_cost = config['starting_holdings']['cost']
     valuation = bars[-1] if bars and as_of - bars[-1].close_time <= settings['max_price_age_seconds'] else None
@@ -457,6 +550,8 @@ def _simulate(config, bars, as_of, family, validation):
             'history': history, 'expired_targets': expired, 'touches': touches, 'unfilled_purchases': unfilled,
             'funding': funding, 'terminals': terminals,
             'maximum_drawdown': decimal_string(max_drawdown), 'risk_measurement_end': simulation_end,
+            **_waiting_summary(all_intents, simulation_end),
+            'execution_coverage': execution_coverage(simulation_end),
             'drawdown_method': 'unitized_NAV_deposits_issue_units_at_pre_deposit_NAV',
             'trajectory': trajectory,
             'pending_targets': sum(i.status == 'waiting' for i in intents),
@@ -483,6 +578,9 @@ def compare_plans(config: dict, candles: list[Candle], as_of: int, *, validation
                 'source': config['source'], 'data_mode': config['data_mode'],
                 'plans': {family: _simulate(config, bars, as_of, family, validation) for family in ('regular', 'split', 'deferred')},
                 'assumptions': ['Historical execution uses configured costs, not measured fills.',
+                    'Waiting covers all funded intents until fill, expiry or cash release, clipped at each cutoff; free cash is excluded.',
+                    'Cash quote-days and cash-weighted waiting are invariant to equivalent splits; waiting_seconds_total is an intent-count-dependent legacy total.',
+                    'Execution evidence requires every aligned bar over funded active paths; intended reserve after expiry needs no further execution bars.',
                     'Legacy price floats are converted with Decimal(str(value)); provider precision is not recovered.',
                     'Full post-activation bar opens only; low touches never imply fills; gaps wait for the next eligible bar.',
                     'Reserve is non-interest-bearing native quote cash; no conversion or third-asset fees.',

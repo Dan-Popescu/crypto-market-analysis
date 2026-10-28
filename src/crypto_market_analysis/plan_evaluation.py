@@ -13,7 +13,16 @@ from copy import deepcopy
 from decimal import Decimal, localcontext
 
 from .models import Candle
-from .plans import DAY, RULE_VERSION, _market_bars, _time, compare_plans, decimal_string, validate_config
+from .plans import (
+    DAY,
+    EXECUTION_EVIDENCE_RULE,
+    RULE_VERSION,
+    _market_bars,
+    _time,
+    compare_plans,
+    decimal_string,
+    validate_config,
+)
 
 MAX_ORIGINS = 40
 
@@ -102,19 +111,27 @@ def _evaluate(config, candles, as_of, origins, validation, held_out_start, polic
         outcomes = {}
         for days in ('90', '180'):
             baseline = plans['regular']['terminals'][days]
+            paths = {family: plans[family]['terminals'][days]['execution_coverage']
+                     for family in ('regular', 'split', 'deferred')}
+            path_reasons = sorted({reason for path in paths.values() for reason in path['reasons']})
             if baseline['status'] != 'complete' or any(
                 plans[family]['terminals'][days]['status'] != 'complete' for family in ('split', 'deferred')
             ):
-                outcomes[days] = {'status': 'pending', 'time': origin + int(days) * DAY}
+                outcomes[days] = {'status': 'pending', 'time': origin + int(days) * DAY,
+                    'evidence_qualification': {'qualified': False,
+                        'reasons': ['terminal_valuation_pending', *path_reasons], 'execution_paths': paths}}
                 continue
             outcomes[days] = {'status': 'complete', 'time': baseline['time'],
                               'valuation_price': baseline['price'], 'price_time': baseline['price_time'],
                               'contributions': baseline['contributions'], 'regular': baseline}
+            outcomes[days]['evidence_qualification'] = {
+                'qualified': all(path['qualified'] for path in paths.values()),
+                'reasons': path_reasons,
+                'execution_paths': paths}
             for family in ('split', 'deferred'):
                 terminal = plans[family]['terminals'][days]
                 if terminal['contributions'] != baseline['contributions'] or terminal['price'] != baseline['price']:
                     raise ValueError('Paired plans must share cashflows and terminal valuation')
-                purchases = [p for p in plans[family]['history'] if p['time'] < terminal['time']]
                 diff = _difference(terminal, baseline, 'total_wealth')
                 outcomes[days][family] = {
                     'net_quantity': terminal['net_quantity'],
@@ -127,8 +144,10 @@ def _evaluate(config, candles, as_of, origins, validation, held_out_start, polic
                     'underperformed_regular': Decimal(diff) < 0,
                     'missed_rising_market_exposure': Decimal(diff) < 0 and Decimal(terminal['price']) > Decimal(str(anchor.close)),
                     'maximum_drawdown': terminal['maximum_drawdown'],
-                    'maximum_waiting_seconds': max((p['waiting_seconds'] for p in purchases), default=0),
-                    'waiting_seconds_total': sum(p['waiting_seconds'] for p in purchases),
+                    **{name: terminal[name] for name in (
+                        'maximum_waiting_seconds', 'waiting_seconds_total', 'cash_waiting_quote_days',
+                        'target_waiting_quote_days', 'execution_waiting_quote_days',
+                        'cash_weighted_waiting_seconds')},
                     'expired_targets': sum(p['deadline'] <= terminal['time'] for p in plans[family]['expired_targets']),
                 }
         records.append({'origin': origin, 'anchor_time': anchor.close_time,
@@ -140,29 +159,43 @@ def _evaluate(config, candles, as_of, origins, validation, held_out_start, polic
         metrics[days] = {}
         for family in ('split', 'deferred'):
             rows = [record['outcomes'][days][family] for record in records
-                    if record['outcomes'][days]['status'] == 'complete']
+                    if record['outcomes'][days]['status'] == 'complete'
+                    and record['outcomes'][days]['evidence_qualification']['qualified']]
             metrics[days][family] = {'sample_size': len(rows),
                 'underperformance_count': sum(row['underperformed_regular'] for row in rows),
                 'underperformance_fraction': decimal_string(Decimal(sum(row['underperformed_regular'] for row in rows)) / len(rows)) if rows else None,
                 'missed_rising_market_exposure_count': sum(row['missed_rising_market_exposure'] for row in rows),
                 'maximum_waiting_seconds': max((row['maximum_waiting_seconds'] for row in rows), default=None)}
             for name in ('quantity_difference', 'acquisition_cost_difference', 'terminal_wealth_difference',
-                         'uninvested_reserve', 'reserve_difference', 'maximum_drawdown'):
+                         'uninvested_reserve', 'reserve_difference', 'maximum_drawdown',
+                         'cash_waiting_quote_days', 'target_waiting_quote_days',
+                         'execution_waiting_quote_days', 'cash_weighted_waiting_seconds'):
                 metrics[days][family][name] = _dispersion([Decimal(row[name]) for row in rows if row[name] is not None])
-    sample_size = sum(any(record['outcomes'][days]['status'] == 'complete' for days in ('90', '180'))
+    scenario_sample_size = sum(any(record['outcomes'][days]['status'] == 'complete' for days in ('90', '180'))
                       for record in records)
+    sample_size = sum(any(record['outcomes'][days]['status'] == 'complete'
+                         and record['outcomes'][days]['evidence_qualification']['qualified']
+                         for days in ('90', '180')) for record in records)
+    unqualified = {days: sum(record['outcomes'][days]['status'] == 'complete'
+                            and not record['outcomes'][days]['evidence_qualification']['qualified']
+                            for record in records) for days in ('90', '180')}
     return {'schema_version': 1, 'rule_version': RULE_VERSION,
             'status': 'experimental' if sample_size >= 2 else 'insufficient',
             'as_of': as_of, 'validation_mode': validation,
             'historical_availability_verified': validation == 'known_at',
             'asset': config['asset'], 'quote': config['quote'], 'source': config['source'],
             'data_mode': config['data_mode'], 'config': config, 'sample_size': sample_size,
+            'scenario_sample_size': scenario_sample_size, 'unqualified_scenarios': unqualified,
             'origins': records, 'excluded_origins': excluded, 'metrics': metrics,
             'protocol': {'policy_selection': 'externally_fixed_no_fitting_or_optimization',
                          'policy_frozen_at': frozen, 'held_out_start': held_out,
                          'requested_origins': origins, 'spacing_days': 180,
                          'cashflows': 'identical_amounts_and_origin_relative_offsets',
                          'horizons_days': [90, 180], 'dispersion': 'population_standard_deviation',
+                         'execution_evidence_rule': EXECUTION_EVIDENCE_RULE,
+                         'evidence_eligibility': 'complete_terminal_and_all_funded_paths_observed_without_missing_anchors',
+                         'eligibility_selection': 'predeclared_no_return_based_selection',
+                         'waiting_method': 'allocated_cash_until_resolution_clipped_at_terminal_excludes_free_cash',
                          'drawdown_method': 'unitized_NAV_deposits_issue_units_at_pre_deposit_NAV',
                          'strict_vintages': 'earliest_observation_by_close_plus_configured_max_price_age'},
             'limitations': ['Synthetic correctness and retrospective outcomes do not establish investment performance or predictive edge.',
@@ -170,5 +203,6 @@ def _evaluate(config, candles, as_of, origins, validation, held_out_start, polic
                 'Non-overlapping origins may still be dependent; dispersion is descriptive, not a confidence interval.',
                 'Execution uses configured historical costs and conservative full-bar opens; no measured fill curve is available.',
                 'Missing bars postpone execution; mark-to-market drawdown omits unobserved intrabar price paths.',
+                'Complete valuations remain inspectable scenarios; only complete execution-evidence pairs enter performance metrics.',
                 'Strict evaluation excludes backfills and uses timely first vintages; empty coverage remains empty.',
                 'Cash reserve has zero assumed yield and remains in the native quote.']}
