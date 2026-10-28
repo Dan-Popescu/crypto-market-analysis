@@ -113,6 +113,20 @@ class AccumulationService:
         return {**summarize_journal(inputs.records, inputs.outcomes, inputs.as_of),
                 "selection": inputs.selection}
 
+    def journal_scorecard(self, as_of=None, limit=20):
+        from .scorecards import build_scorecard
+
+        inputs = self._journal(read=True).summary_inputs(as_of, limit)
+        return {**build_scorecard(inputs.records, inputs.outcomes, inputs.as_of),
+                "selection": inputs.selection}
+
+    def replay_assessment(self, assessment_id):
+        from .recovery import replay_assessment
+
+        if not isinstance(assessment_id, str) or not 1 <= len(assessment_id) <= 200:
+            raise ValueError("assessment_id must contain 1–200 characters.")
+        return replay_assessment(self._journal(read=True).get(assessment_id))
+
     def evaluate_plans(self, config, as_of=None, origins=None, validation="known_at",
                        held_out_start=None, policy_frozen_at=None):
         from .plan_evaluation import evaluate_plans
@@ -345,14 +359,15 @@ class AccumulationService:
         return {"inserted": inserted, "data_mode": "import", "provenance": result.provenance}
 
     def import_calendar(self, path, kind="bls"):
-        from .calendars import parse_bls_ics, parse_fomc_calendar
+        from .calendars import parse_bls_ics, parse_ecb_manual_schedule, parse_fomc_calendar
 
         path = Path(path)
         if kind == "fed":
             kind = "fomc"
-        if path.stat().st_size > 2_000_000 or kind not in ("bls", "fomc"):
-            raise ValueError("Use a BLS/FOMC calendar file of at most 2 MB.")
-        parser = parse_bls_ics if kind == "bls" else parse_fomc_calendar
+        if path.stat().st_size > 2_000_000 or kind not in ("bls", "fomc", "ecb-manual"):
+            raise ValueError("Use a BLS/FOMC calendar or explicit ECB manual schedule of at most 2 MB.")
+        parser = {"bls": parse_bls_ics, "fomc": parse_fomc_calendar,
+                  "ecb-manual": parse_ecb_manual_schedule}[kind]
         events = parser(path.read_text(encoding="utf-8"), int(time.time()))
         inserted = sum(self.store.save_local_record("calendar", event)["inserted"] for event in events)
         return {"inserted": inserted, "events": events, "origin": "calendar_import"}

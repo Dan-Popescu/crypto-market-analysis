@@ -204,6 +204,12 @@ class Engine:
     def journal_summary(self, as_of=None, limit=20):
         return self.accumulation.journal_summary(as_of, limit)
 
+    def journal_scorecard(self, as_of=None, limit=20):
+        return self.accumulation.journal_scorecard(as_of, limit)
+
+    def replay_assessment(self, assessment_id):
+        return self.accumulation.replay_assessment(assessment_id)
+
     def evaluate_plans(self, config, as_of=None, origins=None, validation="known_at",
                        held_out_start=None, policy_frozen_at=None):
         return self.accumulation.evaluate_plans(config, as_of, origins, validation, held_out_start, policy_frozen_at)

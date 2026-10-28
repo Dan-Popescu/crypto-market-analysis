@@ -16,6 +16,7 @@ from .config import load_settings
 from .engine import Engine, render_brief
 from .models import Candle
 from .reporting import (
+    bounded_as_of,
     bounded_integers,
     bounded_object,
     bounded_origins,
@@ -328,6 +329,37 @@ def parser() -> argparse.ArgumentParser:
     journal_summary = command("journal-summary", "Read bounded journal cohorts and pending or missing outcomes.",
                               "crypto-market-analysis journal-summary --limit 20")
     journal_summary.add_argument("--limit", type=int, default=20, help="Most recent issuances, 1–100")
+    scorecard = command("journal-scorecard", "Read descriptive outcomes and independently selected journal scenarios.",
+                        "crypto-market-analysis journal-scorecard --limit 20")
+    scorecard.add_argument("--limit", type=int, default=20, help="Most recent issuances, 1–100")
+    budget = command("budget-preview", "Preview caller-declared plans sharing one price-free cash envelope.",
+                     "crypto-market-analysis budget-preview --request budget.json")
+    purchase_costs = command("purchase-costs", "Calculate fee-inclusive purchases from explicit native-quote ask ladders.",
+                             "crypto-market-analysis purchase-costs --request costs.json")
+    disagreement = command("venue-disagreement", "Describe contemporaneous native-quote venue dispersion.",
+                           "crypto-market-analysis venue-disagreement --request venues.json")
+    quote_context = command("quote-context", "Describe explicit indicative EUR/USD and stablecoin basis observations.",
+                            "crypto-market-analysis quote-context --request quotes.json")
+    derivatives = command("derivatives-context", "Describe native derivatives changes over fixed 4-hour and 24-hour endpoints.",
+                          "crypto-market-analysis derivatives-context --request derivatives.json")
+    for p in (budget, purchase_costs, disagreement, quote_context, derivatives):
+        p.add_argument("--request", type=Path, required=True, help="Explicit bounded JSON object; no collection")
+    backup = command("backup", "Create and verify an explicit SQLite recovery bundle.",
+                     "crypto-market-analysis backup --database data/observer.sqlite --destination recovery")
+    backup.add_argument("--database", type=Path, required=True)
+    backup.add_argument("--destination", type=Path, required=True)
+    backup.add_argument("--quiescent-dataset", action="store_true",
+                        help="Explicitly declare the named research dataset writer is stopped before backup")
+    verify = command("verify-backup", "Read and verify an existing recovery bundle.",
+                     "crypto-market-analysis verify-backup --bundle recovery")
+    verify.add_argument("--bundle", type=Path, required=True)
+    restore = command("restore-backup", "Restore a verified bundle to an absent or empty explicit directory.",
+                      "crypto-market-analysis restore-backup --bundle recovery --destination restored-data")
+    restore.add_argument("--bundle", type=Path, required=True)
+    restore.add_argument("--destination", type=Path, required=True)
+    for p in (backup, verify, restore):
+        p.add_argument("--output")
+        p.add_argument("--format", choices=("json",), default="json")
     dataset = command("history-dataset", "Manage one explicit import-only research dataset; network is opt-in.",
                       "crypto-market-analysis history-dataset init --dataset-config dataset.json")
     dataset.add_argument("action", choices=("init", "status", "stage", "refresh", "plan-repair", "repair"))
@@ -376,6 +408,9 @@ def parser() -> argparse.ArgumentParser:
         "crypto-market-analysis assessment --id ASSESSMENT_ID",
     )
     assessment.add_argument("--id", required=True)
+    replay = command("replay-assessment", "Verify original calculations from frozen issued evidence without appending outcomes.",
+                     "crypto-market-analysis replay-assessment --id ASSESSMENT_ID")
+    replay.add_argument("--id", required=True)
     observe = command(
         "observe",
         "Explicitly append observed outcomes to a local assessment.",
@@ -409,14 +444,16 @@ def parser() -> argparse.ArgumentParser:
         "crypto-market-analysis import-calendar --file calendar.ics --kind bls",
     )
     calendar.add_argument("--file", type=Path, required=True)
-    calendar.add_argument("--kind", choices=("bls", "fed"), default="bls")
+    calendar.add_argument("--kind", choices=("bls", "fed", "ecb-manual"), default="bls",
+                          help="ecb-manual requires a sourced manual JSON schedule, not an official feed")
     command(
         "collect-calendar",
         "Collect the bounded verified public calendar source once.",
         "crypto-market-analysis collect-calendar --mode live",
     )
     for p in (context, windows, comparison, plan_evaluation, issue, assessment, observe, vigilance,
-              accumulation, preview, sensitivity, journal_summary):
+              accumulation, preview, sensitivity, journal_summary, scorecard, budget, purchase_costs,
+              disagreement, quote_context, derivatives, replay):
         p.add_argument("--format", choices=("json", "markdown"), default="json")
         p.add_argument("--output")
     for p in (brief, forecast, evaluation, chart, context, windows, issue, vigilance, history, accumulation):
@@ -464,6 +501,56 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "history-dataset":
             write_json(_history_operation(args), args.output)
             return 0
+        if args.command in ("backup", "verify-backup", "restore-backup"):
+            from .recovery import create_backup, restore_backup, verify_backup
+
+            if args.as_of is not None:
+                raise ValueError("Recovery operations preserve actual evidence; --as-of is for analysis commands.")
+            if args.output:
+                output = Path(args.output).resolve()
+                protected = [Path(value).resolve() for value in
+                             (getattr(args, "bundle", None), getattr(args, "destination", None)) if value is not None]
+                if args.command == "backup":
+                    database = args.database.resolve()
+                    if output in (database, Path(str(database) + "-wal"), Path(str(database) + "-shm")):
+                        raise ValueError("Recovery report output must not overwrite the source database or its sidecars.")
+                    if args.quiescent_dataset:
+                        protected.append(database.parent)
+                if any(output == path or output.is_relative_to(path) for path in protected):
+                    raise ValueError("Recovery report output must be outside source and destination bundles or datasets.")
+            if args.command == "backup":
+                result = create_backup(args.database, args.destination, quiescent_dataset=args.quiescent_dataset)
+            elif args.command == "verify-backup":
+                result = verify_backup(args.bundle)
+            else:
+                result = restore_backup(args.bundle, args.destination)
+            write_json(result, args.output)
+            return 0
+        if args.command == "budget-preview":
+            from .budget import preview_budget_envelope
+
+            _write_result(preview_budget_envelope(_json_file(args.request), bounded_as_of(args.as_of)), args)
+            return 0
+        if args.command == "purchase-costs":
+            from .venue_analysis import analyze_purchase_costs
+
+            _write_result(analyze_purchase_costs(_json_file(args.request), bounded_as_of(args.as_of)), args)
+            return 0
+        if args.command == "venue-disagreement":
+            from .venue_analysis import analyze_venue_disagreement
+
+            _write_result(analyze_venue_disagreement(_json_file(args.request), bounded_as_of(args.as_of)), args)
+            return 0
+        if args.command == "quote-context":
+            from .quote_context import analyze_quote_context
+
+            _write_result(analyze_quote_context(_json_file(args.request), bounded_as_of(args.as_of)), args)
+            return 0
+        if args.command == "derivatives-context":
+            from .derivatives_context import analyze_derivatives_context
+
+            _write_result(analyze_derivatives_context(_json_file(args.request), bounded_as_of(args.as_of)), args)
+            return 0
         config_path = args.config or (Path("observer.toml") if Path("observer.toml").exists() else None)
         settings = load_settings(config_path, args.data_dir)
         engine = Engine(settings, args.mode)
@@ -482,6 +569,10 @@ def main(argv: list[str] | None = None) -> int:
                 args.as_of, args.validation), args)
         elif args.command == "journal-summary":
             _write_result(engine.journal_summary(args.as_of, args.limit), args)
+        elif args.command == "journal-scorecard":
+            _write_result(engine.journal_scorecard(bounded_as_of(args.as_of), args.limit), args)
+        elif args.command == "replay-assessment":
+            _write_result(engine.replay_assessment(args.id), args)
         elif args.command == "windows":
             horizons = bounded_integers(_csv_numbers(args.horizons, int), "horizons", 365, 16)
             thresholds = bounded_thresholds(_csv_numbers(args.thresholds, float))

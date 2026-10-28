@@ -17,10 +17,11 @@ from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP, Image
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
+from pydantic import StrictInt
 
 from .config import Settings
 from .engine import Engine
-from .reporting import bounded_integers, bounded_object, bounded_origins, bounded_thresholds
+from .reporting import bounded_as_of, bounded_integers, bounded_object, bounded_origins, bounded_thresholds
 from .venues import VENUES
 
 GLOSSARY = {
@@ -133,7 +134,7 @@ def create_server(
         transport_security=TransportSecuritySettings(
             enable_dns_rebinding_protection=True, allowed_hosts=allowed_hosts
         ),
-        instructions="Analyze BTC/ETH over 1–60 days. For accumulation use get_accumulation_brief with an explicitly pinned source/native EUR or USD quote or matching plan. It combines descriptive context through 730 days, experimental 1/3/7/14-day purchase windows and hypothetical plans assessed at 90/180 days on one snapshot. Use compare_cost_sensitivity for caller-declared costs and get_journal_summary for bounded pending/missing cohorts. All tools are read-only; assessment issuance and outcome observation require explicit local CLI operations. get_analysis_bundle provides the broader source dossier. Percentages are experimental; never describe them as calibrated or as a demonstrated edge. Missing data is not a neutral signal. Cite the source, unit and anchor. Keep USD, EUR and stablecoins separate, and distinguish demonstration data from real data. Use render_chart to illustrate observations. Explain contradictions and the conditions that would change the interpretation. No order execution.",
+        instructions="Analyze BTC/ETH over 1–60 days. For accumulation use get_accumulation_brief with an explicitly pinned source/native EUR or USD quote or matching plan. It combines descriptive context through 730 days, experimental 1/3/7/14-day purchase windows and hypothetical plans assessed at 90/180 days on one snapshot. Use compare_cost_sensitivity for caller-declared costs and get_journal_summary for bounded pending/missing cohorts. get_journal_scorecard adds descriptive outcomes with independent sample selection; replay_assessment verifies frozen original calculations without observing outcomes. preview_shared_budget describes declared shared cash constraints. calculate_purchase_costs, calculate_venue_disagreement, get_quote_context and get_derivatives_context use explicit caller-supplied local observations without collection. All tools are read-only; assessment issuance and outcome observation require explicit local CLI operations. get_analysis_bundle provides the broader source dossier. Percentages are experimental; never describe them as calibrated or as a demonstrated edge. Missing data is not a neutral signal. Cite the source, unit and anchor. Keep USD, EUR and stablecoins separate, and distinguish demonstration data from real data. Use render_chart to illustrate observations. Explain contradictions and the conditions that would change the interpretation. No order execution.",
     )
     engine = Engine(settings, mode)
     readonly = ToolAnnotations(
@@ -187,6 +188,51 @@ def create_server(
     def get_journal_summary(as_of: int | None = None, limit: int = 20) -> dict[str, Any]:
         """Bounded read-only issued-event cohorts with pending/missing/excluded denominators and first definite outcomes. Modes/quotes/lineages stay separate; no independence or performance score is claimed. Up to 100 originals."""
         return engine.journal_summary(as_of, limit)
+
+    @server.tool(annotations=readonly)
+    def get_journal_scorecard(as_of: StrictInt | None = None, limit: StrictInt = 20) -> dict[str, Any]:
+        """Bounded descriptive journal scorecard with pending/missing counts, independent scenario selection and uncertainty. Quotes, modes, rules and chronology stay separate; no calibrated forecast or proven advantage. Up to 100 originals."""
+        return engine.journal_scorecard(bounded_as_of(as_of), limit)
+
+    @server.tool(annotations=readonly)
+    def preview_shared_budget(request: dict[str, Any], as_of: StrictInt | None = None) -> dict[str, Any]:
+        """Price-free preview of 2–16 declared plans sharing one explicit native-quote cash envelope. Supply a bounded JSON object, never a path. Declared contributions and commitments are hypothetical; this is not an account ledger."""
+        from .budget import preview_budget_envelope
+
+        return preview_budget_envelope(bounded_object(request, "budget request"), bounded_as_of(as_of))
+
+    @server.tool(annotations=readonly)
+    def calculate_purchase_costs(request: dict[str, Any], as_of: StrictInt | None = None) -> dict[str, Any]:
+        """Read-only purchase arithmetic from caller-supplied native-quote ask ladders, explicit fees and product rules. Missing/stale/skewed venues remain visible. No collection, execution, implicit currency conversion or preferred venue."""
+        from .venue_analysis import analyze_purchase_costs
+
+        return analyze_purchase_costs(bounded_object(request, "purchase cost request"), bounded_as_of(as_of))
+
+    @server.tool(annotations=readonly)
+    def calculate_venue_disagreement(request: dict[str, Any], as_of: StrictInt | None = None) -> dict[str, Any]:
+        """Describe same-basis, contemporaneous native-quote prices supplied as a bounded JSON object. Show coverage, dispersion and timing exclusions; disagreement alone is not an arbitrage or purchase signal."""
+        from .venue_analysis import analyze_venue_disagreement
+
+        return analyze_venue_disagreement(bounded_object(request, "venue request"), bounded_as_of(as_of))
+
+    @server.tool(annotations=readonly)
+    def get_quote_context(request: dict[str, Any], as_of: StrictInt | None = None) -> dict[str, Any]:
+        """Describe explicitly sourced indicative EUR/USD and stablecoin basis observations supplied as JSON. Native observations, conversion lineage and endpoint timing remain visible; indicative FX is not an executable rate."""
+        from .quote_context import analyze_quote_context
+
+        return analyze_quote_context(bounded_object(request, "quote context request"), bounded_as_of(as_of))
+
+    @server.tool(annotations=readonly)
+    def replay_assessment(assessment_id: str) -> dict[str, Any]:
+        """Verify an existing issued assessment's original calculations from its frozen local evidence. Accepts only an assessment ID; no file paths, collection, issuance, future outcomes or journal append."""
+        return engine.replay_assessment(assessment_id)
+
+    @server.tool(annotations=readonly)
+    def get_derivatives_context(request: dict[str, Any], as_of: StrictInt | None = None) -> dict[str, Any]:
+        """Describe fixed 4-hour/24-hour changes from caller-supplied derivatives observations. Native quotes, contracts, units, funding periods and known-at endpoints stay separate; missing endpoints remain unknown. No collection, annualization or directional forecast."""
+        from .derivatives_context import analyze_derivatives_context
+
+        return analyze_derivatives_context(bounded_object(request, "derivatives request"), bounded_as_of(as_of))
 
     @server.tool(annotations=readonly)
     def get_market_context(

@@ -4,8 +4,18 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation, localcontext
+
+
+def bounded_as_of(value: int | None) -> int:
+    """Resolve an optional UTC cutoff without accepting booleans or coercion."""
+    if value is None:
+        return int(time.time())
+    if type(value) is not int or value < 0:
+        raise ValueError("as_of must be a nonnegative integer UTC timestamp.")
+    return value
 
 
 def bounded_object(value: object, name: str = "configuration") -> dict:
@@ -823,6 +833,150 @@ def _nested(lines, result, quote):
             lines.append(f"{_label(key)}: {_display(nested)}")
 
 
+def _scorecard(lines, result):
+    lines.extend(["", f"Selected assessments: {result.get('assessment_count', 0)}. Descriptive experimental results; probability comparability is not established."])
+    _details(lines, "Selection and bounds", result.get("selection", {}), "unknown")
+    rows = []
+    for cohort in result.get("event_cohorts", []):
+        identity, counts = cohort["identity"], cohort["counts"]
+        rate = cohort.get("descriptive_rate", {})
+        interval = rate.get("wilson_95") or {}
+        independent = cohort.get("independent_denominators", {})
+        rows.append([identity.get("asset"), identity.get("quote"), identity.get("source"),
+                     identity.get("data_mode"), identity.get("temporality"), identity.get("event"),
+                     identity.get("horizon_days"), identity.get("threshold"),
+                     *[counts.get(key) for key in ("issued", "resolved", "pending", "missing", "ambiguous", "excluded")],
+                     independent.get("selected"), independent.get("overlap_omitted"), rate.get("sample_size"),
+                     _percent(rate.get("fraction")), _percent(interval.get("lower")), _percent(interval.get("upper"))])
+    _table(lines, ["Asset", "Quote", "Source", "Mode", "Chronology", "Event", "Days", "Threshold",
+                   "Issued", "Resolved", "Pending", "Missing", "Ambiguous", "Excluded", "Independent selected",
+                   "Overlap omitted", "Rate denominator", "Observed rate", "Wilson 95% lower", "Wilson 95% upper"], rows)
+    for number, cohort in enumerate(result.get("plan_cohorts", []), 1):
+        identity = cohort["identity"]
+        quote = identity.get("quote", "unknown")
+        lines.extend(["", f"## Plan cohort {number}", "",
+                      f"{identity.get('asset', 'unknown')}/{quote}; source {identity.get('source', 'unknown')}; mode {identity.get('data_mode', 'unknown')}; chronology {identity.get('temporality', 'unknown')}."])
+        _table(lines, ["Days", "Issued", "Mature", "Complete", "Pending", "Missing", "Excluded", "Independent samples", "Overlap omitted"],
+               [[horizon, *[counts.get(key) for key in ("issued", "mature", "complete", "pending", "missing", "excluded", "sample_size", "overlap_omitted")]]
+                for horizon, counts in cohort.get("counts", {}).items()])
+        metrics = []
+        for horizon, families in cohort.get("metrics", {}).items():
+            for family, values in families.items():
+                for metric, distribution in values.items():
+                    if not isinstance(distribution, dict):
+                        continue
+                    if metric == "underperformance":
+                        interval = distribution.get("wilson_95") or {}
+                        metrics.append([horizon, family, "Underperformance vs regular", distribution.get("sample_size"),
+                                        _percent(distribution.get("fraction")), _percent(interval.get("lower")),
+                                        _percent(interval.get("upper"))])
+                    else:
+                        metrics.append([horizon, family, _label(metric), distribution.get("sample_size"),
+                                        distribution.get("mean"), distribution.get("minimum"), distribution.get("maximum")])
+        _table(lines, ["Days", "Policy", "Metric (native quote where monetary)", "Samples", "Mean / rate", "Minimum / Wilson lower", "Maximum / Wilson upper"], metrics)
+    lines.append("Brier score and calibration: unavailable; forecast/outcome comparability is not established.")
+
+
+def _budget(lines, result, quote):
+    lines.extend(["", "Declared shared envelope only. Plan order determines allocation priority; this preview does not describe actual holdings or balances."])
+    fields = ("contributions_available", "free_cash", "locked_cash", "reserved_immediate_cash", "committed_cash")
+    _table(lines, ["Snapshot", "Deposits available", "Free cash", "Locked cash", "Immediate commitments", "Total commitments"],
+           [[name, *[_amount(result.get(name, {}).get(key), quote) for key in fields]] for name in ("current", "final")])
+    current = result.get("current", {}).get("per_plan", {})
+    _table(lines, ["Plan priority", "Asset", "Source", "Policy", "Allocated cash", "Shortfall cash", "Locked cash", "Immediate commitments"],
+           [[plan["id"], plan.get("market", {}).get("asset"), plan.get("market", {}).get("source"), plan.get("family"),
+             *[_amount(current.get(plan["id"], {}).get(key), quote) for key in
+               ("cumulative_allocated_cash", "cumulative_shortfall_cash", "locked_cash", "reserved_immediate_cash")]]
+            for plan in result.get("plans", [])])
+    _table(lines, ["Tranche time", "Phase", "Plan", "Requested notional", "Required cash", "Allocated cash", "Shortfall cash"],
+           [[_date(row.get("time")), row.get("phase"), row.get("plan_id"),
+             *[_amount(row.get(key), quote) for key in ("requested_notional", "required_cash", "allocated_cash", "shortfall_cash")]]
+            for row in result.get("tranches", [])])
+
+
+def _quote_context(lines, result):
+    fx = result.get("fx_reference", {})
+    row = fx.get("observation", {})
+    _table(lines, ["FX status", "Native pair", "Native reference", "USD per EUR", "Event UTC", "Observed UTC", "Source", "Version", "Transform"],
+           [[fx.get("status"), f"{row.get('base', 'unknown')}/{row.get('quote', 'unknown')}", row.get("value"),
+             fx.get("eurusd_reference"), _date(row.get("event_time")), _date(row.get("observed_at")), row.get("source"),
+             row.get("data_version"), (fx.get("transformation") or {}).get("operation")]])
+    _table(lines, ["Token", "Native quote", "Native observation", "Status", "Indicative USD/token", "Basis (%)", "Endpoint skew seconds", "Source", "Version", "Transform"],
+           [[item.get("observation", {}).get("base"), item.get("observation", {}).get("quote"),
+             item.get("observation", {}).get("value"), item.get("status"), item.get("usd_per_token"),
+             item.get("basis_percent"), item.get("endpoint_skew_seconds"), item.get("observation", {}).get("source"),
+             item.get("observation", {}).get("data_version"), (item.get("transformation") or {}).get("operation")]
+            for item in result.get("stablecoin_basis", [])])
+    lines.extend(["", result.get("interpretation", "Indicative reference evidence; no executable FX rate is implied.")])
+
+
+def _venue_panel(lines, result, quote, *, purchase):
+    timing = result.get("timing", {})
+    lines.extend(["", f"Event skew: {_display(timing.get('event_skew_seconds'))} seconds; capture skew: {_display(timing.get('capture_skew_seconds'))} seconds; aligned: {_display(timing.get('aligned'))}."])
+    if purchase:
+        lines.append(f"Declared all-in budget: {_amount(result.get('budget'), quote)}. Hypothetical arithmetic; no preferred venue or guaranteed fill.")
+        _table(lines, ["Source", "Status", "Best ask", "Received base units", "All-in cost", "Cost per received unit", "Quote fee", "Base fee", "Leftover cash", "Depth covers budget", "Eligibility", "Reasons"],
+               [[row.get("source"), row.get("status"), _amount(row.get("best_ask"), quote),
+                 (row.get("hypothetical_fill") or {}).get("quantity_received"),
+                 *[_amount((row.get("hypothetical_fill") or {}).get(key), quote) for key in
+                   ("all_in_cost_quote", "all_in_unit_cost_quote", "trading_fee_quote")],
+                 (row.get("hypothetical_fill") or {}).get("trading_fee_base"),
+                 _amount((row.get("hypothetical_fill") or {}).get("leftover_quote"), quote),
+                 (row.get("hypothetical_fill") or {}).get("size_relevant_depth", {}).get("budget_supported_by_captured_levels"),
+                 row.get("purchase_eligibility", {}).get("status", "unknown"), ", ".join(row.get("reasons", [])) or "none"]
+                for row in result.get("rows", [])])
+        _table(lines, ["Source", "Product", "Fee tier", "Rate", "Fee currency", "Fixed quote fee", "Payment cost", "Quote withdrawal", "Base withdrawal", "Quantity step", "Minimum quantity", "Minimum notional"],
+               [[row.get("source"), row.get("product"), (row.get("assumptions") or {}).get("fee_tier"),
+                 *[(row.get("assumptions") or {}).get(key) for key in
+                   ("fee_rate", "fee_currency", "fixed_fee_quote", "payment_cost_quote", "withdrawal_cost_quote",
+                    "withdrawal_cost_base", "quantity_step", "min_quantity", "min_notional")]]
+                for row in result.get("rows", [])])
+    else:
+        spread = result.get("range") or {}
+        lines.append(f"Declared price basis: {_display(result.get('price_basis'))}. Range: {_amount(spread.get('range_quote'), quote)} ({_display(spread.get('range_bps'))} bps).")
+        _table(lines, ["Source", "Status", "Native price", "Spread (bps)", "Median deviation (bps)", "Outlier diagnostic", "Event UTC", "Captured UTC", "Reasons"],
+               [[row.get("source"), row.get("status"), _amount(row.get("price"), quote), row.get("spread_bps"),
+                 row.get("median_deviation_bps"), row.get("outlier"), _date((row.get("timing") or {}).get("event_time")),
+                 _date((row.get("timing") or {}).get("captured_at")), ", ".join(row.get("reasons", [])) or "none"]
+                for row in result.get("rows", [])])
+        lines.append("Dispersion and outliers describe supplied observations; they do not establish fair value or arbitrage.")
+
+
+def _replay(lines, result):
+    provenance = result.get("provenance", {})
+    lines.extend(["", "Original calculations verified from frozen evidence. No new outcome was observed or appended.",
+                  f"Scope: {_display(result.get('scope'))}.",
+                  f"Same code: {_display(provenance.get('same_code'))}; same dependency lock: {_display(provenance.get('same_dependency_lock'))}."])
+    _table(lines, ["Calculation", "Status", "Rule"],
+           [[name, (result.get(name) or {}).get("status", "recomputed" if result.get(name) else "not included"),
+             result.get("rules", {}).get("purchase_windows" if name == "windows" else name)]
+            for name in ("context", "windows", "plan")])
+    _table(lines, ["Provenance", "Package", "Code hash", "Dependency lock hash"],
+           [[name, provenance.get(name, {}).get("package_version"), provenance.get(name, {}).get("code_content_hash"),
+             provenance.get(name, {}).get("dependency_lock_hash")] for name in ("original", "current")])
+
+
+def _derivatives_context(lines, result):
+    lines.extend(["", "Fixed 4-hour and 24-hour changes use observations known by each endpoint. Native funding rates and open-interest quantities remain separate."])
+    identities, comparisons = [], []
+    for index, series in enumerate(result.get("series", []), 1):
+        identity, current = series["identity"], series.get("current") or {}
+        dimension = identity.get("dimension", {})
+        identities.append([index, identity.get("source"), identity.get("metric"), dimension.get("quote"),
+                           dimension.get("unit"), dimension.get("symbol"), dimension.get("settle"),
+                           dimension.get("contract_size"), dimension.get("contract_size_unit"),
+                           dimension.get("counting_convention"), dimension.get("funding_interval_seconds"),
+                           series.get("status"), current.get("value"), _date(current.get("event_time"))])
+        for horizon, comparison in series.get("comparisons", {}).items():
+            start, end = comparison.get("start") or {}, comparison.get("end") or {}
+            comparisons.append([index, horizon, comparison.get("status"), _date(comparison.get("start_cutoff")),
+                                _date(start.get("event_time")), start.get("value"), _date(end.get("event_time")),
+                                end.get("value"), comparison.get("native_change"), comparison.get("change_unit"),
+                                comparison.get("endpoint_skew_seconds")])
+    _table(lines, ["Series", "Source", "Metric", "Native quote", "Native unit", "Symbol", "Settle", "Contract size", "Size unit", "Counting convention", "Funding period seconds", "Status", "Current value", "Current event UTC"], identities)
+    _table(lines, ["Series", "Horizon", "Status", "Start cutoff UTC", "Start event UTC", "Start value", "End event UTC", "End value", "Native change", "Change unit", "Endpoint skew seconds"], comparisons)
+
+
 def render_accumulation_report(result: dict, kind: str) -> str:
     """Render public calculation or journal envelopes without changing exact JSON."""
     envelope = result
@@ -836,6 +990,14 @@ def render_accumulation_report(result: dict, kind: str) -> str:
         f"Market: {market.get('asset') or result.get('asset') or 'unknown'}/{quote} · Source: {market.get('source') or result.get('source') or 'unknown'}.",
         f"As of: {_date(result.get('as_of', market.get('as_of')))} · Mode: {mode} · Status: {result.get('status', 'computed')}.",
     ]
+    if kind == "budget-preview":
+        lines[2] = f"Shared cash envelope: {quote}. Declared plans: {len(result.get('plans', []))}."
+    elif kind == "journal-scorecard":
+        lines[2] = "Native markets, modes, chronology and policy cohorts remain separate."
+    elif kind == "quote-context":
+        lines[2] = "Explicit native EUR/USD and stablecoin observations; indicative reference context."
+    elif kind == "derivatives-context":
+        lines[2] = f"Asset: {result.get('asset', 'unknown')}. Source and native dimensions remain separate in each series."
     if mode in ("demo", "synthetic"):
         lines.append("SYNTHETIC DEMONSTRATION: these observations are not live market evidence.")
     for key in ("assessment_id", "issued_at", "observed_at", "content_hash"):
@@ -857,7 +1019,19 @@ def render_accumulation_report(result: dict, kind: str) -> str:
         if key in result:
             value = _date(result[key]) if key == "expires_at" else _display(result[key])
             lines.append(f"{_label(key)}: {value}.")
-    if result is not envelope or kind in ("issue", "assessment", "observe"):
+    if kind == "journal-scorecard":
+        _scorecard(lines, result)
+    elif kind == "budget-preview":
+        _budget(lines, result, quote)
+    elif kind == "quote-context":
+        _quote_context(lines, result)
+    elif kind in ("purchase-costs", "venue-disagreement"):
+        _venue_panel(lines, result, quote, purchase=kind == "purchase-costs")
+    elif kind == "replay-assessment":
+        _replay(lines, result)
+    elif kind == "derivatives-context":
+        _derivatives_context(lines, result)
+    elif result is not envelope or kind in ("issue", "assessment", "observe"):
         _nested(lines, result, quote)
     elif kind == "accumulation-brief" or result.get("kind") == "accumulation_brief":
         _brief(lines, result, quote)
