@@ -118,6 +118,9 @@ demonstration; replace them and their provenance with independently verified
 entries before using them as real context. Date-only meetings remain date-only.
 Explicitly timed entries preserve European daylight saving, revisions and
 cancellations. A scheduled time does not establish actual publication.
+Calendar reads select the highest manual revision available by the requested
+cutoff. Receiving an older revision later cannot undo a known cancellation;
+all imported evidence remains preserved.
 
 ## Native derivatives context
 

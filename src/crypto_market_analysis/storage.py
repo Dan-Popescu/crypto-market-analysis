@@ -14,6 +14,14 @@ from pathlib import Path
 from .evidence import metric_dimension
 from .models import Candle, CollectionResult, Observation
 
+# A later receipt of an older manual ECB revision must not undo a known
+# cancellation. Apply the same known-at version order to both calendar readers.
+_LOCAL_RECORD_VERSION_ORDER = """CASE WHEN kind='calendar'
+    AND json_extract(payload,'$.source_format')='ecb-manual-calendar-v1'
+    AND json_type(payload,'$.sequence')='integer'
+    AND json_extract(payload,'$.sequence') BETWEEN 0 AND 2147483647
+    THEN json_extract(payload,'$.sequence') ELSE 0 END DESC,observed_at DESC,id DESC"""
+
 
 def _json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False, separators=(",", ":"))
@@ -470,8 +478,8 @@ class Store:
                     ROW_NUMBER() OVER(PARTITION BY source,task ORDER BY observed_at DESC,id DESC) rn
                     FROM runs WHERE observed_at<=?) WHERE rn=1 ORDER BY observed_at DESC LIMIT 101""",
                     (as_of,)).fetchall()
-                calendar = con.execute("""SELECT payload FROM (SELECT payload,id,
-                    ROW_NUMBER() OVER(PARTITION BY identity ORDER BY observed_at DESC,id DESC) rn
+                calendar = con.execute(f"""SELECT payload FROM (SELECT payload,id,
+                    ROW_NUMBER() OVER(PARTITION BY identity ORDER BY {_LOCAL_RECORD_VERSION_ORDER}) rn
                     FROM local_records WHERE kind='calendar' AND observed_at<=?)
                     WHERE rn=1 ORDER BY id DESC LIMIT 501""", (as_of,)).fetchall()
                 for table in ("candles", "observations"):
@@ -529,8 +537,8 @@ class Store:
             raise ValueError("Use a supported record kind and a limit from 1 to 1000.")
         now = int(time.time()) if as_of is None else as_of
         with self.connection() as con:
-            rows = con.execute("""SELECT payload FROM (SELECT payload,id,
-                ROW_NUMBER() OVER(PARTITION BY identity ORDER BY observed_at DESC,id DESC) rn
+            rows = con.execute(f"""SELECT payload FROM (SELECT payload,id,
+                ROW_NUMBER() OVER(PARTITION BY identity ORDER BY {_LOCAL_RECORD_VERSION_ORDER}) rn
                 FROM local_records WHERE kind=? AND observed_at<=?) WHERE rn=1 ORDER BY id DESC LIMIT ?""",
                 (kind, now, limit)).fetchall()
         return [json.loads(row[0]) for row in rows]

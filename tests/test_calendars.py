@@ -211,6 +211,7 @@ def test_ecb_manual_validation_duplicates_revisions_and_bounds():
         ecb_schedule(source_url="https://example.invalid/ecb"),
         ecb_schedule(provenance={"checked_at": 101, "note": "future"}),
         ecb_schedule([{**row, "publication_time": 100}]),
+        ecb_schedule([{**row, "sequence": 2147483648}]),
         ecb_schedule([{**row, "source_last_modified": "2026-01-01T00:00:00"}]),
     ):
         with pytest.raises(ValueError):
@@ -244,3 +245,34 @@ def test_ecb_revision_order_does_not_let_older_input_override_newer_revision():
     assert [item["sequence"] for item in revisions] == [0, 1, 2]
     assert revisions[-1]["status"] == "cancelled"
     assert revisions[1]["source_last_modified"] == "1970-01-01T00:01:00Z"
+
+
+@pytest.mark.parametrize("reader", ["local_records", "capture"])
+def test_ecb_older_import_does_not_resurrect_cancelled_revision(tmp_path, reader):
+    import json
+
+    from crypto_market_analysis.calendars import parse_ecb_manual_schedule
+    from crypto_market_analysis.storage import Store
+
+    store = Store(tmp_path / "observer.sqlite")
+    row = json.loads(ecb_schedule())["events"][0]
+    row.update(local_date="2027-01-01", scheduled_time="2027-01-01T14:15:00",
+               timezone="Europe/Berlin")
+    for observed, sequence, status in ((100, 0, "planned"), (200, 2, "cancelled"),
+                                        (300, 1, "planned"), (400, 3, "planned")):
+        [event] = parse_ecb_manual_schedule(
+            ecb_schedule([{**row, "sequence": sequence, "status": status}]), observed)
+        store.save_local_record("calendar", event)
+
+    def read(cutoff):
+        return (store.local_records("calendar", cutoff) if reader == "local_records"
+                else store.capture("BTC", cutoff)["calendar"])
+
+    assert read(99) == []
+    for cutoff, sequence, status in ((100, 0, "planned"), (199, 0, "planned"),
+                                     (200, 2, "cancelled"), (299, 2, "cancelled"),
+                                     (300, 2, "cancelled"), (399, 2, "cancelled"),
+                                     (400, 3, "planned")):
+        [event] = read(cutoff)
+        assert (event["sequence"], event["status"]) == (sequence, status)
+        assert event["observed_at"] <= cutoff

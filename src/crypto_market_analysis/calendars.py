@@ -313,8 +313,8 @@ def parse_ecb_manual_schedule(text: str, observed_at: int) -> list[dict[str, Any
         if any(not isinstance(row[key], str) or not row[key].strip()
                for key in ("id", "title", "event_kind", "local_date")):
             raise ValueError("ECB manual event identity, title, kind and local_date must be nonempty strings.")
-        if type(row["sequence"]) is not int or row["sequence"] < 0:
-            raise ValueError("ECB manual sequence must be a nonnegative integer.")
+        if type(row["sequence"]) is not int or not 0 <= row["sequence"] <= 2147483647:
+            raise ValueError("ECB manual sequence must be an integer from zero to 2147483647.")
         identity = row["id"], row["sequence"]
         if identity in identities:
             raise ValueError("Duplicate ECB manual event ID and revision sequence.")
