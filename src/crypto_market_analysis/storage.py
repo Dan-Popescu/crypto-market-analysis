@@ -90,9 +90,9 @@ class Store:
                 if any(type(getattr(c, key)) is not int for key in ("open_time", "close_time", "observed_at")):
                     raise ValueError("Candle timestamps must be integer UTC epoch seconds.")
                 if any(isinstance(v, bool) for v in numeric) or not all(math.isfinite(v) for v in numeric):
-                    raise ValueError("Bougie non finie.")
+                    raise ValueError("Candle values must be finite numbers.")
                 if min(c.open, c.high, c.low, c.close) <= 0 or c.volume < 0:
-                    raise ValueError("Prix/volume de bougie invalide.")
+                    raise ValueError("Candle prices must be positive and volume nonnegative.")
                 if c.high < max(c.open, c.low, c.close) or c.low > min(c.open, c.high, c.close):
                     raise ValueError("Inconsistent candle high or low.")
                 if c.timeframe != "1h" or c.open_time % 3600 or c.close_time != c.open_time + 3600:
@@ -196,12 +196,12 @@ class Store:
         try:
             candles = self.put_candles(result.candles)
         except (ValueError, TypeError) as exc:
-            result.errors.append(f"Validation des bougies : {exc}")
+            result.errors.append(f"Candle validation: {exc}")
             result.candles = []
         try:
             observations = self.put_observations(result.observations)
         except (ValueError, TypeError) as exc:
-            result.errors.append(f"Validation des observations : {exc}")
+            result.errors.append(f"Observation validation: {exc}")
             result.observations = []
         return {
             **self.record_run(result, task, now),
@@ -301,57 +301,187 @@ class Store:
                 for table in ("candles", "observations", "events", "runs")
             }
 
-    def capture(self, asset: str, as_of: int, mode: str = "live", *, observation_limit: int = 200000) -> dict:
-        """Read market, events and operational evidence in one SQLite read transaction."""
+    def _capture_observations(self, con, asset, as_of, mode, profile, source, quote,
+                              limit, baseline_seconds):
+        """Bound each native series before sharing the total capture budget.
+
+        Bundle summaries consume the latest two events and the nearest preceding
+        7/21-day comparisons. These rows have priority over optional recent history.
+        Vigilance consumes every raw baseline event and two native derivative events;
+        if those required rows do not fit, refuse the capture rather than bias a median.
+        """
+        families = ("liquidity", "derivatives", "options", "macro", "stablecoins", "other")
+        if profile == "candles":
+            return [], [{"family": family, "status": "not_requested", "captured": 0}
+                        for family in families]
+        conditions = ["asset IN (?, 'MACRO', 'STABLECOINS')", "data_mode=?",
+                      "event_time<=?", "observed_at<=?", "event_time>=?"]
+        values = [asset, mode, as_of, as_of, as_of - 730 * 86400]
+        if profile == "vigilance":
+            conditions.append("asset=?")
+            values.append(asset)
+            conditions.append("""((metric IN ('spread_bps','depth_bid_1pct','depth_ask_1pct')
+                AND json_extract(dimension,'$.aggregation') IS NULL)
+                OR metric LIKE 'funding_rate_%' OR metric LIKE 'open_interest_%')""")
+            if quote is not None:
+                conditions.append("json_extract(dimension,'$.quote')=?")
+                values.append(quote)
+            if source is not None:
+                conditions.append("(source=? OR metric LIKE 'funding_rate_%' OR metric LIKE 'open_interest_%')")
+                values.append(source)
+        # Dimension is the persisted canonical source/quote/unit/instrument identity.
+        identity = "source,asset,metric,data_mode,dimension"
+        cte = f"""WITH versions AS (
+            SELECT *, ROW_NUMBER() OVER(PARTITION BY {identity},event_time
+                ORDER BY observed_at DESC,id DESC) version_rank
+            FROM observations WHERE {' AND '.join(conditions)}),
+            latest AS (SELECT *, CASE
+                WHEN asset='MACRO' THEN 'macro'
+                WHEN asset='STABLECOINS' THEN 'stablecoins'
+                WHEN metric LIKE 'option_%' THEN 'options'
+                WHEN metric LIKE 'funding_rate_%' OR metric LIKE 'open_interest_%' THEN 'derivatives'
+                WHEN metric LIKE 'depth_%' OR metric LIKE 'spread_%' OR metric LIKE 'book_%'
+                     OR metric LIKE 'mid_%' THEN 'liquidity'
+                ELSE 'other' END family FROM versions WHERE version_rank=1),
+            ranked AS (SELECT *, ROW_NUMBER() OVER(PARTITION BY {identity}
+                ORDER BY event_time DESC,id DESC) series_rank,
+                MAX(event_time) OVER(PARTITION BY {identity}) latest_time FROM latest),
+            comparisons AS (SELECT *,
+                MAX(CASE WHEN event_time<=latest_time-604800 THEN event_time END)
+                    OVER(PARTITION BY {identity}) comparison_7d,
+                MAX(CASE WHEN event_time<=latest_time-1814400 THEN event_time END)
+                    OVER(PARTITION BY {identity}) comparison_21d FROM ranked)
+            """
+        if profile == "vigilance":
+            wanted = "(family='liquidity' AND event_time>=latest_time-?) OR (family='derivatives' AND series_rank<=2)"
+            selection_values = [*values, baseline_seconds]
+            required = "1"
+        else:
+            wanted = "series_rank<=256 OR event_time=comparison_7d OR event_time=comparison_21d"
+            selection_values = values
+            required = "COALESCE((series_rank<=2 OR event_time=comparison_7d OR event_time=comparison_21d),0)"
+        available = con.execute(cte + f"""SELECT family,COUNT(*),
+            COUNT(DISTINCT json_array(source,asset,metric,dimension)),MIN(event_time),MAX(event_time),
+            SUM(CASE WHEN ({wanted}) AND ({required}) THEN 1 ELSE 0 END)
+            FROM comparisons GROUP BY family""", selection_values).fetchall()
+        rows = con.execute(cte + f""", candidates AS (
+            SELECT *, {required} required FROM comparisons WHERE {wanted})
+            SELECT payload,family,required,SUM(required) OVER () required_count
+            FROM candidates ORDER BY required DESC,series_rank,source,asset,metric,dimension,event_time DESC
+            LIMIT ?""", [*selection_values, limit + 1]).fetchall()
+        if rows and rows[0][3] > limit:
+            raise ValueError(f"Required {profile} observation evidence exceeds the {limit}-row capture limit.")
+        selected = rows[:limit]
+        observations = [Observation(**json.loads(row[0])) for row in selected]
+        coverage = []
+        for family, count, series, first, last, required_count in available:
+            retained = [obs for obs, row in zip(observations, selected, strict=True) if row[1] == family]
+            coverage.append({"family": family, "status": "captured", "available": count, "series": series,
+                             "captured": len(retained), "omitted": count - len(retained),
+                             "required_available": required_count,
+                             "required_captured": sum(row[2] for row in selected if row[1] == family),
+                             "required_truncated": False,
+                             "truncated": count > len(retained), "available_start": first, "available_end": last,
+                             "captured_start": min((obs.event_time for obs in retained), default=None),
+                             "captured_end": max((obs.event_time for obs in retained), default=None),
+                             "selection": "raw_baseline_and_latest_native_pair" if profile == "vigilance"
+                             else "latest_256_per_series_plus_7d_21d_comparisons; required_rows_first"})
+        coverage.extend({"family": family, "status": "missing", "available": 0, "captured": 0,
+                         "omitted": 0, "truncated": False}
+                        for family in families if family not in {row[0] for row in available})
+        return observations, coverage
+
+    def capture(self, asset: str, as_of: int, mode: str = "live", *, source: str | None = None,
+                quote: str | None = None, profile: str = "bundle", vigilance_policy: dict | None = None,
+                observation_limit: int = 200000, candle_limit: int = 500000) -> dict:
+        """Read operation-specific analytical evidence in one SQLite read transaction.
+
+        Explicit native-market filters precede the candle cap. Limits may be lowered
+        for bounded callers/tests, never raised above the production resource contract.
+        Candle-only operations intentionally do not read global observation history.
+        """
         if asset not in ("BTC", "ETH") or mode not in ("live", "demo", "import"):
             raise ValueError("Unsupported asset or data mode.")
-        if isinstance(as_of, bool) or not isinstance(as_of, int):
+        if type(as_of) is not int:
             raise ValueError("as_of must be UTC epoch seconds.")
-        if not 1 <= observation_limit <= 500000:
-            raise ValueError("observation_limit must be between 1 and 500000.")
+        if profile not in ("bundle", "candles", "vigilance"):
+            raise ValueError("Capture profile must be bundle, candles or vigilance.")
+        for name, value in (("observation_limit", observation_limit), ("candle_limit", candle_limit)):
+            if type(value) is not int or not 1 <= value <= 500000:
+                raise ValueError(f"{name} must be between 1 and 500000.")
+        baseline = 3600
+        if profile == "vigilance":
+            from .vigilance import _policy
+            rules = _policy(vigilance_policy)
+            baseline = rules["baseline_seconds"]
+            observation_limit, candle_limit = min(observation_limit, 100000), min(candle_limit, 20000)
+        conditions = ["asset=?", "data_mode=?", "close_time<=?", "observed_at<=?"]
+        values = [asset, mode, as_of, as_of]
+        for name, value in (("source", source), ("quote", quote)):
+            if value is not None:
+                conditions.append(f"{name}=?")
+                values.append(value)
         with self.connection() as con:
             con.execute("BEGIN")
             watermark = {table: con.execute(f"SELECT COALESCE(MAX(rowid),0) FROM {table}").fetchone()[0]
                          for table in ("candles", "observations", "events", "runs", "local_records")}
-            candles = con.execute("""SELECT payload FROM (SELECT payload,open_time,
+            cte = f"""WITH versions AS (SELECT *,
                 ROW_NUMBER() OVER(PARTITION BY source,asset,quote,timeframe,open_time,data_mode
-                ORDER BY observed_at DESC,id DESC) rn FROM candles
-                WHERE asset=? AND data_mode=? AND close_time<=? AND observed_at<=?)
-                WHERE rn=1 ORDER BY open_time DESC LIMIT 500001""", (asset, mode, as_of, as_of)).fetchall()
-            observations = con.execute("""SELECT payload FROM (SELECT payload,event_time,
-                ROW_NUMBER() OVER(PARTITION BY source,asset,metric,event_time,data_mode,dimension
-                ORDER BY observed_at DESC,id DESC) rn FROM observations
-                WHERE asset IN (?, 'MACRO', 'STABLECOINS') AND data_mode=?
-                AND event_time<=? AND observed_at<=? AND event_time>=?)
-                WHERE rn=1 ORDER BY event_time DESC LIMIT ?""",
-                (asset, mode, as_of, as_of, as_of - 730 * 86400, observation_limit + 1)).fetchall()
-            events = con.execute("""SELECT payload FROM (SELECT payload,event_time,
-                ROW_NUMBER() OVER(PARTITION BY id ORDER BY observed_at DESC) rn FROM events
-                WHERE observed_at<=? AND event_time>=? AND event_time<=?)
-                WHERE rn=1 ORDER BY event_time LIMIT 101""",
-                (as_of, as_of - 86400, as_of + 60 * 86400)).fetchall()
-            runs = con.execute("""SELECT payload FROM (SELECT payload,observed_at,
-                ROW_NUMBER() OVER(PARTITION BY source,task ORDER BY observed_at DESC,id DESC) rn
-                FROM runs WHERE observed_at<=?) WHERE rn=1 ORDER BY observed_at DESC LIMIT 101""",
-                (as_of,)).fetchall()
+                    ORDER BY observed_at DESC,id DESC) version_rank FROM candles
+                WHERE {' AND '.join(conditions)}), latest AS (SELECT *,
+                ROW_NUMBER() OVER(PARTITION BY source,asset,quote,data_mode ORDER BY open_time DESC) series_rank
+                FROM versions WHERE version_rank=1) """
+            candle_coverage = con.execute(cte + """SELECT source,quote,COUNT(*),MIN(open_time),MAX(close_time)
+                FROM latest GROUP BY source,quote""", values).fetchall()
+            candles = con.execute(cte + "SELECT payload FROM latest "
+                                  + ("WHERE series_rank<=48 " if profile == "vigilance" else "")
+                                  + "ORDER BY open_time DESC,source,quote LIMIT ?",
+                                  [*values, candle_limit + 1]).fetchall()
+            if len(candles) > candle_limit and profile != "bundle":
+                raise ValueError(f"Required {profile} candle evidence exceeds the {candle_limit}-row capture limit.")
+            observations, observation_coverage = self._capture_observations(
+                con, asset, as_of, mode, profile, source, quote, observation_limit, baseline)
+            # Health and calendars are consumed by broad bundles; analytical candle
+            # and vigilance profiles omit this unrelated optional evidence entirely.
+            events = runs = calendar = []
             counts = {}
-            calendar = con.execute("""SELECT payload FROM (SELECT payload,id,
-                ROW_NUMBER() OVER(PARTITION BY identity ORDER BY observed_at DESC,id DESC) rn
-                FROM local_records WHERE kind='calendar' AND observed_at<=?)
-                WHERE rn=1 ORDER BY id DESC LIMIT 501""", (as_of,)).fetchall()
-            for table in ("candles", "observations"):
-                counts[table] = con.execute(f"SELECT COUNT(*) FROM {table} WHERE data_mode=? AND observed_at<=?",
-                                            (mode, as_of)).fetchone()[0]
-            for table in ("events", "runs"):
-                counts[table] = con.execute(f"SELECT COUNT(*) FROM {table} WHERE observed_at<=?", (as_of,)).fetchone()[0]
-        return {"watermark": watermark, "candles": [Candle(**json.loads(row[0])) for row in reversed(candles[:500000])],
-                "observations": [Observation(**json.loads(row[0])) for row in observations[:observation_limit]],
+            if profile == "bundle":
+                events = con.execute("""SELECT payload FROM (SELECT payload,event_time,
+                    ROW_NUMBER() OVER(PARTITION BY id ORDER BY observed_at DESC) rn FROM events
+                    WHERE observed_at<=? AND event_time>=? AND event_time<=?)
+                    WHERE rn=1 ORDER BY event_time LIMIT 101""",
+                    (as_of, as_of - 86400, as_of + 60 * 86400)).fetchall()
+                runs = con.execute("""SELECT payload FROM (SELECT payload,observed_at,
+                    ROW_NUMBER() OVER(PARTITION BY source,task ORDER BY observed_at DESC,id DESC) rn
+                    FROM runs WHERE observed_at<=?) WHERE rn=1 ORDER BY observed_at DESC LIMIT 101""",
+                    (as_of,)).fetchall()
+                calendar = con.execute("""SELECT payload FROM (SELECT payload,id,
+                    ROW_NUMBER() OVER(PARTITION BY identity ORDER BY observed_at DESC,id DESC) rn
+                    FROM local_records WHERE kind='calendar' AND observed_at<=?)
+                    WHERE rn=1 ORDER BY id DESC LIMIT 501""", (as_of,)).fetchall()
+                for table in ("candles", "observations"):
+                    counts[table] = con.execute(f"SELECT COUNT(*) FROM {table} WHERE data_mode=? AND observed_at<=?",
+                                                (mode, as_of)).fetchone()[0]
+                for table in ("events", "runs"):
+                    counts[table] = con.execute(f"SELECT COUNT(*) FROM {table} WHERE observed_at<=?",
+                                                (as_of,)).fetchone()[0]
+        retained_candles = [Candle(**json.loads(row[0])) for row in reversed(candles[:candle_limit])]
+        market_coverage = [{"source": venue, "quote": currency, "available": count,
+                            "captured": sum(row.source == venue and row.quote == currency for row in retained_candles),
+                            "available_start": start, "available_end": end}
+                           for venue, currency, count, start, end in candle_coverage]
+        return {"watermark": watermark, "candles": retained_candles, "observations": observations,
                 "events": [json.loads(row[0]) for row in events[:100]],
                 "calendar": [json.loads(row[0]) for row in calendar[:500]],
                 "runs": [json.loads(row[0]) for row in runs[:100]], "counts": counts,
-                "truncation": {"candles": len(candles) > 500000, "observations": len(observations) > observation_limit,
-                               "events": len(events) > 100, "runs": len(runs) > 100,
-                               "calendar": len(calendar) > 500}}
+                "capture_profile": {"name": profile, "observation_limit": observation_limit,
+                                    "candle_limit": candle_limit, "observation_history_days": 730 if profile != "candles" else None,
+                                    "baseline_seconds": baseline if profile == "vigilance" else None,
+                                    "optional_context": "included" if profile == "bundle" else "not_requested"},
+                "truncation": {"candles": len(candles) > candle_limit,
+                               "observations": any(row.get("truncated", False) for row in observation_coverage),
+                               "events": len(events) > 100, "runs": len(runs) > 100, "calendar": len(calendar) > 500,
+                               "candle_coverage": market_coverage, "observation_coverage": observation_coverage}}
 
     def latest_candle_time(self, source: str, asset: str, mode: str = "live", *, quote: str | None = None) -> int | None:
         with self.connection() as con:

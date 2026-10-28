@@ -75,6 +75,11 @@ def metric_identity(observation: Observation) -> tuple:
 MAX_EVIDENCE_BYTES = 32 * 1024 * 1024
 
 
+def estimated_evidence_bytes(evidence: dict) -> int:
+    """Return the canonical uncompressed size used by the issuance budget."""
+    return len(canonical_json(evidence).encode("utf-8"))
+
+
 def archive_evidence(evidence: dict) -> dict:
     """Store a bounded lossless envelope instead of duplicating large JSON trees."""
     raw = canonical_json(evidence).encode("utf-8")
@@ -125,14 +130,25 @@ class CapturedInputs:
     configuration: dict
     truncation: dict
     calendar: tuple[dict, ...] = ()
+    capture_profile: dict | None = None
 
     def evidence(self) -> dict:
         """Return an independent JSON envelope, suitable for immutable local issuance."""
-        return json.loads(canonical_json(asdict(self)))
+        result = asdict(self)
+        if self.capture_profile is None:
+            result.pop("capture_profile")
+        return json.loads(canonical_json(result))
+
+    @property
+    def estimated_evidence_bytes(self) -> int:
+        return estimated_evidence_bytes(self.evidence())
 
     @property
     def reference(self) -> dict:
-        return {"schema_version": "2.0", "as_of": self.as_of, "asset": self.asset,
-                "source": self.source, "quote": self.quote, "data_mode": self.data_mode,
-                "rule_version": "captured-inputs-1", "configuration_hash": content_hash(self.configuration),
-                "content_hash": content_hash(self.evidence()), "watermark": dict(self.watermark)}
+        result = {"schema_version": "2.0", "as_of": self.as_of, "asset": self.asset,
+                  "source": self.source, "quote": self.quote, "data_mode": self.data_mode,
+                  "rule_version": "captured-inputs-1", "configuration_hash": content_hash(self.configuration),
+                  "content_hash": content_hash(self.evidence()), "watermark": dict(self.watermark)}
+        if self.capture_profile and self.capture_profile.get("dataset_lineage"):
+            result["dataset_lineage"] = json.loads(canonical_json(self.capture_profile["dataset_lineage"]))
+        return result

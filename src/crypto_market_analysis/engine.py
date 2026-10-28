@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
+from copy import deepcopy
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -75,19 +76,37 @@ class Engine:
         return result
 
     def capture_inputs(self, asset: str = "BTC", source: str | None = None,
-                       quote: str | None = None, as_of: int | None = None) -> CapturedInputs:
+                       quote: str | None = None, as_of: int | None = None, *,
+                       profile: str = "bundle", vigilance_policy: dict | None = None) -> CapturedInputs:
         now = int(time.time()) if as_of is None else as_of
-        raw = self.store.capture(asset, now, self.mode)
-        candidates = [row for row in raw["candles"]
-                      if (source is None or row.source == source) and (quote is None or row.quote == quote)]
-        candles, coverage = self._select_market(candidates, now)
+        raw = self.store.capture(asset, now, self.mode, source=source, quote=quote,
+                                 profile=profile, vigilance_policy=vigilance_policy)
+        candles, coverage = self._select_market(raw["candles"], now)
+        observations = raw["observations"]
+        if profile == "vigilance":
+            observations = [row for row in observations if candles and row.quote == candles[0].quote
+                            and (row.metric.startswith(("funding_rate_", "open_interest_"))
+                                 or row.source == candles[0].source)]
+            for family in raw["truncation"]["observation_coverage"]:
+                retained = [row for row in observations if ("derivatives" if row.metric.startswith(
+                    ("funding_rate_", "open_interest_")) else "liquidity") == family["family"]]
+                family.update(captured=len(retained), omitted=family.get("available", 0) - len(retained),
+                              required_available=len(retained), required_captured=len(retained),
+                              truncated=family.get("available", 0) > len(retained),
+                              captured_start=min((row.event_time for row in retained), default=None),
+                              captured_end=max((row.event_time for row in retained), default=None))
+            raw["truncation"]["observations"] = any(
+                family.get("truncated", False) for family in raw["truncation"]["observation_coverage"])
+        if lineage := getattr(self, "dataset_lineage", None):
+            raw["capture_profile"]["dataset_lineage"] = deepcopy(lineage)
         configuration = asdict(self.settings)
         configuration.pop("data_dir", None)
         return CapturedInputs(now, asset, self.mode, candles[0].source if candles else source,
-                              candles[0].quote if candles else quote, tuple(candles), tuple(raw["observations"]),
+                              candles[0].quote if candles else quote, tuple(candles), tuple(observations),
                               tuple(coverage), tuple(raw["events"]),
-                              self._health(now, raw["runs"], raw["counts"]), raw["watermark"],
-                              configuration, raw["truncation"], tuple(raw["calendar"]))
+                              self._health(now, raw["runs"], raw["counts"]) if profile == "bundle" else
+                              {"status": "not_requested", "as_of": stamp(now), "data_mode": self.mode}, raw["watermark"],
+                              configuration, raw["truncation"], tuple(raw["calendar"]), raw["capture_profile"])
 
     def inputs(self, asset: str, source: str | None = None, quote: str | None = None,
                as_of: int | None = None) -> tuple[list[Candle], list[Observation], list[dict], dict]:
