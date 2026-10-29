@@ -12,6 +12,8 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .evidence import metric_dimension
+from .metric_history import decode_cursor, encode_cursor
+from .metric_history import selection as history_selection
 from .models import Candle, CollectionResult, Observation
 
 # A later receipt of an older manual ECB revision must not undo a known
@@ -55,6 +57,8 @@ class Store:
                 );
                 CREATE INDEX IF NOT EXISTS observation_lookup ON observations
                     (source,asset,metric,event_time,data_mode,dimension,observed_at DESC,id DESC);
+                CREATE INDEX IF NOT EXISTS observation_history ON observations
+                    (asset,metric,data_mode,event_time DESC,id DESC);
                 CREATE TABLE IF NOT EXISTS runs (
                     id INTEGER PRIMARY KEY, source TEXT NOT NULL, task TEXT NOT NULL,
                     observed_at INTEGER NOT NULL, payload TEXT NOT NULL
@@ -254,6 +258,160 @@ class Store:
                     values,
                 ).fetchall()
         return [Candle(**json.loads(row[0])) for row in rows]
+
+    @staticmethod
+    def _metric_history_query(selected: dict, cutoff: int, watermark: int):
+        lower = selected["start"] if selected["start"] is not None else cutoff - 365 * 86400
+        upper = selected["end"] if selected["end"] is not None else cutoff
+        if lower > upper or upper > cutoff:
+            raise ValueError("History bounds must satisfy start <= end <= as_of.")
+        conditions = ["asset=?", "data_mode=?", "event_time>=?", "event_time<=?",
+                      "observed_at<=?", "id<=?"]
+        values = [selected["asset"], selected["mode"], lower, upper, cutoff, watermark]
+        for key in ("metric", "source"):
+            if selected[key] is not None:
+                conditions.append(f"{key}=?")
+                values.append(selected[key])
+        for key in ("quote", "unit"):
+            if selected[key] is not None:
+                conditions.append(f"json_extract(dimension,'$.{key}')=?")
+                values.append(selected[key])
+        if selected["dimension"] is not None:
+            conditions.append("dimension=?")
+            values.append(_json(selected["dimension"]))
+        query = f"""WITH ranked AS (
+            SELECT id,payload,source,metric,dimension,event_time,
+            ROW_NUMBER() OVER(PARTITION BY source,asset,metric,event_time,data_mode,dimension
+                ORDER BY observed_at DESC,id DESC) rn
+            FROM observations WHERE {' AND '.join(conditions)}),
+            latest AS (SELECT * FROM ranked WHERE rn=1) """
+        return query, values, lower, upper
+
+    def metric_history(self, asset: str, metric: str, source: str | None = None,
+                       limit: int = 100, *, mode: str = "live", quote: str | None = None,
+                       unit: str | None = None, dimension: dict | None = None,
+                       as_of: int | None = None, start: int | None = None,
+                       end: int | None = None, cursor: str | None = None) -> dict:
+        """Read selected known-at history, newest first, without a global observation cap.
+
+        A cursor pins the receipt watermark and cutoff, not a durable evidence archive.
+        Retention/deletion can invalidate it; detectable changes fail instead of silently
+        continuing over gaps. Callers needing durable evidence must archive the result.
+        """
+        if type(limit) is not int or not 1 <= limit <= 500:
+            raise ValueError("limit must be between 1 and 500.")
+        if metric is None:
+            raise ValueError("metric is required.")
+        selected = history_selection(asset, metric, mode, source, quote, unit, dimension, as_of, start, end)
+        token = decode_cursor(cursor) if cursor is not None else None
+        database = hashlib.sha256(str(self.path).encode()).hexdigest()
+        if token is not None and (token.get("selection") != selected or token.get("database") != database):
+            raise ValueError("Metric history cursor does not match this selection or store.")
+        with self.connection() as con:
+            con.execute("BEGIN")
+            if token is None:
+                cutoff = int(time.time()) if as_of is None else as_of
+                watermark = con.execute("SELECT COALESCE(MAX(id),0) FROM observations").fetchone()[0]
+            else:
+                cutoff, watermark = token.get("cutoff"), token.get("watermark")
+                if (type(cutoff) is not int or cutoff < 0 or cutoff > int(time.time())
+                        or type(watermark) is not int or watermark < 0):
+                    raise ValueError("Invalid metric history cursor bounds.")
+            query, values, lower, upper = self._metric_history_query(selected, cutoff, watermark)
+            # Selected-row identities detect ordinary retention without counting the
+            # entire database. A maximum-row fingerprint detects rowid reuse. These
+            # checks are deliberately not a cryptographic frozen evidence archive.
+            stamp = con.execute(query + "SELECT COUNT(*),COALESCE(SUM(id),0),MAX(id),"
+                                "COUNT(DISTINCT json_array(source,dimension)) FROM latest",
+                                values).fetchone()
+            fence = con.execute("SELECT fingerprint FROM observations WHERE id=?", (stamp[2],)).fetchone()
+            retention = [*stamp[:3], fence[0] if fence else None]
+            if token is not None and token.get("retention") != retention:
+                raise ValueError("Stale metric history cursor: stored observations changed or were retained away.")
+            series_count = stamp[3]
+            seek = ""
+            after_values = []
+            if token is not None:
+                after = token.get("after")
+                if (not isinstance(after, list) or len(after) != 2
+                        or any(type(value) is not int for value in after)
+                        or not lower <= after[0] <= upper or not 1 <= after[1] <= watermark):
+                    raise ValueError("Invalid metric history cursor position.")
+                seek = "WHERE event_time<? OR (event_time=? AND id<?)"
+                after_values = [after[0], after[0], after[1]]
+            rows = con.execute(query + f"""SELECT *,COUNT(*) OVER() AS remaining FROM latest {seek}
+                               ORDER BY event_time DESC,id DESC LIMIT ?""",
+                               [*values, *after_values, limit + 1]).fetchall()
+        available = rows[0]["remaining"] if rows else 0
+        candidates = rows[:limit]
+        points = [json.loads(row["payload"]) for row in candidates]
+
+        def page(count):
+            retained = candidates[:count]
+            remaining = available - count
+            next_cursor = None
+            if remaining and retained:
+                next_cursor = encode_cursor({"version": 1, "database": database, "selection": selected,
+                                             "cutoff": cutoff, "watermark": watermark, "retention": retention,
+                                             "after": [retained[-1]["event_time"], retained[-1]["id"]]})
+            series = {(row["source"], row["dimension"]) for row in retained}
+            return {"asset": asset, "metric": metric, "data_mode": mode,
+                    "points": points[:count], "truncated": bool(remaining),
+                    "next_cursor": next_cursor, "remaining_points": remaining,
+                    "requested_limit": limit, "returned_points": count,
+                    "truncation_reasons": (["page_limit"] if available > limit else [])
+                    + (["response_byte_budget"] if count < len(candidates) else []),
+                    "response_byte_budget": 10000,
+                    "series_count": series_count, "multiple_series": series_count > 1,
+                    "series": [{"source": source, "dimension": json.loads(dimension)}
+                               for source, dimension in sorted(series)],
+                    "provenance": {"selection": selected, "as_of": cutoff, "start": lower, "end": upper,
+                                   "observation_watermark": watermark, "order": "event_time DESC,id DESC",
+                                   "version_policy": "latest known receipt per source/mode/native dimension",
+                                   "cursor_retention": "Not archived; detectable deletion invalidates continuation."}}
+
+        # Leave room for both JSON and text copies in the MCP response. Build the
+        # continuation only after the emitted prefix is chosen, so byte bounding
+        # cannot skip points. A single oversize point fails explicitly, not a loop.
+        result = page(len(candidates))
+        if len(_json(result).encode()) <= 10000:
+            return result
+        if not candidates or len(_json(page(1)).encode()) > 10000:
+            raise ValueError("A selected history point or selector exceeds the 10000-byte response budget; "
+                             "history cannot emit or advance past it. Use a local evidence export.")
+        low, high = 1, len(candidates)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if len(_json(page(middle)).encode()) <= 10000:
+                low = middle
+            else:
+                high = middle - 1
+        return page(low)
+
+    def metric_series(self, asset: str, metric: str | None = None, *, source: str | None = None,
+                      mode: str = "live", quote: str | None = None, unit: str | None = None,
+                      dimension: dict | None = None, as_of: int | None = None,
+                      start: int | None = None, end: int | None = None, limit: int = 100) -> dict:
+        """Discover bounded native series and their available known-at date coverage."""
+        if type(limit) is not int or not 1 <= limit <= 500:
+            raise ValueError("limit must be between 1 and 500.")
+        selected = history_selection(asset, metric, mode, source, quote, unit, dimension, as_of, start, end)
+        cutoff = int(time.time()) if as_of is None else as_of
+        with self.connection() as con:
+            con.execute("BEGIN")
+            watermark = con.execute("SELECT COALESCE(MAX(id),0) FROM observations").fetchone()[0]
+            query, values, lower, upper = self._metric_history_query(selected, cutoff, watermark)
+            rows = con.execute(query + """SELECT source,metric,dimension,COUNT(*) AS points,
+                MIN(event_time) AS start,MAX(event_time) AS end,COUNT(*) OVER() AS series_count
+                FROM latest GROUP BY source,metric,dimension ORDER BY source,metric,dimension LIMIT ?""",
+                               [*values, limit + 1]).fetchall()
+        return {"asset": asset, "data_mode": mode, "as_of": cutoff, "start": lower, "end": upper,
+                "series": [{"source": row["source"], "metric": row["metric"],
+                            "dimension": json.loads(row["dimension"]), "points": row["points"],
+                            "start": row["start"], "end": row["end"]} for row in rows[:limit]],
+                "truncated": len(rows) > limit,
+                "omitted_series": rows[0]["series_count"] - min(len(rows), limit) if rows else 0,
+                "observation_watermark": watermark}
 
     def observations(
         self,

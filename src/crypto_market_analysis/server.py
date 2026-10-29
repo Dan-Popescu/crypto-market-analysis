@@ -400,23 +400,19 @@ def create_server(
         asset: Literal["BTC", "ETH", "MACRO", "STABLECOINS"],
         metric: str,
         source: str | None = None,
-        limit: int = 100,
+        limit: StrictInt = 100,
+        quote: str | None = None,
+        unit: str | None = None,
+        dimension: dict[str, Any] | None = None,
+        as_of: StrictInt | None = None,
+        start: StrictInt | None = None,
+        end: StrictInt | None = None,
+        cursor: str | None = None,
     ) -> dict[str, Any]:
-        """Read up to 500 observed points with source, unit, native quote, timestamps and coverage metadata. No currency conversion."""
-        if not 1 <= limit <= 500:
-            raise ValueError("limit must be between 1 and 500.")
-        rows = [
-            o
-            for o in engine.store.observations(asset, mode=mode)
-            if o.metric == metric and (source is None or o.source == source)
-        ]
-        return {
-            "asset": asset,
-            "metric": metric,
-            "data_mode": mode,
-            "points": [asdict(o) for o in rows[:limit]],
-            "truncated": len(rows) > limit,
-        }
+        """Read known-at native metric history, up to 500 points per page. Pin source, quote, unit and complete dimension to select one series; mixed series are explicitly identified. Repeat selectors with next_cursor to continue a cutoff/watermark-pinned view. Default coverage is 365 days; explicit start/end are UTC seconds. Retention may invalidate a cursor. No currency conversion or collection."""
+        return engine.store.metric_history(asset, metric, source, limit, mode=mode, quote=quote,
+                                           unit=unit, dimension=dimension, as_of=as_of,
+                                           start=start, end=end, cursor=cursor)
 
     @server.tool(annotations=readonly)
     def explain_metric(metric: str) -> dict[str, Any]:
