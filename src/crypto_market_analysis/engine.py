@@ -23,7 +23,7 @@ def stamp(value: int) -> str:
 
 
 class Engine:
-    def __init__(self, settings: Settings, mode: str = "live"):
+    def __init__(self, settings: Settings, mode: str = "live", *, initialize: bool = True):
         if mode not in ("live", "demo", "import"):
             raise ValueError("Invalid mode.")
         self.settings = settings
@@ -40,7 +40,7 @@ class Engine:
             self.dataset_lineage = {"name": dataset.name, "source": dataset.source,
                                     "data_mode": dataset.data_mode,
                                     "target_start": dataset.target_start, "target_end": dataset.target_end}
-        self.store = Store(settings.database)
+        self.store = Store(settings.database, initialize=initialize)
         from .storage_policy import StoragePolicy
 
         self.store.storage_policy = StoragePolicy.from_settings(settings)

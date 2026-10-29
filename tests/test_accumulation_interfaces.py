@@ -21,7 +21,7 @@ from crypto_market_analysis.reporting import bounded_object, render_accumulation
 class RecordingEngine:
     calls = []
 
-    def __init__(self, *args):
+    def __init__(self, *args, **kwargs):
         pass
 
     def __getattr__(self, name):

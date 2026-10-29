@@ -126,6 +126,7 @@ def test_calendar_versions_cancellations_unknown_clocks_and_paging(tmp_path):
 
 
 def test_all_request_examples_match_schema_and_actual_tool_validators(tmp_path):
+    Store(tmp_path / "observer.sqlite")
     server = create_server(Settings(data_dir=tmp_path), mode="demo")
 
     async def run():

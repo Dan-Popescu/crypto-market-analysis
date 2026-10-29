@@ -679,6 +679,11 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("Network capture requires --mode live without --as-of.")
         if args.command in ("capture-books", "collect-official-context", "qualify-sources", "local-workflow") or args.command.startswith("stored-"):
             _protect_report_output(args, settings)
+        if args.command == "serve":
+            from .server import create_server
+
+            create_server(settings, args.mode, args.host, args.port).run(transport=args.transport)
+            return 0
         engine = Engine(settings, args.mode)
         now = args.as_of if args.as_of is not None else int(datetime.now(UTC).timestamp())
         if args.command == "capture-books":
@@ -967,10 +972,6 @@ def main(argv: list[str] | None = None) -> int:
                         )
                     )
             write_json({"inserted": engine.store.put_observations(rows), "data_mode": "import"})
-        elif args.command == "serve":
-            from .server import create_server
-
-            create_server(settings, args.mode, args.host, args.port).run(transport=args.transport)
         return 0
     except KeyboardInterrupt:
         print("Shutdown requested.", file=sys.stderr)

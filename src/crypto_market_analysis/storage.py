@@ -47,10 +47,17 @@ def _result_data_mode(result: CollectionResult, explicit: str | None) -> str | N
 
 
 class Store:
-    """Public boundary for idempotent, source-specific, known-at data access."""
+    """Source-specific, known-at access; initialize=False never creates or migrates.
 
-    def __init__(self, path: Path | str):
+    Writable CLI/collector callers retain the default initialization lifecycle.
+    Read-only callers require an existing compatible schema for analytical reads.
+    """
+
+    def __init__(self, path: Path | str, *, initialize: bool = True):
         self.path = Path(path).expanduser().resolve()
+        self.read_only = not initialize
+        if self.read_only:
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as con:
             con.executescript("""
@@ -97,15 +104,25 @@ class Store:
 
     @contextmanager
     def connection(self):
-        con = sqlite3.connect(self.path, timeout=15)
-        con.row_factory = sqlite3.Row
+        if self.read_only and not self.path.is_file():
+            raise ValueError("Configured database is missing; initialize it with an explicit local writer before analytical reads.")
+        con = None
         try:
-            con.execute("PRAGMA journal_mode=WAL")
+            # mode=ro sees concurrent WAL commits and prevents a raced deletion
+            # from creating a replacement. immutable would hide live WAL data.
+            con = sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True, timeout=15) if self.read_only else sqlite3.connect(self.path, timeout=15)
+            con.row_factory = sqlite3.Row
+            con.execute("PRAGMA query_only=ON" if self.read_only else "PRAGMA journal_mode=WAL")
             con.execute("PRAGMA busy_timeout=15000")
             with con:
                 yield con
+        except sqlite3.DatabaseError as exc:
+            if self.read_only:
+                raise ValueError(f"Configured database read failed without initialization or migration: {exc}") from exc
+            raise
         finally:
-            con.close()
+            if con is not None:
+                con.close()
 
     def check_write_budget(self, con, payload_bytes: int = 0) -> None:
         from .storage_policy import check_write_budget

@@ -14,9 +14,12 @@ from mcp.client.streamable_http import streamable_http_client
 
 from crypto_market_analysis.config import Settings
 from crypto_market_analysis.server import create_server
+from crypto_market_analysis.storage import Store
 
 
 def test_stdio_real_protocol_and_read_only_annotations(tmp_path):
+    Store(tmp_path / "observer.sqlite")
+
     async def check():
         params = StdioServerParameters(
             command=sys.executable,
@@ -45,6 +48,8 @@ def test_stdio_real_protocol_and_read_only_annotations(tmp_path):
 
 
 def test_http_real_protocol(tmp_path):
+    Store(tmp_path / "observer.sqlite")
+
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
