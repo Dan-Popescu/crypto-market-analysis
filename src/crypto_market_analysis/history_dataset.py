@@ -9,11 +9,14 @@ import hashlib
 import io
 import json
 import math
+import os
 import re
+import stat
+import tempfile
 import time
 import zipfile
 from collections.abc import Callable
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PurePosixPath
 
@@ -34,6 +37,31 @@ def _json(value: object) -> str:
 
 def _hash(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def _sync_directory(directory: Path) -> None:
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _publish_bytes(path: Path, payload: bytes) -> None:
+    """Publish complete bytes only; interrupted staging never owns a final name."""
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix="." + path.name + "-",
+                                         suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        _sync_directory(path.parent)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def _epoch(value: int) -> None:
@@ -212,13 +240,20 @@ class HistoryDataset:
         # before accepting new appends. Store insertion itself is idempotent.
         for path in sorted(self.directory.glob("pending-*.json")):
             record = json.loads(path.read_text())
-            digest = record["normalized_sha256"]
-            if not re.fullmatch(r"[0-9a-f]{64}", digest):
-                raise ValueError("Invalid pending capture digest.")
-            payload = (self.directory / (digest + ".payload")).read_bytes()
-            if _hash(payload) != digest:
-                raise ValueError("Pending capture payload checksum mismatch.")
-            candles = [Candle(**c) for c in json.loads(payload)]
+            raw_digest = record.get("raw_sha256")
+            if record.get("raw_available") != (raw_digest is not None) or record.get("raw_response_sha256") != raw_digest:
+                raise ValueError("Pending capture raw evidence identity mismatch.")
+            if raw_digest is not None:
+                bound = (self.config.max_member_bytes if record.get("acquisition") == "official_local_split_zip"
+                         else self.config.max_capture_bytes)
+                # Verify large raw archive members without loading a second copy.
+                with self._open_blob(raw_digest, bound):
+                    pass
+            with self._open_blob(record["normalized_sha256"], self.config.max_disk_bytes) as stream:
+                rows = json.load(stream)
+            if not isinstance(rows, list) or len(rows) > self.config.max_rows:
+                raise ValueError("Pending capture exceeds the configured row bound.")
+            candles = [Candle(**c) for c in rows]
             if any(c.source != "kraken" or c.data_mode != "import" or
                    (c.asset, c.quote) != (record["asset"], record["quote"]) for c in candles):
                 raise ValueError("Pending capture has a foreign source, mode or market.")
@@ -228,6 +263,7 @@ class HistoryDataset:
                             (record["id"], record["asset"], record["quote"],
                              record["materialized_at"], _json(record)))
             path.unlink()
+            _sync_directory(self.directory)
 
     def _now(self) -> int:
         now = int(self.clock())
@@ -244,12 +280,41 @@ class HistoryDataset:
         if total + additional + getattr(self, "_reserved_bytes", 0) > self.config.max_disk_bytes:
             raise ValueError("Dataset exceeds its configured disk budget.")
 
+    @contextmanager
+    def _open_blob(self, digest, max_bytes):
+        """Yield checked immutable bytes at offset zero with bounded hash reads."""
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError("Invalid capture payload digest.")
+        path = self.directory / (digest + ".payload")
+        if not stat.S_ISREG(path.lstat().st_mode):
+            raise ValueError("Capture payload must be a regular file, never a symlink.")
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(descriptor, "rb") as stream:
+            metadata = os.fstat(stream.fileno())
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > max_bytes:
+                raise ValueError("Capture payload exceeds the configured byte bound.")
+            checksum = hashlib.sha256()
+            total = 0
+            while block := stream.read(1024**2):
+                total += len(block)
+                if total > max_bytes:
+                    raise ValueError("Capture payload exceeds the configured byte bound.")
+                checksum.update(block)
+            if checksum.hexdigest() != digest:
+                raise ValueError("Capture payload checksum mismatch.")
+            stream.seek(0)
+            yield stream
+
     def _blob(self, payload: bytes) -> str:
         digest = _hash(payload)
         path = self.directory / (digest + ".payload")
-        if not path.exists():
+        if path.exists() or path.is_symlink():
+            with self._open_blob(digest, len(payload)) as stream:
+                os.fsync(stream.fileno())
+            _sync_directory(self.directory)
+        else:
             self.check_write_budget(len(payload))
-            path.write_bytes(payload)
+            _publish_bytes(path, payload)
         return digest
 
     def _materialize(self, candles, lineage, *, raw=None):
@@ -283,14 +348,13 @@ class HistoryDataset:
         journal = self.directory / ("pending-" + identity + ".json")
         journal_payload = _json(record)
         self.check_write_budget(len(journal_payload.encode()))
-        temporary = journal.with_suffix(".tmp")
-        temporary.write_text(journal_payload)
-        temporary.replace(journal)
+        _publish_bytes(journal, journal_payload.encode())
         self.store.put_candles(candles)
         with self.store.connection() as con:
             con.execute("INSERT INTO history_captures VALUES(?,?,?,?,?)",
                         (identity, lineage["asset"], lineage["quote"], now, journal_payload))
         journal.unlink()
+        _sync_directory(self.directory)
         return record
 
     def stage_archive(self, parts: list[ArchivePart], *, member: str, asset: str,

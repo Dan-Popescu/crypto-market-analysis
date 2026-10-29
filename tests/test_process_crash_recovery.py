@@ -13,6 +13,7 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import zipfile
 from contextlib import closing, contextmanager
 from dataclasses import asdict
 from pathlib import Path
@@ -28,7 +29,7 @@ from crypto_market_analysis.automatic_repair import (
     run_auto_repairs,
 )
 from crypto_market_analysis.book_snapshots import retain_books, retained_book
-from crypto_market_analysis.history_dataset import DatasetConfig, HistoryDataset, RESTCapture
+from crypto_market_analysis.history_dataset import ArchivePart, DatasetConfig, HistoryDataset, RESTCapture
 from crypto_market_analysis.models import Observation
 from crypto_market_analysis.retention import compact_liquidity
 from crypto_market_analysis.storage import Store
@@ -110,9 +111,47 @@ def _child(scenario, directory):
     with patch("socket.socket.connect", denied), patch("socket.create_connection", denied), \
             patch("socket.socket.connect_ex", denied), patch("socket.getaddrinfo", denied), \
             patch("socket.socket.sendto", denied):
-        if scenario == "pending_capture":
-            dataset = HistoryDataset(_config(directory), clock=lambda: NOW)
+        if scenario in ("pending_capture", "archive_capture"):
+            config = DatasetConfig(**json.loads((directory / "dataset.json").read_text()))
+            dataset = HistoryDataset(config, clock=lambda: NOW)
             with patch.object(Store, "put_candles", lambda *_: _rendezvous(scenario)):
+                if scenario == "pending_capture":
+                    dataset.append_rest("BTC", "EUR", lambda *_: _capture([997, 999]), since=997 * HOUR)
+                else:
+                    archive = directory.parent / "synthetic.zip"
+                    part = ArchivePart(str(archive), "https://example.invalid/synthetic.zip",
+                                       hashlib.sha256(archive.read_bytes()).hexdigest())
+                    dataset.stage_archive([part], member="XBTEUR_60.csv", asset="BTC", quote="EUR",
+                                          captured_at=NOW)
+        elif scenario in ("blob_normalized", "blob_raw"):
+            import crypto_market_analysis.history_dataset as history
+
+            dataset = HistoryDataset(_config(directory), clock=lambda: NOW)
+            original = history.tempfile.NamedTemporaryFile
+            creations = 0
+
+            class PartialWrite:
+                def __init__(self, stream):
+                    self.stream = stream
+
+                def __getattr__(self, name):
+                    return getattr(self.stream, name)
+
+                def write(self, payload):
+                    self.stream.write(payload[:17])
+                    self.stream.flush()
+                    os.fsync(self.stream.fileno())
+                    _rendezvous(scenario)
+
+            @contextmanager
+            def interrupted_write(*args, **kwargs):
+                nonlocal creations
+                creations += 1
+                stop = creations == (1 if scenario == "blob_normalized" else 2)
+                with original(*args, **kwargs) as stream:
+                    yield PartialWrite(stream) if stop else stream
+
+            with patch.object(history.tempfile, "NamedTemporaryFile", interrupted_write):
                 dataset.append_rest("BTC", "EUR", lambda *_: _capture([997, 999]), since=997 * HOUR)
         elif scenario in ("materialized_complete", "materialized_partial"):
             original = HistoryDataset.append_rest
@@ -224,6 +263,109 @@ def test_sigkill_pending_capture_read_only_then_exact_idempotent_recovery(tmp_pa
     assert _rows(reopened.store.path, "candles") == rows
     assert all((dataset.directory / (expected[key] + ".payload")).read_bytes() == value
                for key, value in blobs.items())
+
+
+@pytest.mark.parametrize("scenario", ["blob_normalized", "blob_raw"])
+def test_sigkill_partial_blob_never_publishes_final_name_or_poisoned_retry(tmp_path, scenario):
+    dataset = HistoryDataset(_config(tmp_path / "research"), clock=lambda: NOW)
+    with _child_at_boundary(scenario, dataset.directory) as process:
+        staged = list(dataset.directory.glob(".*.tmp"))
+        assert len(staged) == 1 and staged[0].stat().st_size == 17
+        staged_bytes = staged[0].read_bytes()
+        final_digest = staged[0].name[1:].split(".payload-", 1)[0]
+        assert not (dataset.directory / (final_digest + ".payload")).exists()
+        assert len(list(dataset.directory.glob("*.payload"))) == (0 if scenario == "blob_normalized" else 1)
+        assert not list(dataset.directory.glob("pending-*.json"))
+        assert _rows(dataset.store.path, "candles") == []
+        assert _rows(dataset.store.path, "history_captures") == []
+        _kill(process)
+    reopened = HistoryDataset(dataset.config, clock=lambda: NOW)
+    assert _rows(dataset.store.path, "candles") == []
+    record = reopened.append_rest("BTC", "EUR", lambda *_: _capture([997, 999]), since=997 * HOUR)
+    assert record["rows"] == 2
+    assert (dataset.directory / (record["raw_sha256"] + ".payload")).read_bytes() == RAW
+    for digest in (record["raw_sha256"], record["normalized_sha256"]):
+        assert hashlib.sha256((dataset.directory / (digest + ".payload")).read_bytes()).hexdigest() == digest
+    assert staged[0].read_bytes() == staged_bytes  # Uncommitted orphan counts toward the disk budget.
+    assert len(_rows(dataset.store.path, "history_captures")) == 1
+    assert len(_rows(dataset.store.path, "candles")) == 2
+
+
+@pytest.mark.parametrize("damage", ["corrupt", "missing", "symlink", "digest", "oversize"])
+def test_pending_capture_rejects_bad_raw_before_any_materialization(tmp_path, damage):
+    bounds = {"max_capture_bytes": 128}
+    config = DatasetConfig("synthetic-process-crash", str(tmp_path / "research"),
+                           997 * HOUR, 1000 * HOUR, **bounds)
+    dataset = HistoryDataset(config, clock=lambda: NOW)
+    # The child configuration must match the parent's non-default byte bound.
+    with _child_at_boundary("pending_capture", dataset.directory) as process:
+        journal = next(dataset.directory.glob("pending-*.json"))
+        record = json.loads(journal.read_bytes())
+        raw = dataset.directory / (record["raw_sha256"] + ".payload")
+        _kill(process)
+    if damage == "corrupt":
+        raw.write_bytes(b"corrupt raw evidence")
+    elif damage == "missing":
+        raw.unlink()
+    elif damage == "symlink":
+        outside = tmp_path / "external-response"
+        outside.write_bytes(RAW)
+        raw.unlink()
+        raw.symlink_to(outside)
+    elif damage == "oversize":
+        payload = b"x" * (config.max_capture_bytes + 1)
+        digest = hashlib.sha256(payload).hexdigest()
+        (dataset.directory / (digest + ".payload")).write_bytes(payload)
+        record.update(raw_sha256=digest, raw_response_sha256=digest)
+        journal.write_text(json.dumps(record))
+    else:
+        record.update(raw_sha256="../invalid", raw_response_sha256="../invalid")
+        journal.write_text(json.dumps(record))
+    with pytest.raises((ValueError, FileNotFoundError)):
+        HistoryDataset(config, clock=lambda: NOW + 10)
+    assert journal.exists()
+    assert _rows(dataset.store.path, "history_captures") == []
+    assert _rows(dataset.store.path, "candles") == []
+
+
+@pytest.mark.parametrize("damage", ["corrupt", "symlink", "directory"])
+def test_existing_content_addressed_blob_is_verified_without_overwrite(tmp_path, damage):
+    dataset = HistoryDataset(_config(tmp_path / "research"), clock=lambda: NOW)
+    digest = hashlib.sha256(RAW).hexdigest()
+    path = dataset.directory / (digest + ".payload")
+    if damage == "corrupt":
+        path.write_bytes(b"truncated")
+    elif damage == "directory":
+        path.mkdir()
+    else:
+        outside = tmp_path / "external-response"
+        outside.write_bytes(RAW)
+        path.symlink_to(outside)
+    with pytest.raises(ValueError):
+        dataset.append_rest("BTC", "EUR", lambda *_: _capture([997, 999]), since=997 * HOUR)
+    assert path.exists()
+    assert not list(dataset.directory.glob("pending-*.json"))
+    assert _rows(dataset.store.path, "history_captures") == []
+    assert _rows(dataset.store.path, "candles") == []
+
+
+def test_sigkill_archive_capture_recovers_with_member_bound_instead_of_rest_bound(tmp_path):
+    payload = b"3589200,10,12,9,11,2,1\n3596400,10,12,9,11,2,1\n"
+    config = DatasetConfig("synthetic-process-crash", str(tmp_path / "research"),
+                           997 * HOUR, 1000 * HOUR, max_capture_bytes=1, max_member_bytes=len(payload))
+    dataset = HistoryDataset(config, clock=lambda: NOW)
+    with zipfile.ZipFile(tmp_path / "synthetic.zip", "w") as archive:
+        archive.writestr("XBTEUR_60.csv", payload)
+    with _child_at_boundary("archive_capture", dataset.directory) as process:
+        assert _rows(dataset.store.path, "history_captures") == []
+        assert _rows(dataset.store.path, "candles") == []
+        _kill(process)
+    recovered = HistoryDataset(config, clock=lambda: NOW + 10)
+    record = json.loads(_rows(recovered.store.path, "history_captures")[0]["payload"])
+    assert record["acquisition"] == "official_local_split_zip"
+    assert (dataset.directory / (record["raw_sha256"] + ".payload")).read_bytes() == payload
+    assert len(_rows(recovered.store.path, "candles")) == 2
+    assert record["captured_at"] == record["materialized_at"] == NOW
 
 
 @pytest.mark.parametrize("complete", [True, False], ids=["complete", "partial"])

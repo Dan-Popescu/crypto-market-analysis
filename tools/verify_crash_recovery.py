@@ -20,6 +20,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 SCENARIOS = {
+    "test_sigkill_archive_capture_recovers_with_member_bound_instead_of_rest_bound": {
+        "boundary": "official local archive member payload and pending capture committed before materialization",
+        "invariants": ["raw archive bytes verified within the member byte bound",
+                       "REST byte limit does not prevent valid archive replay", "original receipt preserved"],
+    },
     "test_sigkill_pending_capture_read_only_then_exact_idempotent_recovery": {
         "boundary": "immutable payloads and pending journal visible before candle materialization",
         "invariants": ["read-only planning/status leave journal and rows unchanged",
@@ -57,6 +62,24 @@ SCENARIOS = {
                        "raw rows pruned only after exact archive exists", "second compaction is idle"],
     },
 }
+for _scenario in ("blob_normalized", "blob_raw"):
+    SCENARIOS[f"test_sigkill_partial_blob_never_publishes_final_name_or_poisoned_retry[{_scenario}]"] = {
+        "boundary": "partial staged payload flushed before final filename or pending journal publication",
+        "invariants": ["partial write never occupies the content-addressed filename",
+                       "explicit retry publishes complete checked bytes", "uncommitted orphan does not become evidence"],
+    }
+for _damage in ("corrupt", "missing", "symlink", "digest", "oversize"):
+    SCENARIOS[f"test_pending_capture_rejects_bad_raw_before_any_materialization[{_damage}]"] = {
+        "boundary": "pending capture committed before SIGKILL; raw evidence subsequently invalidated",
+        "invariants": ["reopen rejects invalid raw evidence before candle or capture insertion",
+                       "pending journal remains available for explicit repair"],
+    }
+for _damage in ("corrupt", "symlink", "directory"):
+    SCENARIOS[f"test_existing_content_addressed_blob_is_verified_without_overwrite[{_damage}]"] = {
+        "boundary": "existing content-addressed filename contains invalid evidence",
+        "invariants": ["corrupt bytes and nonregular files rejected without overwrite",
+                       "no candle or capture materializes"],
+    }
 
 
 def _git(root, *args):
