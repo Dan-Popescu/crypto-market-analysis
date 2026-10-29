@@ -1,0 +1,7 @@
+{
+  "markets": [["BTC", "EUR"], ["ETH", "EUR"], ["BTC", "USD"], ["ETH", "USD"]],
+  "max_ranges": 8,
+  "max_hours": 24,
+  "request_budget": 4,
+  "retry_seconds": 60
+}

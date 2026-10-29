@@ -67,10 +67,19 @@ def write_json(value: object, output: str | None = None) -> None:
 
 
 def _json_file(path: Path) -> dict:
-    if path.stat().st_size > 2_000_000:
-        raise ValueError("Configuration exceeds the 2 MB limit.")
+    if str(path) == "-":
+        stream = getattr(sys.stdin, "buffer", sys.stdin)
+        payload = stream.read(2_000_001)
+        payload = payload.encode("utf-8") if isinstance(payload, str) else payload
+        if len(payload) > 2_000_000:
+            raise ValueError("Configuration exceeds the 2 MB limit.")
+        content = payload.decode("utf-8")
+    else:
+        if path.stat().st_size > 2_000_000:
+            raise ValueError("Configuration exceeds the 2 MB limit.")
+        content = path.read_text(encoding="utf-8")
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(content)
     except RecursionError as exc:
         raise ValueError("Configuration exceeds the JSON nesting limit.") from exc
     return bounded_object(value)
@@ -204,6 +213,10 @@ def parser() -> argparse.ArgumentParser:
         p = subs.add_parser(name, help=description, description=description, epilog=f"Example: {example}")
         _common(p, True)
         return p
+
+    from .capacity_cli import register_capacity_commands
+
+    register_capacity_commands(command, parse_time)
 
     init = command(
         "init", "Create an editable configuration.", "crypto-market-analysis init --file observer.toml"
@@ -636,6 +649,23 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         config_path = args.config or (Path("observer.toml") if Path("observer.toml").exists() else None)
         settings = load_settings(config_path, args.data_dir)
+        from .capacity_cli import COMMANDS, render_capacity_report, run_capacity_command
+
+        if args.command in COMMANDS:
+            _protect_report_output(args, settings)
+            request = _json_file(args.request) if getattr(args, "request", None) else None
+            result = run_capacity_command(args, settings, request)
+            if args.format == "json":
+                write_json(result, args.output)
+            else:
+                text = render_capacity_report(result, args.command)
+                if args.output:
+                    path = Path(args.output)
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(text, encoding="utf-8")
+                else:
+                    print(text, end="")
+            return 1 if result.get("status") == "error" else 0
         if args.command in ("maintain", "storage-policy", "verify-archive", "restore-archive"):
             from types import SimpleNamespace
 

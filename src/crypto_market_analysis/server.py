@@ -490,5 +490,10 @@ def create_server(
     register_operational_tools(server, engine, readonly,
                                present=presenter.tool(server, annotations=readonly))
 
+    from .capacity_mcp import register_capacity_tools
+
+    register_capacity_tools(server, engine, readonly,
+                            present=presenter.tool(server, annotations=readonly))
+
 
     return server

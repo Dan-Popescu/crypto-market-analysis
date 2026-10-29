@@ -205,6 +205,41 @@ REGISTRY["get_derivatives_context"]["examples"][0]["request"]["observations"] = 
     "observed_at": AS_OF - 9, "value": 2, "unit": "BTC", "quote": "USD", "data_mode": "demo",
     "metadata": {"symbol": "BTC/USD:BTC", "market_type": "swap", "settle": "BTC", "counting_convention": "one_sided"}}]
 
+_DOSSIER_COSTS = obj({"budget": DECIMAL, "assumptions_by_source": SOURCE_MAP,
+    "product_by_source": {"type": "object", "additionalProperties": TEXT, "maxProperties": 16},
+    "purchase_eligibility_by_source": {"type": "object", "additionalProperties": {"type": "object"}, "maxProperties": 16}},
+    ("budget",), description="Explicit caller assumptions; missing fees, products and eligibility remain unknown.")
+_DOSSIER_VENUES = obj({"sources": array(TEXT, 16, 1, uniqueItems=True),
+    "max_age_seconds": integer(86400, default=300), "max_skew_seconds": integer(86400, default=30),
+    "price_basis": enum("mid", "last", "best_ask"), "outlier_threshold_bps": DECIMAL,
+    "purchase_costs": _DOSSIER_COSTS}, ("sources",))
+_DOSSIER_MARKET = obj({"asset": ASSET, "source": TEXT, "quote": QUOTE,
+    "lookbacks": array(integer(3650, 1), 16, 1), "venues": _DOSSIER_VENUES,
+    "derivatives": obj({"source": TEXT, "quote": {"type": "string", "minLength": 1, "maxLength": 120},
+                        "policy": DERIVATIVE_POLICY}, ("source", "quote")),
+    "quotes": obj({"sources": array(TEXT, 16, 1, uniqueItems=True),
+                   "max_age_seconds": integer(86400, default=300),
+                   "max_endpoint_skew_seconds": integer(86400, default=30)}, ("sources",))},
+    ("asset", "source", "quote"))
+DOSSIER = obj({"data_mode": MODE, "markets": array(_DOSSIER_MARKET, 4, 1),
+    "calendar": obj({"source": TEXT, "start": integer(), "end": integer()})}, ("data_mode", "markets"),
+    description="One coherent read transaction, maximum 100000 total candles, 100 calendar rows, 64 KiB request and 32 MiB full result. Native quote identities remain separate.")
+REGISTRY["get_analysis_dossier"] = _contract("request", DOSSIER,
+    {"request": {"data_mode": "demo", "markets": [{"asset": "BTC", "source": "synthetic", "quote": "EUR",
+        "lookbacks": [7], "venues": {"sources": ["synthetic"]},
+        "derivatives": {"source": "synthetic", "quote": "USDT"},
+        "quotes": {"sources": ["synthetic"]}}]}, "as_of": AS_OF}, as_of=_AS_OF)
+_INSTALLATION_FIELDS = {key: value for key, value in QUALIFICATION["properties"].items()
+    if key not in ("required_start", "required_end", "max_requests")}
+_INSTALLATION_FIELDS.update({"sources": array({**TEXT, "maxLength": 64}, 4, 1, uniqueItems=True, default=["kraken"]),
+    "refresh": {"type": "boolean", "const": False, "default": False},
+    "as_of": integer(), "required_history_days": integer(3650, 1, default=730),
+    "history_days": integer(30, 1, default=7), "max_pages": integer(4, 1, default=2),
+    "max_logical_operations": integer(256, 1, default=64)})
+REGISTRY["get_installation_qualification"] = _contract("request", obj(_INSTALLATION_FIELDS),
+    {"request": {"sources": ["synthetic"], "data_mode": "demo", "refresh": False,
+                 "required_history_days": 730}, "as_of": AS_OF}, as_of=_AS_OF)
+
 
 def get_request_schema(tool_name: str) -> dict:
     """Return one bounded contract instead of serializing the complete registry."""
