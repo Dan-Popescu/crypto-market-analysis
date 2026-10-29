@@ -113,10 +113,19 @@ class KrakenRESTCapture:
 
     def __call__(self, asset: str, quote: str, since: int, limit: int) -> RESTCapture:
         symbol = f"{asset}/{quote}"
-        markets = self.client.load_markets()
-        if symbol not in markets or not markets[symbol].get("spot", False):
-            raise UnsupportedMarket(f"Unsupported Kraken native spot market: {symbol}")
-        rows = self.client.fetch_ohlcv(symbol, "1h", since=since * 1000, limit=limit)
+        try:
+            markets = self.client.load_markets()
+            if symbol not in markets or not markets[symbol].get("spot", False):
+                raise UnsupportedMarket(f"Unsupported Kraken native spot market: {symbol}")
+            rows = self.client.fetch_ohlcv(symbol, "1h", since=since * 1000, limit=limit)
+        except Exception as exc:
+            headers = getattr(self.client, "last_response_headers", None)
+            if isinstance(headers, dict) and getattr(exc, "retry_after", None) is None:
+                retry = headers.get("Retry-After", headers.get("retry-after"))
+                if retry is not None:
+                    exc.retry_after = retry
+                    exc.retry_after_basis = "ccxt_client_last_response_header_unverified"
+            raise
         raw = getattr(self.client, "last_http_response", None)
         return RESTCapture(rows, raw.encode() if isinstance(raw, str) else raw,
                            capture_evidence=self.capture_evidence)
@@ -365,9 +374,12 @@ class HistoryDataset:
                     if created:
                         staged.unlink(missing_ok=True)
 
-    def append_rest(self, asset: str, quote: str, fetch: Callable, *, since: int, limit: int = 720) -> dict:
+    def append_rest(self, asset: str, quote: str, fetch: Callable, *, since: int, limit: int = 720,
+                    until: int | None = None) -> dict:
         self._market(asset, quote)
         _epoch(since)
+        if until is not None:
+            _range(since, until)
         if type(limit) is not int or not 1 <= limit <= min(720, self.config.max_rows):
             raise ValueError("Kraken fetch limit must be between 1 and 720 within the row budget.")
         started = time.monotonic()
@@ -399,7 +411,7 @@ class HistoryDataset:
                         raise ValueError("Conflicting duplicate REST candle.")
                     continue
                 seen[event] = row
-                if event + 3600 <= received:
+                if event + 3600 <= received and (until is None or since <= event < until):
                     candles.append(Candle("kraken", asset, quote, "1h", event, event + 3600,
                                           *row[1:6], received, data_mode="import"))
             result = self._materialize(candles, {
@@ -407,6 +419,7 @@ class HistoryDataset:
                 "acquisition": "public_rest", "original_mode": "public_rest_capture",
                 "capture_evidence": capture.capture_evidence,
                 "captured_at": received, "endpoint": capture.endpoint, "since": since,
+                **({"until": until} if until is not None else {}),
                 "response_rows_sha256": _hash(encoded)}, raw=capture.raw)
             attempt.update(status="success", captured_at=received, count=len(candles),
                            newest_event=max((c.close_time for c in candles), default=None),
