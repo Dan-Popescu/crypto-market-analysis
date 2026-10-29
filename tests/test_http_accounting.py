@@ -17,10 +17,11 @@ from crypto_market_analysis.http_accounting import (
     HTTPAccounting,
     account_collection,
     merge_measurements,
+    public_error,
     stored_http_accounting,
 )
 from crypto_market_analysis.models import CollectionResult
-from crypto_market_analysis.providers import PublicHTTP, collect_context, collect_options
+from crypto_market_analysis.providers import PublicHTTP, RetryDeferred, collect_context, collect_options
 from crypto_market_analysis.storage import Store
 
 
@@ -269,6 +270,45 @@ def test_mixed_instrumented_and_unknown_transport_preserves_partial_coverage():
         result = collect(PublicHTTP(client=raw))
     assert result.http_accounting["coverage"] == "partial"
     assert result.http_accounting["totals"]["requests"] == 1
+
+
+def test_http_status_error_projection_redacts_whole_stored_run(tmp_path):
+    before = []
+
+    def handle(request):
+        if request.url.path != "/secret-path":
+            return httpx.Response(302, headers={"Location": "https://www.deribit.com/secret-path?key=secret-query"})
+        response = httpx.Response(403, request=request, headers={"X-Secret": "secret-header"}, text="secret-body")
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            before.append(str(exc))
+        return response
+
+    with httpx.Client(transport=httpx.MockTransport(handle), follow_redirects=True) as raw:
+        result = collect_options(["BTC"], now=100, client=PublicHTTP(client=raw))
+    assert "secret-path" in before[0] and "secret-query" in before[0]
+    assert result.errors == ["BTC Deribit public options: HTTPStatusError: HTTP 403"]
+    stored = Store(tmp_path / "redacted.sqlite").save_result(result, "options", 100, data_mode="live")
+    encoded = json.dumps(stored)
+    assert all(value not in encoded for value in ("secret-path", "secret-query", "secret-header", "secret-body"))
+    assert stored["http_accounting"]["totals"]["requests"] == 2
+    assert stored["http_accounting"]["totals"]["http_errors"] == 1
+
+
+def test_ccxt_error_projection_retains_retry_class_and_deadline(tmp_path):
+    class NetworkFailure(LocalCCXT):
+        def fetch_ohlcv(self, *_args, **_kwargs):
+            raise ccxt.RequestTimeout("https://example.com/secret-path?key=secret-query secret-body")
+
+    with local_server() as (root, _hits):
+        result = collect_exchange("kraken", ["BTC"], now=7200, include=("candles",), client=NetworkFailure(root))
+    stored = Store(tmp_path / "ccxt-redacted.sqlite").save_result(result, "market", 100, data_mode="live")
+    assert stored["errors"] == ["BTC fetchOHLCV: RequestTimeout"]
+    assert "secret" not in json.dumps(stored)
+    deferred = RetryDeferred(12345.5, "HTTP 429")
+    assert public_error(deferred) == "RetryDeferred: HTTP 429; retry_at=12345.500"
+    assert public_error(ValueError("synthetic local validation")) == "ValueError: synthetic local validation"
 
 
 def measured_result(source="kraken", count=1):

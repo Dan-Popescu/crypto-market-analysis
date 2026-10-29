@@ -278,6 +278,25 @@ def mark_uninstrumented(source: str) -> None:
         meter.coverage(source, instrumented=False)
 
 
+def public_error(exc: Exception) -> str:
+    """Project transport failures without provider URLs, headers or response text.
+
+    Keep local validation errors and RetryDeferred's explicit deadline intact.
+    CCXT subclasses retain their scheduler-relevant type without eagerly
+    importing the entire CCXT package at application startup.
+    """
+    kind = type(exc).__name__
+    if isinstance(exc, (httpx.HTTPStatusError, requests.exceptions.HTTPError)):
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+        return f"{kind}: HTTP {status}" if type(status) is int else kind
+    if isinstance(exc, (httpx.HTTPError, requests.exceptions.RequestException)):
+        return kind
+    if any(parent.__module__.startswith("ccxt.") for parent in type(exc).__mro__):
+        return kind
+    return f"{kind}: {exc}"
+
+
 def merge_measurements(measurements: list[dict | None], *, endpoint_limit: int = 100) -> dict:
     """Bounded aggregate; unknown measurements never become zero HTTP work."""
     if type(endpoint_limit) is not int or not 1 <= endpoint_limit <= 500:

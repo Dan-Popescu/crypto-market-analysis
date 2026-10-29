@@ -9,7 +9,7 @@ import time
 from threading import RLock
 from typing import TYPE_CHECKING, Any
 
-from .http_accounting import account_collection, instrument_exchange
+from .http_accounting import account_collection, instrument_exchange, public_error
 from .models import Candle, CollectionResult, Observation
 from .venues import VENUES
 
@@ -269,7 +269,7 @@ def collect_exchange(
             instrument_exchange(client, venue)
             markets = clients.markets(venue, client)
         except Exception as exc:
-            return CollectionResult(venue, errors=[f"{venue} client/catalogue: {type(exc).__name__}: {exc}"])
+            return CollectionResult(venue, errors=[f"{venue} client/catalogue: {public_error(exc)}"])
         return _collect_exchange(
             venue, assets, since, now, include, max_pages, client, quotes, since_by_market, markets,
             retain_books=retain_books,
@@ -296,7 +296,7 @@ def _collect_exchange(
     try:
         markets = client.load_markets() if markets is None else markets
     except Exception as exc:
-        result.errors.append(f"{venue} load_markets: {type(exc).__name__}: {exc}")
+        result.errors.append(f"{venue} load_markets: {public_error(exc)}")
         return result
     if not markets:
         result.errors.append(f"{venue} load_markets: empty market catalogue; source may be unavailable")
@@ -367,7 +367,7 @@ def _collect_exchange(
                     if len(result.candles) == candle_count:
                         result.warnings.append(f"{label}: no closed candles returned for requested history")
                 except Exception as exc:
-                    result.errors.append(f"{label} fetchOHLCV: {type(exc).__name__}: {exc}")
+                    result.errors.append(f"{label} fetchOHLCV: {public_error(exc)}")
         if spot and ("liquidity" in include or retain_books):
             if not _cap(client, "fetchOrderBook"):
                 result.warnings.append(
@@ -394,7 +394,7 @@ def _collect_exchange(
                                         "market_id": spot.get("id")},
                         ))
                 except Exception as exc:
-                    result.errors.append(f"{label} fetchOrderBook: {type(exc).__name__}: {exc}")
+                    result.errors.append(f"{label} fetchOrderBook: {public_error(exc)}")
         if "derivatives" in include:
             if not swap:
                 result.warnings.append(
@@ -468,7 +468,7 @@ def _collect_exchange(
                             )
                         )
                 except Exception as exc:
-                    result.errors.append(f"{label} {capability}: {type(exc).__name__}: {exc}")
+                    result.errors.append(f"{label} {capability}: {public_error(exc)}")
             if _cap(client, "fetchFundingRateHistory"):
                 try:
                     history = client.fetch_funding_rate_history(
@@ -509,7 +509,7 @@ def _collect_exchange(
                                 )
                             )
                 except Exception as exc:
-                    result.errors.append(f"{label} fetchFundingRateHistory: {type(exc).__name__}: {exc}")
+                    result.errors.append(f"{label} fetchFundingRateHistory: {public_error(exc)}")
             else:
                 result.warnings.append(
                     f"{label}: fetchFundingRateHistory adapter unsupported; provider availability unknown"
@@ -563,6 +563,6 @@ def capture_books(
                             "warnings": result.warnings, "errors": result.errors})
         except Exception as exc:
             reports.append({"source": source, "captured_books": 0, "inserted_books": 0, "inserted_observations": 0,
-                            "warnings": [], "errors": [f"{type(exc).__name__}: {exc}"]})
+                            "warnings": [], "errors": [public_error(exc)]})
     return {"inserted_books": inserted, "inserted_observations": observations, "reports": reports, "data_mode": "live",
             "whole_book_completeness": "unknown", "source_access_qualified": False}

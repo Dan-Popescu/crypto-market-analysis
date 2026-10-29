@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from .http_accounting import account_collection, httpx_get, prepare_httpx
+from .http_accounting import account_collection, httpx_get, prepare_httpx, public_error
 from .models import CollectionResult, Observation
 
 
@@ -223,7 +223,7 @@ def collect_options(assets: list[str], now: int | None = None, *, client: Any = 
         try:
             client = PublicHTTP()
         except Exception as exc:
-            result.errors.append(f"Deribit HTTP client: {type(exc).__name__}: {exc}")
+            result.errors.append(f"Deribit HTTP client: {public_error(exc)}")
             return result
     for asset in dict.fromkeys(a.upper() for a in assets):
         try:
@@ -235,13 +235,13 @@ def collect_options(assets: list[str], now: int | None = None, *, client: Any = 
                 root + "get_book_summary_by_currency", {"currency": asset, "kind": "option"}
             )
             if "error" in instruments or "error" in summaries:
-                raise ValueError(str(instruments.get("error") or summaries.get("error")))
+                raise ValueError("Provider returned an error response")
             observations = parse_options(instruments["result"], summaries["result"], asset, now)
             result.observations.extend(observations)
             if not observations:
                 result.warnings.append(f"{asset}: no usable option summaries")
         except Exception as exc:
-            result.errors.append(f"{asset} Deribit public options: {type(exc).__name__}: {exc}")
+            result.errors.append(f"{asset} Deribit public options: {public_error(exc)}")
     if own_client:
         client.close()
     return result
@@ -259,7 +259,7 @@ def collect_context(now: int | None = None, days: int = 365, *, client: Any = No
             client = PublicHTTP()
         except Exception as exc:
             return [
-                CollectionResult(source, errors=[f"HTTP client: {type(exc).__name__}: {exc}"])
+                CollectionResult(source, errors=[f"HTTP client: {public_error(exc)}"])
                 for source in sources
             ]
     results = []
@@ -298,7 +298,7 @@ def collect_context(now: int | None = None, days: int = 365, *, client: Any = No
                 if data.get("next_page_url"):
                     network.warnings.append(f"{asset} {metric}: response truncated; next page not fetched")
             except Exception as exc:
-                network.errors.append(f"{asset} {metric} Coin Metrics: {type(exc).__name__}: {exc}")
+                network.errors.append(f"{asset} {metric} Coin Metrics: {public_error(exc)}")
     if "coinmetrics" in sources:
         results.append(network)
     stable = CollectionResult("defillama")
@@ -322,7 +322,7 @@ def collect_context(now: int | None = None, days: int = 365, *, client: Any = No
                     )
                 )
     except Exception as exc:
-        stable.errors.append(f"DefiLlama stablecoincharts/all: {type(exc).__name__}: {exc}")
+        stable.errors.append(f"DefiLlama stablecoincharts/all: {public_error(exc)}")
     if "defillama" in sources:
         results.append(stable)
     fred = CollectionResult("fred")
@@ -352,7 +352,7 @@ def collect_context(now: int | None = None, days: int = 365, *, client: Any = No
                         )
                     )
         except Exception as exc:
-            fred.errors.append(f"{series} FRED CSV: {type(exc).__name__}: {exc}")
+            fred.errors.append(f"{series} FRED CSV: {public_error(exc)}")
     if "fred" in sources:
         results.append(fred)
     if own_client:
