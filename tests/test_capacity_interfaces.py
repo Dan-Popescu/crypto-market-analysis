@@ -1,13 +1,16 @@
 import asyncio
 import json
 import sys
+import time
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 
 import jsonschema
 import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from mcp.server.fastmcp.exceptions import ToolError
 
 from crypto_market_analysis.cli import main
 from crypto_market_analysis.config import Settings
@@ -25,6 +28,9 @@ def test_new_cli_inspections_and_stdin_do_not_initialize_missing_data(tmp_path, 
     for command in ("http-accounting", "auto-repair-history", "qualify-installation"):
         assert main([command, "--data-dir", str(directory), "--mode", "import"]) in (0, 1)
         assert json.loads(capsys.readouterr().out)
+        assert not directory.exists()
+        assert main([command, "--data-dir", str(directory), "--mode", "import", "--format", "markdown"]) in (0, 1)
+        assert capsys.readouterr().out.startswith("# ")
         assert not directory.exists()
     monkeypatch.setattr(sys, "stdin", StringIO('{"sources":["synthetic"],"data_mode":"demo"}'))
     assert main(["qualify-installation", "--request", "-", "--data-dir", str(directory)]) in (0, 1)
@@ -66,13 +72,10 @@ def test_registered_capacity_contract_examples_execute_on_existing_store(tmp_pat
                 response = await server.call_tool(name, example)
                 assert not response.isError
                 assert len(response.model_dump_json(by_alias=True, exclude_none=True).encode()) <= 32768
-        response = await server.call_tool("get_installation_qualification", {"request": {"refresh": True}})
-        # FastMCP's direct interface raises for invalid tool execution; SDK coverage
-        # below checks the serialized read-only rejection path separately.
-        return response
+        with pytest.raises(ToolError, match="read-only"):
+            await server.call_tool("get_installation_qualification", {"request": {"refresh": True}})
 
-    with pytest.raises(Exception, match="read-only"):
-        asyncio.run(check())
+    asyncio.run(check())
 
 
 def test_actual_stdio_capacity_reads_keep_missing_store_absent(tmp_path):
@@ -113,6 +116,11 @@ def test_multi_market_dossier_cli_and_mcp_keep_native_selections(tmp_path, capsy
     assert len(full["markets"]) == 4
     assert len({(row["selection"]["asset"], row["selection"]["quote"]) for row in full["markets"]}) == 4
     assert all(row["market_context"]["stored_inputs"]["watermark"] == full["watermark"] for row in full["markets"])
+    assert main(["analysis-dossier", "--data-dir", str(tmp_path), "--request", str(file),
+                 "--as-of", str(NOW), "--format", "markdown"]) == 0
+    markdown = capsys.readouterr().out
+    assert "BTC/EUR" in markdown and "ETH/USD" in markdown
+    assert "consumed_records" not in markdown
 
     async def check():
         response = await create_server(Settings(data_dir=tmp_path), "demo").call_tool(
@@ -122,3 +130,35 @@ def test_multi_market_dossier_cli_and_mcp_keep_native_selections(tmp_path, capsy
         assert len(response.structuredContent["markets"]) == 4
         assert len(response.model_dump_json(by_alias=True, exclude_none=True).encode()) <= 32768
     asyncio.run(check())
+
+
+def test_auto_repair_cli_applies_only_explicit_bounded_import_work(tmp_path, monkeypatch, capsys):
+    from crypto_market_analysis.history_dataset import DatasetConfig, HistoryDataset, RESTCapture
+
+    now = int(time.time()) // 3600 * 3600
+    dataset = HistoryDataset(DatasetConfig("synthetic", str(tmp_path), now - 7200, now))
+    calls = []
+
+    class Fetch:
+        client = SimpleNamespace(session=SimpleNamespace(close=lambda: None))
+
+        def __call__(self, asset, quote, since, limit):
+            calls.append((asset, quote, since, limit))
+            return RESTCapture([[t * 1000, 100, 100, 100, 100, 1]
+                                for t in range(since, now, 3600)][:limit])
+
+    monkeypatch.setattr("crypto_market_analysis.history_dataset.KrakenRESTCapture", Fetch)
+    file = tmp_path / "request.json"
+    file.write_text(json.dumps({"markets": [["BTC", "EUR"]], "max_hours": 2, "request_budget": 1}))
+    args = ["auto-repair-history", "--data-dir", str(tmp_path), "--mode", "import", "--request", str(file)]
+    assert main(args) == 0
+    assert json.loads(capsys.readouterr().out)["hours_planned"] == 2
+    assert not calls
+    assert main([*args, "--apply"]) == 0
+    assert json.loads(capsys.readouterr().out)["requests_attempted"] == 1
+    assert len(calls) == 1
+    assert len(dataset.store.candles("BTC", "kraken", "EUR", now + 3600, "import")) == 2
+    assert dataset.store.candles("BTC", "kraken", "EUR", now + 3600, "live") == []
+    assert main([*args, "--apply"]) == 0
+    assert json.loads(capsys.readouterr().out)["requests_attempted"] == 0
+    assert len(calls) == 1

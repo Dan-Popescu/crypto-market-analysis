@@ -8,9 +8,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import sqlite3
 import time
-from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import Literal
@@ -19,26 +17,8 @@ from pydantic import StrictInt
 
 from .reporting import bounded_as_of
 from .storage import _LOCAL_RECORD_VERSION_ORDER
-
-
-@contextmanager
-def _read(database):
-    path = Path(database).resolve()
-    if not path.is_file():
-        yield None
-        return
-    con = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
-    con.row_factory = sqlite3.Row
-    try:
-        con.execute("PRAGMA query_only=ON")
-        con.execute("BEGIN")
-        yield con
-    finally:
-        con.close()
-
-
-def _tables(con):
-    return set() if con is None else {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+from .storage import database_table_names as _tables
+from .storage import read_database_if_present as _read
 
 
 def _source(source):

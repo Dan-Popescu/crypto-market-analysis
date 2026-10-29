@@ -233,7 +233,8 @@ class HistoryDataset:
         if (asset, quote) not in MARKETS:
             raise ValueError("Select a native Kraken BTC/ETH EUR/USD market.")
 
-    def _space(self, additional=0):
+    def check_write_budget(self, additional=0):
+        """Enforce the named dataset's actual file budget before an explicit write."""
         total = sum(p.stat().st_size for p in self.directory.rglob("*") if p.is_file())
         if total + additional > self.config.max_disk_bytes:
             raise ValueError("Dataset exceeds its configured disk budget.")
@@ -242,7 +243,7 @@ class HistoryDataset:
         digest = _hash(payload)
         path = self.directory / (digest + ".payload")
         if not path.exists():
-            self._space(len(payload))
+            self.check_write_budget(len(payload))
             path.write_bytes(payload)
         return digest
 
@@ -259,7 +260,7 @@ class HistoryDataset:
             prior = con.execute("SELECT payload FROM history_captures WHERE id=?", (identity,)).fetchone()
         if prior:
             return json.loads(prior[0])
-        self._space(len(normalized) * 4 + (len(raw) if raw else 0))
+        self.check_write_budget(len(normalized) * 4 + (len(raw) if raw else 0))
         conflicts = []
         old = {c.open_time: c for c in self.store.candles(
             lineage["asset"], source="kraken", quote=lineage["quote"], mode="import", as_of=now)}
@@ -276,7 +277,7 @@ class HistoryDataset:
                   "conflicts": conflicts, "rows": len(candles)}
         journal = self.directory / ("pending-" + identity + ".json")
         journal_payload = _json(record)
-        self._space(len(journal_payload.encode()))
+        self.check_write_budget(len(journal_payload.encode()))
         temporary = journal.with_suffix(".tmp")
         temporary.write_text(journal_payload)
         temporary.replace(journal)
@@ -342,7 +343,7 @@ class HistoryDataset:
                 entry = matches[0]
                 if entry.is_dir() or entry.flag_bits & 1 or entry.file_size > cfg.max_member_bytes:
                     raise ValueError("Archive member is encrypted or exceeds the configured bound.")
-                self._space(entry.file_size * 5)
+                self.check_write_budget(entry.file_size * 5)
                 staged = self.directory / expected_member
                 created = False
                 try:

@@ -46,6 +46,32 @@ def _result_data_mode(result: CollectionResult, explicit: str | None) -> str | N
     return next(iter(modes)) if len(modes) == 1 and modes <= {"live", "demo", "import"} else None
 
 
+@contextmanager
+def read_database_if_present(database):
+    """Inspect an optional configured database without initialization or recovery.
+
+    A real read-only transaction sees committed WAL contents. A raced deletion
+    fails instead of creating a replacement; absent stores yield no connection.
+    """
+    path = Path(database).resolve()
+    if not path.is_file():
+        yield None
+        return
+    con = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
+    con.row_factory = sqlite3.Row
+    try:
+        con.execute("PRAGMA query_only=ON")
+        con.execute("BEGIN")
+        yield con
+    finally:
+        con.close()
+
+
+def database_table_names(con):
+    """Return actual table names from an optional already-open read transaction."""
+    return set() if con is None else {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+
+
 class Store:
     """Source-specific, known-at access; initialize=False never creates or migrates.
 

@@ -14,8 +14,10 @@ from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
-from .history_dataset import MARKETS, DatasetConfig, HistoryDataset, UnsupportedMarket, _epoch, _json
-from .operational_reads import _read, _tables
+from .evidence import canonical_json as _json
+from .history_dataset import MARKETS, DatasetConfig, HistoryDataset, UnsupportedMarket
+from .storage import database_table_names as _tables
+from .storage import read_database_if_present as _read
 
 HOUR = 3600
 _TABLE = "history_auto_repairs"
@@ -101,7 +103,8 @@ def plan_auto_repairs(database, request: AutoRepairRequest | None = None, *, mod
     """
     request = normalize_auto_repair_request(request)
     now = int(time.time()) if now is None else now
-    _epoch(now)
+    if type(now) is not int or now < 0:
+        raise ValueError("Expected a nonnegative integer UTC epoch second.")
     database, config, status = _identity(database, mode)
     base = {"status": status, "read_only": True, "data_mode": mode, "as_of": now,
             "tasks": [], "markets": [], "requests_planned": 0, "hours_planned": 0,
@@ -237,7 +240,7 @@ def run_auto_repairs(database, request: AutoRepairRequest | None = None, *, appl
         raise ValueError("Explicit apply requires an injected REST fetcher.")
     _, config, _ = _identity(database, mode)
     dataset = HistoryDataset(config, clock=clock)
-    dataset._space()
+    dataset.check_write_budget()
     with dataset.store.connection() as con:
         con.execute(f"CREATE TABLE IF NOT EXISTS {_TABLE} (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
     _reconcile(dataset, config, request.markets, int(clock()))
@@ -295,7 +298,7 @@ def run_auto_repairs(database, request: AutoRepairRequest | None = None, *, appl
 
 
 def _save(dataset, state):
-    dataset._space(len(_json(state).encode()) * 2)
+    dataset.check_write_budget(len(_json(state).encode()) * 2)
     with dataset.store.connection() as con:
         con.execute(f"INSERT OR REPLACE INTO {_TABLE} VALUES(?,?)", (state["id"], _json(state)))
 

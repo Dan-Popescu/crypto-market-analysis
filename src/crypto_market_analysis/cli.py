@@ -649,7 +649,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         config_path = args.config or (Path("observer.toml") if Path("observer.toml").exists() else None)
         settings = load_settings(config_path, args.data_dir)
-        from .capacity_cli import COMMANDS, render_capacity_report, run_capacity_command
+        from .capacity_cli import COMMANDS, capacity_exit_code, render_capacity_report, run_capacity_command
 
         if args.command in COMMANDS:
             _protect_report_output(args, settings)
@@ -665,7 +665,7 @@ def main(argv: list[str] | None = None) -> int:
                     path.write_text(text, encoding="utf-8")
                 else:
                     print(text, end="")
-            return 1 if result.get("status") == "error" else 0
+            return capacity_exit_code(args.command, result, apply=getattr(args, "apply", False))
         if args.command in ("maintain", "storage-policy", "verify-archive", "restore-archive"):
             from types import SimpleNamespace
 
