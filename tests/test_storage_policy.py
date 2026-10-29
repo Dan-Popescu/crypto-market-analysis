@@ -196,3 +196,108 @@ def test_inspection_reports_actual_utf8_payload_and_physical_files(tmp_path):
     assert status["physical"]["database_bytes"] == store.path.stat().st_size
     assert status["families"]["book_snapshots"]["payload_bytes"] > 0
     assert status["limits"]["kind"] == "admission_budgets_not_filesystem_quota"
+
+
+def test_book_budget_counter_tracks_prune_restore_and_duplicate_retries(tmp_path):
+    store = Store(tmp_path / "observer.sqlite")
+    retain_books(store, [book()])
+    with store.connection() as con:
+        size = con.execute("SELECT payload_bytes FROM book_snapshot_usage").fetchone()[0]
+    store.storage_policy = replace(StoragePolicy(), book_hot_max_bytes=size)
+    assert retain_books(store, [book()]) == 0
+    with pytest.raises(ValueError, match="Book hot byte budget"):
+        retain_books(store, [book(at=2)])
+    path = archive_one(store)
+    with store.connection() as con:
+        assert con.execute("SELECT payload_bytes FROM book_snapshot_usage").fetchone()[0] == 0
+    assert restore_archive(path, store, apply=True)["inserted_rows"] == 1
+    with store.connection() as con:
+        assert con.execute("SELECT payload_bytes FROM book_snapshot_usage").fetchone()[0] == size
+
+
+def test_journal_growth_guard_preserves_immutable_idempotent_retries(tmp_path):
+    store = Store(tmp_path / "observer.sqlite")
+    journal = AssessmentJournal(store)
+    issued = journal.issue("request", {"synthetic": True}, {}, issued_at=1)
+    outcome = journal.append_outcome(issued["assessment_id"], "outcome", {}, observed_at=2)
+    store.storage_policy = replace(StoragePolicy(), hot_max_bytes=1)
+    assert journal.issue("request", {"synthetic": True}, {}, issued_at=99) == issued
+    assert journal.append_outcome(issued["assessment_id"], "outcome", {}, observed_at=99) == outcome
+    with pytest.raises(ValueError, match="Hot SQLite/WAL"):
+        journal.issue("request-new", {"synthetic": True}, {}, issued_at=3)
+    with pytest.raises(ValueError, match="Hot SQLite/WAL"):
+        journal.append_outcome(issued["assessment_id"], "outcome-new", {}, observed_at=3)
+    assert journal.get(issued["assessment_id"]) == issued
+    assert journal.outcomes(issued["assessment_id"]) == [outcome]
+
+
+def test_archive_file_quota_and_bounded_reader_report_incomplete_selection(tmp_path):
+    store = Store(tmp_path / "observer.sqlite")
+    retain_books(store, [book()])
+    archive_one(store, batch_rows=1)
+    retain_books(store, [book(at=2)])
+    with pytest.raises(ValueError, match="Archive byte budget"):
+        archive_one(store, batch_rows=1, archive_max_files=1)
+    archive_one(store, batch_rows=1)
+    selected = read_archived_books(store.path, **selectors(), max_archives=1)
+    assert selected["coverage"] == {"archives_scanned": 1, "archives_truncated": True, "selection_complete": False}
+    assert read_archived_books(store.path, **selectors(), max_archives=2)["books"] == [book(at=2)]
+
+
+def test_wal_bytes_count_toward_hot_admission(tmp_path):
+    import sqlite3
+
+    store = Store(tmp_path / "observer.sqlite")
+    retain_books(store, [book()])
+    reader = sqlite3.connect(store.path)
+    writer = sqlite3.connect(store.path)
+    try:
+        reader.execute("BEGIN")
+        reader.execute("SELECT * FROM book_snapshots").fetchall()
+        writer.execute("INSERT INTO runs(source,task,observed_at,payload) VALUES('test','test',1,?)", ("x" * 50000,))
+        writer.commit()
+        sizes = physical_storage(store.path)
+        assert sizes["wal_bytes"] > 0
+        store.storage_policy = replace(StoragePolicy(), write_reserve_bytes=1,
+                                       hot_max_bytes=sizes["hot_bytes"] - sizes["wal_bytes"] + 1)
+        with pytest.raises(ValueError, match="Hot SQLite/WAL"):
+            retain_books(store, [book(at=2)])
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_dense_liquidity_hour_refuses_unbounded_compaction_and_preserves_raw(tmp_path):
+    from crypto_market_analysis.retention import compact_liquidity
+
+    store = Store(tmp_path / "observer.sqlite")
+    # Different sources preserve 4097 distinct observations within one UTC hour.
+    store.put_observations([Observation(f"synthetic-{n}", "BTC", "spread_bps", 1, 1, 1, "bps")
+                            for n in range(4097)])
+    with pytest.raises(ValueError, match="compaction bound"):
+        compact_liquidity(store, now=10 * DAY)
+    assert store.counts()["observations"] == 4097
+    assert not archive_directory(store.path).exists()
+
+
+def test_inspection_commands_never_initialize_missing_database(tmp_path, capsys):
+    assert main(["--data-dir", str(tmp_path), "maintain"]) == 2
+    assert "existing database" in capsys.readouterr().err
+    assert not (tmp_path / "observer.sqlite").exists()
+    assert main(["--data-dir", str(tmp_path), "storage-policy"]) == 2
+    assert not (tmp_path / "observer.sqlite").exists()
+
+
+def test_pruning_all_books_never_reuses_ids_or_breaks_archive_tie_selection(tmp_path):
+    store = Store(tmp_path / "observer.sqlite")
+    retain_books(store, [book()])
+    first = archive_one(store)
+    later = retained_book({"timestamp": 1000, "bids": [["99", "1"]], "asks": [["103", "1"]]},
+                          source="kraken", asset="BTC", quote="EUR", symbol="BTC/EUR", captured_at=1,
+                          requested_limit=500)
+    retain_books(store, [later])
+    with store.connection() as con:
+        assert con.execute("SELECT id FROM book_snapshots").fetchone()[0] == 2
+    second = archive_one(store)
+    assert first != second
+    assert read_archived_books(store.path, **selectors())["books"] == [later]

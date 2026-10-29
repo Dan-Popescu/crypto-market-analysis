@@ -153,13 +153,17 @@ def retain_books(store: Store, snapshots: list[dict]) -> int:
         # A transactional byte counter avoids rescanning all retained payloads on
         # every capture; migration counts legacy rows once and triggers track deletes.
         con.execute("""CREATE TABLE IF NOT EXISTS book_snapshot_usage (
-            singleton INTEGER PRIMARY KEY CHECK(singleton=1), payload_bytes INTEGER NOT NULL)""")
-        usage = con.execute("SELECT payload_bytes FROM book_snapshot_usage WHERE singleton=1").fetchone()
+            singleton INTEGER PRIMARY KEY CHECK(singleton=1), payload_bytes INTEGER NOT NULL, last_id INTEGER NOT NULL)""")
+        if "last_id" not in {column[1] for column in con.execute("PRAGMA table_info(book_snapshot_usage)")}:
+            con.execute("ALTER TABLE book_snapshot_usage ADD COLUMN last_id INTEGER NOT NULL DEFAULT 0")
+            con.execute("UPDATE book_snapshot_usage SET last_id=(SELECT COALESCE(MAX(id),0) FROM book_snapshots)")
+        usage = con.execute("SELECT payload_bytes,last_id FROM book_snapshot_usage WHERE singleton=1").fetchone()
         if usage is None:
             current = con.execute("SELECT COALESCE(SUM(length(CAST(payload AS BLOB))),0) FROM book_snapshots").fetchone()[0]
-            con.execute("INSERT INTO book_snapshot_usage VALUES(1,?)", (current,))
+            last_id = con.execute("SELECT COALESCE(MAX(id),0) FROM book_snapshots").fetchone()[0]
+            con.execute("INSERT INTO book_snapshot_usage VALUES(1,?,?)", (current, last_id))
         else:
-            current = usage[0]
+            current, last_id = usage
         con.execute("""CREATE TRIGGER IF NOT EXISTS book_snapshot_usage_insert AFTER INSERT ON book_snapshots
             BEGIN UPDATE book_snapshot_usage SET payload_bytes=payload_bytes+length(CAST(NEW.payload AS BLOB)) WHERE singleton=1; END""")
         con.execute("""CREATE TRIGGER IF NOT EXISTS book_snapshot_usage_delete AFTER DELETE ON book_snapshots
@@ -173,12 +177,16 @@ def retain_books(store: Store, snapshots: list[dict]) -> int:
         if new_bytes and current + new_bytes > policy.book_hot_max_bytes:
             raise ValueError("Book hot byte budget exceeded; explicit archive maintenance required.")
         for row in rows:
-            inserted += con.execute("""INSERT OR IGNORE INTO book_snapshots
-                (source,asset,quote,data_mode,captured_at,event_time,content_hash,payload)
-                VALUES(?,?,?,?,?,?,?,?)""", (
-                row["source"], row["asset"], row["quote"], row["data_mode"], row["captured_at"],
+            count = con.execute("""INSERT OR IGNORE INTO book_snapshots
+                (id,source,asset,quote,data_mode,captured_at,event_time,content_hash,payload)
+                VALUES(?,?,?,?,?,?,?,?,?)""", (
+                last_id + 1, row["source"], row["asset"], row["quote"], row["data_mode"], row["captured_at"],
                 row["event_time"], row["content_hash"], _json(row),
             )).rowcount
+            inserted += count
+            last_id += count
+        if inserted:
+            con.execute("UPDATE book_snapshot_usage SET last_id=? WHERE singleton=1", (last_id,))
     return inserted
 
 

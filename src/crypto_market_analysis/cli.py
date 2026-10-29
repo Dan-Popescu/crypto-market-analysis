@@ -649,6 +649,8 @@ def main(argv: list[str] | None = None) -> int:
             )
 
             policy = StoragePolicy.from_settings(settings)
+            if args.command == "maintain" and args.keep_days is not None and not 1 <= args.keep_days <= 365:
+                raise ValueError("keep_days must be between 1 and 365.")
             if args.command == "verify-archive":
                 checked = verify_archive(args.archive)
                 write_json({key: value for key, value in checked.items() if key != "rows"})
@@ -668,7 +670,7 @@ def main(argv: list[str] | None = None) -> int:
                     if args.apply:
                         from .retention import compact_liquidity
 
-                        result["liquidity"] = compact_liquidity(store, args.keep_days or settings.liquidity_retention_days)
+                        result["liquidity"] = compact_liquidity(store, args.keep_days if args.keep_days is not None else settings.liquidity_retention_days)
                     result["storage"] = inspect_storage(settings.database, policy)
                     write_json(result)
             return 0

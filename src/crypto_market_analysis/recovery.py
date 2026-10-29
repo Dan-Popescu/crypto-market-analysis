@@ -487,6 +487,8 @@ def verify_backup(bundle: Path) -> dict:
         archive_inventory = manifest.get("retention_archives", {})
         if not isinstance(archive_inventory, dict) or len(archive_inventory) > 4096:
             raise ValueError("Invalid recovery retention archive inventory.")
+        if sum(info["bytes"] for info in archive_inventory.values()) > 4 * 1024**3:
+            raise ValueError("Recovery retention archive inventory exceeds its byte bound.")
         archive_name = Path(DATABASE_NAME).stem + "-archives"
         extra = {archive_name} if archive_inventory else set()
         if {path.name for path in bundle.iterdir()} != {*files, _MANIFEST, *extra}:
