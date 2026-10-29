@@ -281,7 +281,14 @@ def maintain_storage(store, policy: StoragePolicy | None = None, *, apply: bool 
                                     ("runs", "observed_at", policy.run_keep_days)):
             if family not in tables:
                 continue
-            extra = " AND id NOT IN (SELECT MAX(id) FROM runs GROUP BY source,task)" if family == "runs" else ""
+            # Restores assign new local IDs, and demo runs must never displace
+            # the latest live clock. Unknown legacy modes remain a separate slot.
+            extra = """ AND id NOT IN (SELECT id FROM (
+                SELECT id,ROW_NUMBER() OVER (PARTITION BY source,task,
+                    CASE WHEN json_extract(payload,'$.data_mode') IN ('live','demo','import')
+                    THEN json_extract(payload,'$.data_mode') ELSE 'unknown' END
+                    ORDER BY observed_at DESC,id DESC) AS position FROM runs
+                ) WHERE position=1)""" if family == "runs" else ""
             rows = con.execute(f'SELECT * FROM "{family}" WHERE "{clock}"<?{extra} ORDER BY "{clock}",id LIMIT ?',
                                (now - days * 86400, policy.batch_rows)).fetchall()
             batch = _batch(rows, policy)
@@ -315,12 +322,25 @@ def restore_archive(path: Path, store, *, apply: bool = False) -> dict:
             inserted = retain_books(store, [json.loads(row["payload"]) for row in rows])
         else:
             with store.connection() as con:
-                check_write_budget(con, store.path, policy=getattr(store, "storage_policy", None),
-                                   payload_bytes=sum(len(row["payload"].encode()) for row in rows))
+                con.execute("BEGIN IMMEDIATE")
                 columns = [name for name in _ALLOWED[family] if name != "id"]
+                identity = ("source", "task", "observed_at") if family == "runs" else (
+                    "source", "asset", "metric", "event_time", "data_mode", "dimension", "observed_at", "fingerprint")
+                predicate = " AND ".join(f'"{name}"=?' for name in (*identity, "payload"))
+                missing, seen = [], set()
                 for row in rows:
-                    if con.execute(f'SELECT 1 FROM "{family}" WHERE payload=? LIMIT 1', (row["payload"],)).fetchone():
+                    if row["payload"] in seen:
                         continue
+                    seen.add(row["payload"])
+                    # Indexed identity predicates bound duplicate checks to one
+                    # event/run version instead of scanning every stored payload.
+                    if not con.execute(f'SELECT 1 FROM "{family}" WHERE {predicate} LIMIT 1',
+                                       [row[name] for name in (*identity, "payload")]).fetchone():
+                        missing.append(row)
+                if missing:
+                    check_write_budget(con, store.path, policy=getattr(store, "storage_policy", None),
+                                       payload_bytes=sum(len(row["payload"].encode()) for row in missing))
+                for row in missing:
                     con.execute(f'INSERT INTO "{family}" ({",".join(columns)}) VALUES ({",".join("?" for _ in columns)})',
                                 [row[name] for name in columns])
                     inserted += 1

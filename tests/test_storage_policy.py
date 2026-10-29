@@ -301,3 +301,45 @@ def test_pruning_all_books_never_reuses_ids_or_breaks_archive_tie_selection(tmp_
     second = archive_one(store)
     assert first != second
     assert read_archived_books(store.path, **selectors())["books"] == [later]
+
+
+def test_run_retention_preserves_latest_available_clock_per_mode_not_max_id(tmp_path):
+    store = Store(tmp_path / "observer.sqlite")
+    # An old restored live run has a higher ID than the latest live clock.
+    # Later demo/import/legacy modes each retain their own scheduling evidence.
+    clocks = [(300, "live"), (100, "live"), (400, "demo"), (200, "demo"),
+              (350, "import"), (50, "import"), (250, None), (10, None)]
+    with store.connection() as con:
+        for at, mode in clocks:
+            payload = {"source": "kraken", "task": "options", "observed_at": at}
+            if mode is not None:
+                payload["data_mode"] = mode
+            con.execute("INSERT INTO runs(source,task,observed_at,payload) VALUES(?,?,?,?)",
+                        ("kraken", "options", at, json.dumps(payload)))
+    result = maintain_storage(store, apply=True, now=40 * DAY)
+    assert result["families"][0]["deleted_rows"] == 4
+    with store.connection() as con:
+        retained = {(row["observed_at"], json.loads(row["payload"]).get("data_mode"))
+                    for row in con.execute("SELECT observed_at,payload FROM runs")}
+    assert retained == {(300, "live"), (400, "demo"), (350, "import"), (250, None)}
+
+
+@pytest.mark.parametrize("family", ["runs", "observations"])
+def test_restored_archive_duplicate_retry_bypasses_exceeded_quota(tmp_path, family):
+    store = Store(tmp_path / "observer.sqlite")
+    if family == "runs":
+        store.record_run(CollectionResult("kraken"), "options", 1)
+    else:
+        store.put_observations([Observation("kraken", "BTC", "spread_bps", 1, 1, 100, "bps")])
+    with store.connection() as con:
+        rows = [dict(row) for row in con.execute(f'SELECT * FROM "{family}"')]
+    path = archive_rows(store, family, rows)
+    with store.connection() as con:
+        con.execute(f'DELETE FROM "{family}"')
+    assert restore_archive(path, store, apply=True)["inserted_rows"] == 1
+    store.storage_policy = replace(StoragePolicy(), hot_max_bytes=1, archive_max_bytes=1)
+    before = store.path.read_bytes()
+    assert restore_archive(path, store, apply=True)["inserted_rows"] == 0
+    assert store.path.read_bytes() == before
+    with store.connection() as con:
+        assert con.execute(f'SELECT COUNT(*) FROM "{family}"').fetchone()[0] == 1
