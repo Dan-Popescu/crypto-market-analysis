@@ -241,6 +241,94 @@ class Engine:
     def collect_calendar(self):
         return self.accumulation.collect_calendar()
 
+    def capture_books(self, *, sources, assets, quotes, as_of=None, clients=None):
+        """Explicit local network capture with the actual capture clock."""
+        from .collectors import capture_books
+
+        if self.mode != "live" or as_of is not None:
+            raise ValueError("Book capture requires live mode without as_of.")
+        result = capture_books(self.store, sources=sources, assets=assets, quotes=tuple(quotes), clients=clients)
+        failed = any(row.get("errors") for row in result["reports"])
+        status = "partial" if failed and result["inserted_books"] else "error" if failed else "ok"
+        return {**result, "status": status}
+
+    def collect_official_context(self, *, venues=("kraken",), include=("fx", "calendar"),
+                                 max_requests=12, as_of=None, client=None, clients=None):
+        """Capture and persist bounded official references and sourced calendars."""
+        from .calendars import collect_calendars
+        from .official_context import OfficialHTTP, capture_official_context
+
+        if self.mode != "live" or as_of is not None:
+            raise ValueError("Official collection requires live mode without as_of.")
+        if (not include or len(set(include)) != len(include)
+                or set(include) - {"fx", "calendar", "stablecoins"}):
+            raise ValueError("include requires distinct fx, calendar or stablecoins entries.")
+        if type(max_requests) is not int or not 1 <= max_requests <= 32:
+            raise ValueError("max_requests must be between 1 and 32.")
+        # Calendar has three bounded public sources; reserve its request budget.
+        context_include = tuple(item for item in include if item != "calendar")
+        calendar_budget = 3 if "calendar" in include else 0
+        if max_requests < calendar_budget + bool(context_include):
+            raise ValueError("The request budget cannot cover the selected context families.")
+        now = int(time.time())
+        owned = client is None
+        client = OfficialHTTP() if owned else client
+        try:
+            result = (capture_official_context(client=client, clients=clients,
+                       venues=tuple(venues), include=context_include,
+                       max_requests=max_requests - calendar_budget)
+                      if context_include else {"status": "ok", "observed_at": now, "errors": [], "warnings": []})
+            inserted = {"fx_reference": 0, "stablecoin_price": 0, "calendar": 0}
+            if result.get("fx_reference"):
+                inserted["fx_reference"] += self.store.save_local_record("fx_reference", result["fx_reference"])["inserted"]
+            for record in result.get("stablecoin_prices", []):
+                inserted["stablecoin_price"] += self.store.save_local_record("stablecoin_price", record)["inserted"]
+            if "calendar" in include:
+                calendar = collect_calendars(int(time.time()), client=client, include_ecb=True)
+                result["calendar"] = calendar
+                for event in calendar.get("events", []):
+                    inserted["calendar"] += self.store.save_local_record("calendar", event)["inserted"]
+                result["errors"] = [*result.get("errors", []), *calendar.get("errors", [])]
+            if result.get("errors"):
+                result["status"] = "partial" if any(inserted.values()) else "error"
+            return {**result, "inserted": inserted, "data_mode": "live", "include": list(include),
+                    "max_logical_requests": max_requests,
+                    "logical_requests": result.get("logical_requests", 0) + calendar_budget,
+                    "budget_scope": "Adapter operations; catalogue internals may make multiple HTTP requests."}
+        finally:
+            if owned:
+                client.close()
+
+    def stored_derivatives(self, request, as_of=None):
+        from .reporting import bounded_as_of, bounded_object
+        from .stored_analysis import analyze_stored_derivatives
+
+        return analyze_stored_derivatives(self.store, bounded_object(request), bounded_as_of(as_of))
+
+    def stored_quotes(self, request, as_of=None):
+        from .reporting import bounded_as_of, bounded_object
+        from .stored_analysis import analyze_stored_quotes
+
+        return analyze_stored_quotes(self.store, bounded_object(request), bounded_as_of(as_of))
+
+    def stored_venues(self, request, as_of=None):
+        from .reporting import bounded_as_of, bounded_object
+        from .stored_analysis import analyze_stored_venues
+
+        return analyze_stored_venues(self.store, bounded_object(request), bounded_as_of(as_of))
+
+    def qualify_sources(self, request, as_of=None):
+        from .qualification import qualify_sources
+        from .reporting import bounded_as_of, bounded_object
+
+        return qualify_sources(self.store, bounded_object(request), bounded_as_of(as_of))
+
+    def local_workflow(self, request):
+        from .local_workflow import run_local_workflow
+        from .reporting import bounded_object
+
+        return run_local_workflow(self.settings, bounded_object(request))
+
     def predictions(
         self,
         asset: str,

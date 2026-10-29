@@ -977,6 +977,94 @@ def _derivatives_context(lines, result):
     _table(lines, ["Series", "Horizon", "Status", "Start cutoff UTC", "Start event UTC", "Start value", "End event UTC", "End value", "Native change", "Change unit", "Endpoint skew seconds"], comparisons)
 
 
+def _stored_evidence(lines, result):
+    stored = result.get("stored_inputs", {})
+    lines.extend(["", "Local stored evidence only. Missing records, clocks, fees and product rules remain unknown."])
+    selected = {key: stored[key] for key in ("selection", "watermark", "input_hash", "hash_scope",
+                "input_references", "truncation", "read_only") if key in stored}
+    _details(lines, "Stored evidence selection and provenance", selected, result.get("quote", "unknown"))
+    unknown = stored.get("unknown_inputs", [])
+    _table(lines, ["Unknown source", "Record kind", "Input reference", "Reason"],
+           [[row.get("source", row.get("payload", {}).get("source")), row.get("kind"),
+             row.get("input_reference"), row.get("status", row.get("reason"))] for row in unknown])
+    lines.append(f"Exact consumed records remain in JSON: {len(stored.get('consumed_records', []))}.")
+
+
+def _qualification(lines, result):
+    lines.extend(["", "Qualification gates use the selected native market and data mode. Runtime access, history coverage, reuse rights and French purchase eligibility are independent."])
+    rows = result.get("markets", [])
+    _table(lines, ["Market", "Source", "Mode", "Gate", "Available hours", "Missing hours", "Freshness", "Source access", "Reasons"],
+           [[row.get("market"), row.get("source"), row.get("data_mode"), row.get("status"),
+             row.get("coverage", {}).get("available_hours"), row.get("coverage", {}).get("missing_hours"),
+             _display(row.get("freshness")), row.get("source_access", {}).get("status"),
+             _display(row.get("reasons", []))] for row in rows])
+    for row in rows:
+        lines.extend(["", f"## {row.get('market', 'unknown')} — {row.get('source', 'unknown')}"])
+        for key in ("coverage", "capability", "rights", "regulatory_eligibility", "evidence"):
+            _details(lines, _label(key), row.get(key, {}), row.get("quote", "unknown"))
+    _details(lines, "Resource bounds and qualification limits", result.get("resources", {}), "unknown")
+    lines.extend(["", f"Qualification provenance: {_display(result.get('evidence_reference'))}.",
+                  f"Qualification watermark: {_display(result.get('watermark'))}."])
+
+
+def _connection_capture(lines, result, kind):
+    lines.extend(["", "Actual-clock public capture. Data access, reuse permission and purchase eligibility require independent evidence."])
+    if kind == "capture-books":
+        lines.append(f"Retained snapshots: {_display(result.get('inserted_books'))}. Whole-book completeness: {_display(result.get('whole_book_completeness'))}.")
+        lines.append(f"Aggregate liquidity observations inserted from the same responses: {_display(result.get('inserted_observations'))}.")
+        _table(lines, ["Source", "Captured books", "Inserted books", "Access errors", "Warnings"],
+               [[row.get("source"), row.get("captured_books"), row.get("inserted_books"),
+                 _display(row.get("errors", [])), _display(row.get("warnings", []))]
+                for row in result.get("reports", [])])
+    else:
+        _details(lines, "Persisted reference counts", result.get("inserted", {}), "unknown")
+        fx = result.get("fx_reference") or {}
+        _table(lines, ["FX source", "Native pair", "Value", "Event UTC", "Source date", "Captured UTC", "Version"],
+               [[fx.get("source"), f"{fx.get('base', 'unknown')}/{fx.get('quote', 'unknown')}",
+                 fx.get("value"), _date(fx.get("event_time")), fx.get("source_date"),
+                 _date(fx.get("observed_at")), fx.get("data_version")]])
+        _table(lines, ["Source", "Token", "Native quote", "Value", "Event UTC", "Captured UTC", "Version"],
+               [[row.get("source"), row.get("base"), row.get("quote"), row.get("value"),
+                 _date(row.get("event_time")), _date(row.get("observed_at")), row.get("data_version")]
+                for row in result.get("stablecoin_prices", [])])
+        calendar = result.get("calendar", {})
+        _table(lines, ["Calendar source", "Title", "Event UTC", "Captured UTC", "Clock qualification"],
+               [[row.get("source"), row.get("title"), _date(row.get("event_time", row.get("time"))),
+                 _date(row.get("observed_at")), _display(row.get("time_precision", "inspect sourced evidence"))]
+                for row in calendar.get("events", [])])
+        for key in ("receipts", "errors", "warnings"):
+            if result.get(key):
+                lines.extend(["", f"{_label(key)}: {_display(result[key])}."])
+        lines.append("Date-only references do not establish an exact publication clock. Calendar coverage may be incomplete.")
+
+
+def _local_workflow(lines, result):
+    lines.extend(["", f"Refresh requested: {_display(result.get('refresh'))}. Assessment issuance requires explicit opt-in and an idempotency key."])
+    collection = result.get("collection")
+    if collection:
+        _details(lines, "Collection and access errors", collection, "unknown")
+    if isinstance(result.get("qualification"), dict):
+        _qualification(lines, result["qualification"])
+    for market in result.get("markets", []):
+        lines.extend(["", f"## {market.get('market', 'unknown')} — {market.get('source', 'unknown')}",
+                      f"Mode: {_display(market.get('data_mode'))}; gate: {_display(market.get('status'))}."])
+        _details(lines, "Issuance", market.get("issuance") or {}, market.get("quote", "unknown"))
+        if market.get("error"):
+            lines.append(f"Analysis error: {_display(market['error'])}.")
+        brief = market.get("accumulation_brief")
+        if isinstance(brief, dict):
+            lines.extend(["", render_accumulation_report(brief, "accumulation-brief").replace("# ", "### ")])
+        for name, analysis in (market.get("analyses") or {}).items():
+            if isinstance(analysis, dict):
+                kind = {"derivatives": "stored-derivatives", "quotes": "stored-quotes",
+                        "venue_costs": "stored-venue-costs", "venues": "stored-venue-disagreement",
+                        "venue_disagreement": "stored-venue-disagreement"}.get(name)
+                if kind:
+                    lines.extend(["", render_accumulation_report(analysis, kind).replace("# ", "### ")])
+    if result.get("errors"):
+        lines.extend(["", f"Workflow errors: {_display(result['errors'])}."])
+
+
 def render_accumulation_report(result: dict, kind: str) -> str:
     """Render public calculation or journal envelopes without changing exact JSON."""
     envelope = result
@@ -994,9 +1082,9 @@ def render_accumulation_report(result: dict, kind: str) -> str:
         lines[2] = f"Shared cash envelope: {quote}. Declared plans: {len(result.get('plans', []))}."
     elif kind == "journal-scorecard":
         lines[2] = "Native markets, modes, chronology and policy cohorts remain separate."
-    elif kind == "quote-context":
+    elif kind in ("quote-context", "stored-quotes"):
         lines[2] = "Explicit native EUR/USD and stablecoin observations; indicative reference context."
-    elif kind == "derivatives-context":
+    elif kind in ("derivatives-context", "stored-derivatives"):
         lines[2] = f"Asset: {result.get('asset', 'unknown')}. Source and native dimensions remain separate in each series."
     if mode in ("demo", "synthetic"):
         lines.append("SYNTHETIC DEMONSTRATION: these observations are not live market evidence.")
@@ -1013,23 +1101,30 @@ def render_accumulation_report(result: dict, kind: str) -> str:
         "input_truncation",
         "replay",
         "reason",
+        "error",
         "historical_calculation",
         "historical_availability_verified",
     ):
         if key in result:
             value = _date(result[key]) if key == "expires_at" else _display(result[key])
             lines.append(f"{_label(key)}: {value}.")
-    if kind == "journal-scorecard":
+    if kind in ("capture-books", "collect-official-context"):
+        _connection_capture(lines, result, kind)
+    elif kind == "qualify-sources":
+        _qualification(lines, result)
+    elif kind == "local-workflow":
+        _local_workflow(lines, result)
+    elif kind == "journal-scorecard":
         _scorecard(lines, result)
     elif kind == "budget-preview":
         _budget(lines, result, quote)
-    elif kind == "quote-context":
+    elif kind in ("quote-context", "stored-quotes"):
         _quote_context(lines, result)
-    elif kind in ("purchase-costs", "venue-disagreement"):
-        _venue_panel(lines, result, quote, purchase=kind == "purchase-costs")
+    elif kind in ("purchase-costs", "venue-disagreement", "stored-venue-costs", "stored-venue-disagreement"):
+        _venue_panel(lines, result, quote, purchase=kind in ("purchase-costs", "stored-venue-costs"))
     elif kind == "replay-assessment":
         _replay(lines, result)
-    elif kind == "derivatives-context":
+    elif kind in ("derivatives-context", "stored-derivatives"):
         _derivatives_context(lines, result)
     elif result is not envelope or kind in ("issue", "assessment", "observe"):
         _nested(lines, result, quote)
@@ -1070,6 +1165,8 @@ def render_accumulation_report(result: dict, kind: str) -> str:
         for key in ("state", "reasons", "supporting_evidence", "missing_sources", "summary", "comparisons"):
             if key in result:
                 lines.append(f"{_label(key)}: {_display(result[key])}.")
+    if kind.startswith("stored-"):
+        _stored_evidence(lines, result)
     for key in ("contradictions", "contradictory_evidence", "limitations", "assumptions"):
         if result.get(key):
             lines.extend(["", f"{_label(key)}:", ""])

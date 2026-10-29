@@ -93,6 +93,41 @@ def _write_result(result: dict, args) -> None:
             print(text, end="")
 
 
+def _stored_request(args) -> dict:
+    request = dict(_json_file(args.request)) if args.request else {}
+    for key in ("asset", "quote", "source", "sources"):
+        value = getattr(args, key, None)
+        if value is not None:
+            value = value.split(",") if key == "sources" else value
+            if key in request and request[key] != value:
+                raise ValueError(f"--{key} conflicts with the JSON request.")
+            request[key] = value
+    request.setdefault("data_mode", args.mode)
+    if args.command.startswith("stored-venue-"):
+        analysis = "purchase_costs" if args.command == "stored-venue-costs" else "disagreement"
+        if "analysis" in request and request["analysis"] != analysis:
+            raise ValueError("The JSON analysis conflicts with the selected command.")
+        request["analysis"] = analysis
+    return bounded_object(request, "stored analysis request")
+
+
+def _protect_report_output(args, settings) -> None:
+    """Do not allow report output to overwrite the SQLite evidence store."""
+    if not args.output:
+        return
+    output, database = Path(args.output).resolve(), settings.database.resolve()
+    protected = {database, Path(str(database) + "-wal"), Path(str(database) + "-shm"),
+                 settings.data_dir.resolve() / "dataset.json"}
+    request_path = getattr(args, "request", None)
+    dataset = settings.data_dir.resolve() / "dataset.json"
+    recovery_bundle = any((parent / "manifest.json").is_file() for parent in output.parents)
+    if (output in protected or (request_path and output == request_path.resolve())
+            or (dataset.is_file() and output.is_relative_to(settings.data_dir.resolve()))
+            or recovery_bundle
+            or (output.exists() and output.suffix.lower() in (".payload", ".sqlite", ".sqlite3", ".db", ".parquet"))):
+        raise ValueError("Report output must not overwrite the database, its sidecars, dataset identity or request.")
+
+
 def _history_operation(args) -> dict:
     from .history_dataset import ArchivePart, DatasetConfig, HistoryDataset, KrakenRESTCapture
 
@@ -344,6 +379,43 @@ def parser() -> argparse.ArgumentParser:
                           "crypto-market-analysis derivatives-context --request derivatives.json")
     for p in (budget, purchase_costs, disagreement, quote_context, derivatives):
         p.add_argument("--request", type=Path, required=True, help="Explicit bounded JSON object; no collection")
+    capture_books = command("capture-books", "Explicit one-shot public ask/bid snapshot capture into SQLite; live clock only.",
+                            "crypto-market-analysis capture-books --sources kraken --assets BTC,ETH --quotes EUR,USD")
+    capture_books.add_argument("--sources", required=True, help="Comma-separated venue IDs; no purchase eligibility implied")
+    capture_books.add_argument("--assets", required=True, help="Explicit comma-separated BTC,ETH subset")
+    capture_books.add_argument("--quotes", required=True, help="Explicit native EUR,USD,USDT,USDC subset; no conversion")
+    official = command("collect-official-context", "Explicit bounded capture of official FX, calendars and optional stablecoin tickers.",
+                       "crypto-market-analysis collect-official-context --include fx,calendar --max-requests 12")
+    official.add_argument("--include", default="fx,calendar", help="Distinct fx,calendar,stablecoins families; defaults to fx,calendar")
+    official.add_argument("--venues", default="kraken", help="At most four public ticker venues when stablecoins is selected")
+    official.add_argument("--max-requests", type=int, default=12, help="Logical adapter operation ceiling, 1–32; calendars reserve three operations; not a wire HTTP limit")
+    stored = []
+    for name, description in (
+        ("stored-derivatives", "Read fixed native derivatives endpoints from SQLite; no network."),
+        ("stored-quotes", "Read selected native quote references from SQLite; no implicit conversion or network."),
+        ("stored-venue-costs", "Read retained ask ladders with caller-declared fees; unknown fees remain unknown."),
+        ("stored-venue-disagreement", "Read contemporaneous retained native-quote venue snapshots; no network."),
+    ):
+        p = command(name, description, f"crypto-market-analysis {name} --request request.json --as-of 1793145600")
+        p.add_argument("--request", type=Path, help="Bounded selector/policy JSON; JSON data_mode takes precedence over --mode. Costs require budget; assumptions_by_source supplies fees, otherwise unknown")
+        p.add_argument("--asset", choices=("BTC", "ETH"), help="Native asset (required for derivatives and venue views)")
+        p.add_argument("--quote", choices=("EUR", "USD", "USDT", "USDC"), help="Explicit native quote; no conversion")
+        if name == "stored-derivatives":
+            p.add_argument("--source", help="Required explicit derivative source, for example binanceusdm")
+        else:
+            p.add_argument("--sources", help="Required distinct comma-separated quote/venue sources, for example ecb,kraken")
+        stored.append(p)
+    qualification = command("qualify-sources", "Read-only source/history/resource qualification; no network or issuance.",
+                            "crypto-market-analysis qualify-sources --request qualification.json")
+    workflow = command("local-workflow", "Run a bounded local report; request refresh and assessment issuance are explicit opt-ins.",
+                       "crypto-market-analysis local-workflow --request workflow.json --format markdown")
+    qualification.add_argument("--request", type=Path, required=True,
+                               help="JSON: sources, markets (native BTC/EUR etc), data_mode, required_history_days and resource bounds")
+    workflow.add_argument("--request", type=Path, required=True,
+                          help="JSON: refresh defaults false; live refresh forbids as_of; issue_assessments requires idempotency_key")
+    for p in (capture_books, official, *stored, qualification, workflow):
+        p.add_argument("--format", choices=("json", "markdown"), default="json")
+        p.add_argument("--output", help="Report path; omission writes stdout")
     backup = command("backup", "Create and verify an explicit SQLite recovery bundle.",
                      "crypto-market-analysis backup --database data/observer.sqlite --destination recovery")
     backup.add_argument("--database", type=Path, required=True)
@@ -553,9 +625,42 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         config_path = args.config or (Path("observer.toml") if Path("observer.toml").exists() else None)
         settings = load_settings(config_path, args.data_dir)
+        if args.command in ("capture-books", "collect-official-context"):
+            if args.mode != "live" or args.as_of is not None:
+                raise ValueError("Network capture requires --mode live without --as-of.")
+        if args.command in ("capture-books", "collect-official-context", "qualify-sources", "local-workflow") or args.command.startswith("stored-"):
+            _protect_report_output(args, settings)
         engine = Engine(settings, args.mode)
         now = args.as_of if args.as_of is not None else int(datetime.now(UTC).timestamp())
-        if args.command == "context":
+        if args.command == "capture-books":
+            result = engine.capture_books(sources=args.sources.split(","), assets=args.assets.split(","),
+                                          quotes=args.quotes.split(","))
+            _write_result(result, args)
+            return 1 if result.get("status") == "error" else 0
+        elif args.command == "collect-official-context":
+            result = engine.collect_official_context(venues=args.venues.split(","),
+                          include=args.include.split(","), max_requests=args.max_requests)
+            _write_result(result, args)
+            return 1 if result.get("status") == "error" else 0
+        elif args.command.startswith("stored-"):
+            request = _stored_request(args)
+            operation = {"stored-derivatives": engine.stored_derivatives, "stored-quotes": engine.stored_quotes,
+                         "stored-venue-costs": engine.stored_venues,
+                         "stored-venue-disagreement": engine.stored_venues}[args.command]
+            _write_result(operation(request, args.as_of), args)
+        elif args.command == "qualify-sources":
+            request = dict(_json_file(args.request))
+            request.setdefault("data_mode", args.mode)
+            _write_result(engine.qualify_sources(request, args.as_of), args)
+        elif args.command == "local-workflow":
+            request = dict(_json_file(args.request))
+            request.setdefault("data_mode", args.mode)
+            if args.as_of is not None:
+                if "as_of" in request and request["as_of"] != args.as_of:
+                    raise ValueError("--as-of conflicts with the workflow JSON request.")
+                request["as_of"] = args.as_of
+            _write_result(engine.local_workflow(request), args)
+        elif args.command == "context":
             lookbacks = bounded_integers(_csv_numbers(args.lookbacks, int), "lookbacks", 3650, 16)
             _write_result(engine.context(args.asset, args.source, args.quote, args.as_of, lookbacks), args)
         elif args.command == "accumulation-brief":

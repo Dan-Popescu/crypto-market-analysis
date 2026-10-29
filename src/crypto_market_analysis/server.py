@@ -235,6 +235,39 @@ def create_server(
         return analyze_derivatives_context(bounded_object(request, "derivatives request"), bounded_as_of(as_of))
 
     @server.tool(annotations=readonly)
+    def get_stored_derivatives(request: dict[str, Any], as_of: StrictInt | None = None) -> dict[str, Any]:
+        """Read bounded SQLite derivatives known at the cutoff. JSON requires asset, source, native quote and data_mode; optional policy controls endpoint age/skew. No network or paths. Native contract units remain separate; missing endpoints stay unknown."""
+        return engine.stored_derivatives(bounded_object(request, "stored derivatives request"), bounded_as_of(as_of))
+
+    @server.tool(annotations=readonly)
+    def get_stored_quotes(request: dict[str, Any], as_of: StrictInt | None = None) -> dict[str, Any]:
+        """Read bounded local FX/stablecoin references selected by explicit sources, native quote and data_mode JSON. Optional max_age_seconds and max_endpoint_skew_seconds bound eligibility. No paths, network or executable conversion; missing clocks remain unknown."""
+        return engine.stored_quotes(bounded_object(request, "stored quotes request"), bounded_as_of(as_of))
+
+    @server.tool(annotations=readonly)
+    def get_stored_venue_costs(request: dict[str, Any], as_of: StrictInt | None = None) -> dict[str, Any]:
+        """Read retained local ask ladders for explicit sources, asset, native quote and data_mode. Supply budget and assumptions_by_source with declared fees/product rules. Unknown fees remain unknown; no collection, paths, currency conversion or preferred venue."""
+        request = dict(bounded_object(request, "stored venue costs request"))
+        if request.get("analysis", "purchase_costs") != "purchase_costs":
+            raise ValueError("analysis must be purchase_costs for this tool.")
+        request["analysis"] = "purchase_costs"
+        return engine.stored_venues(request, bounded_as_of(as_of))
+
+    @server.tool(annotations=readonly)
+    def get_stored_venue_disagreement(request: dict[str, Any], as_of: StrictInt | None = None) -> dict[str, Any]:
+        """Describe bounded local snapshots for explicit sources, asset, native quote and data_mode JSON. Timing, missing venues, capture truncation and provenance stay visible. No paths, network, implicit conversion or arbitrage claim."""
+        request = dict(bounded_object(request, "stored venue disagreement request"))
+        if request.get("analysis", "disagreement") != "disagreement":
+            raise ValueError("analysis must be disagreement for this tool.")
+        request["analysis"] = "disagreement"
+        return engine.stored_venues(request, bounded_as_of(as_of))
+
+    @server.tool(annotations=readonly)
+    def qualify_sources(request: dict[str, Any], as_of: StrictInt | None = None) -> dict[str, Any]:
+        """Read-only offline qualification of bounded local native-market history and declared resources. JSON includes sources, optional markets/market_sources, data_mode, required_history_days and resource ceilings. Show gaps, freshness, access/rights/eligibility and qualification gates independently. No paths, collection, issuance or completeness promise."""
+        return engine.qualify_sources(bounded_object(request, "qualification request"), bounded_as_of(as_of))
+
+    @server.tool(annotations=readonly)
     def get_market_context(
         asset: Literal["BTC", "ETH"] = "BTC",
         source: str | None = None,
