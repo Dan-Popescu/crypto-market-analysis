@@ -11,6 +11,8 @@ from urllib.parse import urlsplit
 
 import ccxt
 import httpx
+import pytest
+import requests
 
 from crypto_market_analysis.collectors import ExchangeClients, collect_exchange
 from crypto_market_analysis.http_accounting import (
@@ -117,6 +119,91 @@ def test_real_ccxt_catalogue_failure_has_transport_accounting():
     assert hits == ["/catalogue"]
     assert result.errors and not result.candles
     assert result.http_accounting["totals"]["requests"] == 1
+
+
+@pytest.mark.parametrize("sharing", ["session", "adapter"])
+@pytest.mark.parametrize("concurrent", [False, True])
+def test_real_ccxt_shared_transport_attributes_each_collection_source(sharing, concurrent):
+    barrier = Barrier(2) if concurrent else None
+
+    class SharedCCXT(LocalCCXT):
+        def fetch_ohlcv(self, *args, **kwargs):
+            if barrier is not None:
+                barrier.wait(timeout=5)
+            return super().fetch_ohlcv(*args, **kwargs)
+
+    with local_server() as (root, hits):
+        first, second = SharedCCXT(root), SharedCCXT(root)
+        if sharing == "session":
+            second.session.close()
+            second.session = first.session
+        else:
+            adapter = requests.adapters.HTTPAdapter()
+            first.session.mount("http://", adapter)
+            second.session.mount("http://", adapter)
+        try:
+            def collect(source, client):
+                return collect_exchange(source, ["BTC"], now=7200, include=("candles",), client=client)
+
+            if concurrent:
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    a = pool.submit(collect, "kraken", first)
+                    b = pool.submit(collect, "coinbase", second)
+                    results = [a.result(), b.result()]
+            else:
+                results = [collect("kraken", first), collect("coinbase", second)]
+        finally:
+            first.session.close()
+            second.session.close()
+    assert hits.count("/catalogue") == hits.count("/candles") == 2
+    assert [result.source for result in results] == ["kraken", "coinbase"]
+    for result in results:
+        assert len(result.candles) == 1 and result.errors == []
+        assert result.http_accounting["coverage"] == "observed"
+        assert result.http_accounting["totals"]["requests"] == 2
+        assert result.http_accounting["totals"]["responses"] == 2
+
+
+def test_real_ccxt_nested_sources_restore_after_errors_and_leave_unknown_clients_unknown():
+    nested = []
+
+    class FailingCatalogue(LocalCCXT):
+        def load_markets(self, **_kwargs):
+            return self.fetch(self.root + "/retry")  # local HTTP 429
+
+    class NestedCCXT(LocalCCXT):
+        def fetch_ohlcv(self, *args, **kwargs):
+            nested.append(collect_exchange("coinbase", ["BTC"], client=inner, include=("candles",)))
+            # Validation raises outside the collector's per-operation catches.
+            with pytest.raises(ValueError, match="quotes"):
+                collect_exchange("coinbase", ["BTC"], client=inner, quotes=())
+            nested.append(collect_exchange("binance", ["BTC"], client=object(), include=("candles",)))
+            return super().fetch_ohlcv(*args, **kwargs)
+
+    @account_collection
+    def batch():
+        result = collect_exchange("kraken", ["BTC"], now=7200, include=("candles",), client=outer)
+        # An instrumented shared adapter outside any producer context must not
+        # inherit the last nested source, even while a batch meter is active.
+        outer.session.get(root + "/outside-collection").raise_for_status()
+        return [result, *nested]
+
+    with local_server() as (root, hits):
+        outer, inner = NestedCCXT(root), FailingCatalogue(root)
+        inner.session.close()
+        inner.session = outer.session
+        try:
+            results = batch()
+        finally:
+            outer.session.close()
+    assert hits == ["/catalogue", "/retry", "/candles", "/outside-collection"]
+    assert results[0].http_accounting["totals"]["requests"] == 2
+    assert results[0].http_accounting["totals"]["errors"] == 0
+    assert results[1].errors
+    assert results[1].http_accounting["totals"]["requests"] == 1
+    assert results[1].http_accounting["totals"]["http_errors"] == 1
+    assert results[2].http_accounting["coverage"] == "uninstrumented"
+    assert results[2].http_accounting["totals"] is None
 
 
 class LoopbackTransport(httpx.BaseTransport):

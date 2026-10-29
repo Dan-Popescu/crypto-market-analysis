@@ -9,7 +9,7 @@ import time
 from threading import RLock
 from typing import TYPE_CHECKING, Any
 
-from .http_accounting import account_collection, instrument_exchange, public_error
+from .http_accounting import account_exchange, instrument_exchange, public_error
 from .models import Candle, CollectionResult, Observation
 from .venues import VENUES
 
@@ -216,7 +216,7 @@ class ExchangeClients:
         self.close()
 
 
-@account_collection
+@account_exchange
 def collect_exchange(
     venue: str,
     assets: list[str],

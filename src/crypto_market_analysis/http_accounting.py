@@ -26,6 +26,7 @@ MAX_READ_RUNS = 10_000
 _FIELDS = ("requests", "responses", "errors", "http_errors", "decoded_body_bytes",
            "unknown_body_responses", "elapsed_ms")
 _current: ContextVar[HTTPAccounting | None] = ContextVar("public_http_accounting", default=None)
+_requests_source: ContextVar[str | None] = ContextVar("public_requests_source", default=None)
 _httpx_attempt: ContextVar[_Attempt | None] = ContextVar("public_httpx_attempt", default=None)
 _install_lock = RLock()
 
@@ -154,6 +155,23 @@ def account_collection(function):
     return measured
 
 
+def account_exchange(function):
+    """Bind the producer to this call, independent of shared sessions/adapters.
+
+    A nested exchange call restores its caller's source, including after an
+    exception. Other threads keep their own source and accounting scope.
+    """
+    @account_collection
+    @wraps(function)
+    def measured(venue, *args, **kwargs):
+        token = _requests_source.set(venue)
+        try:
+            return function(venue, *args, **kwargs)
+        finally:
+            _requests_source.reset(token)
+    return measured
+
+
 def instrument_exchange(client, source: str) -> bool:
     """Observe requests adapter sends used by synchronous CCXT, including catalogue.
 
@@ -182,9 +200,10 @@ def instrument_exchange(client, source: str) -> bool:
 
             def observed_send(request, *args, _send=send, **kwargs):
                 current = _current.get()
-                if current is None:
+                identity = _requests_source.get()
+                if current is None or identity is None:
                     return _send(request, *args, **kwargs)
-                attempt = current.begin(source, request.method, request.url)
+                attempt = current.begin(identity, request.method, request.url)
                 response = None
                 try:
                     response = _send(request, *args, **kwargs)
