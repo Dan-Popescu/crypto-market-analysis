@@ -168,21 +168,22 @@ def test_pipeline_uses_quote_watermarks_and_liquidity_subset(monkeypatch, tmp_pa
         "market",
         now,
     )
-    calls = {}
+    calls = {venue: [] for venue in settings.venues}
 
     def fake(venue, assets, **kwargs):
-        calls[venue] = kwargs
+        calls[venue].append(kwargs)
         return CollectionResult(venue)
 
     monkeypatch.setattr("crypto_market_analysis.pipeline.collect_exchange", fake)
     report = collect(settings, store, tasks=("market", "liquidity"))
     assert len(report["reports"]) == 2
-    assert calls["kraken"]["quotes"] == ("EUR", "USD")
-    assert calls["kraken"]["since_by_market"][("BTC", "USD")] == opened - 3600
-    assert calls["kraken"]["since_by_market"][("BTC", "EUR")] < opened - 3600
-    assert "liquidity" in calls["kraken"]["include"]
-    assert "liquidity" not in calls["binance"]["include"]
-    assert "candles" in calls["binance"]["include"]
+    for call in calls["kraken"]:
+        assert call["quotes"] == ("EUR", "USD")
+        assert call["since_by_market"][("BTC", "USD")] == opened - 3600
+        assert call["since_by_market"][("BTC", "EUR")] < opened - 3600
+    assert any("liquidity" in call["include"] for call in calls["kraken"])
+    assert all("liquidity" not in call["include"] for call in calls["binance"])
+    assert any("candles" in call["include"] for call in calls["binance"])
 
 
 @pytest.mark.parametrize(
