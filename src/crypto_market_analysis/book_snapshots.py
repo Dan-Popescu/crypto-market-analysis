@@ -136,13 +136,42 @@ def retain_books(store: Store, snapshots: list[dict]) -> int:
         raise ValueError("A write supports at most 256 captured books.")
     rows = [_validated(row) for row in snapshots]
     inserted = 0
+    if not rows:
+        return 0
     with store.connection() as con:
+        from .storage_policy import StoragePolicy
+
+        policy = getattr(store, "storage_policy", None) or StoragePolicy()
+        encoded = [_json(row) for row in rows]
+        con.execute("BEGIN IMMEDIATE")
         con.execute("""CREATE TABLE IF NOT EXISTS book_snapshots (
             id INTEGER PRIMARY KEY, source TEXT NOT NULL, asset TEXT NOT NULL,
             quote TEXT NOT NULL, data_mode TEXT NOT NULL, captured_at INTEGER NOT NULL,
             event_time INTEGER, content_hash TEXT NOT NULL UNIQUE, payload TEXT NOT NULL)""")
         con.execute("""CREATE INDEX IF NOT EXISTS book_snapshot_lookup ON book_snapshots
             (source,asset,quote,data_mode,captured_at DESC,id DESC)""")
+        # A transactional byte counter avoids rescanning all retained payloads on
+        # every capture; migration counts legacy rows once and triggers track deletes.
+        con.execute("""CREATE TABLE IF NOT EXISTS book_snapshot_usage (
+            singleton INTEGER PRIMARY KEY CHECK(singleton=1), payload_bytes INTEGER NOT NULL)""")
+        usage = con.execute("SELECT payload_bytes FROM book_snapshot_usage WHERE singleton=1").fetchone()
+        if usage is None:
+            current = con.execute("SELECT COALESCE(SUM(length(CAST(payload AS BLOB))),0) FROM book_snapshots").fetchone()[0]
+            con.execute("INSERT INTO book_snapshot_usage VALUES(1,?)", (current,))
+        else:
+            current = usage[0]
+        con.execute("""CREATE TRIGGER IF NOT EXISTS book_snapshot_usage_insert AFTER INSERT ON book_snapshots
+            BEGIN UPDATE book_snapshot_usage SET payload_bytes=payload_bytes+length(CAST(NEW.payload AS BLOB)) WHERE singleton=1; END""")
+        con.execute("""CREATE TRIGGER IF NOT EXISTS book_snapshot_usage_delete AFTER DELETE ON book_snapshots
+            BEGIN UPDATE book_snapshot_usage SET payload_bytes=payload_bytes-length(CAST(OLD.payload AS BLOB)) WHERE singleton=1; END""")
+        con.execute("""CREATE TRIGGER IF NOT EXISTS book_snapshot_usage_update AFTER UPDATE OF payload ON book_snapshots
+            BEGIN UPDATE book_snapshot_usage SET payload_bytes=payload_bytes-length(CAST(OLD.payload AS BLOB))+length(CAST(NEW.payload AS BLOB)) WHERE singleton=1; END""")
+        new_bytes = sum(len(payload.encode()) for row, payload in zip(rows, encoded, strict=True)
+                        if not con.execute("SELECT 1 FROM book_snapshots WHERE content_hash=?", (row["content_hash"],)).fetchone())
+        if new_bytes:
+            store.check_write_budget(con, new_bytes)
+        if new_bytes and current + new_bytes > policy.book_hot_max_bytes:
+            raise ValueError("Book hot byte budget exceeded; explicit archive maintenance required.")
         for row in rows:
             inserted += con.execute("""INSERT OR IGNORE INTO book_snapshots
                 (source,asset,quote,data_mode,captured_at,event_time,content_hash,payload)
@@ -231,7 +260,7 @@ def _request(
     request = {
         "asset": asset, "quote": quote, "data_mode": data_mode, "sources": sources.copy(),
         "max_age_seconds": max_age_seconds, "max_skew_seconds": max_skew_seconds,
-        "snapshots": [], "book_selection": {"as_of": as_of, "watermark": snapshot["watermark"], "selected": [], "excluded": []},
+        "snapshots": [], "book_selection": {"storage_tier": "hot", "archived_history": "requires_explicit_archive_read_or_restore", "as_of": as_of, "watermark": snapshot["watermark"], "selected": [], "excluded": []},
     }
     usable = []
     for row in books:

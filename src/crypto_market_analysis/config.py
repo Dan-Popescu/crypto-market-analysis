@@ -24,6 +24,15 @@ class Settings:
     options_interval: int = 21600
     context_interval: int = 86400
     liquidity_retention_days: int = 7
+    storage_maintenance_enabled: bool = False
+    storage_hot_max_bytes: int = 2 * 1024**3
+    storage_archive_max_bytes: int = 4 * 1024**3
+    storage_archive_max_files: int = 4096
+    storage_book_hot_max_bytes: int = 512 * 1024**2
+    storage_book_keep_days: int = 7
+    storage_run_keep_days: int = 30
+    storage_batch_rows: int = 256
+    storage_write_reserve_bytes: int = 8 * 1024**2
 
     # Explicit native markets; stablecoin quotes are never converted to USD.
     quote_currencies: list[str] = field(default_factory=lambda: ["EUR", "USD", "USDT", "USDC"])
@@ -86,4 +95,9 @@ def load_settings(path: Path | None = None, data_dir: Path | None = None) -> Set
         value = getattr(settings, name)
         if not isinstance(value, int) or isinstance(value, bool) or not low <= value <= high:
             raise ValueError(f"{name} must be an integer between {low} and {high}.")
+    if type(settings.storage_maintenance_enabled) is not bool:
+        raise ValueError("storage_maintenance_enabled must be a boolean.")
+    from .storage_policy import StoragePolicy
+
+    StoragePolicy.from_settings(settings)
     return settings

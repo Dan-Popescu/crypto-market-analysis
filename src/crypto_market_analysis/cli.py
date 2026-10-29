@@ -298,9 +298,20 @@ def parser() -> argparse.ArgumentParser:
         "Compact older order book detail into hourly medians.",
         "crypto-market-analysis maintain --keep-days 7",
     )
+    maintenance.add_argument("--apply", action="store_true", help="Write checked archives and prune eligible hot evidence; default inspection only")
     maintenance.add_argument(
         "--keep-days", type=int, help="Days of detail to retain; defaults to TOML configuration"
     )
+    storage_status = command("storage-policy", "Inspect storage families, physical bytes and conservative budgets.",
+                             "crypto-market-analysis storage-policy")
+    storage_status.add_argument("--output")
+    archive_verify = command("verify-archive", "Verify one lossless retention archive offline.",
+                             "crypto-market-analysis verify-archive --archive file.json")
+    archive_verify.add_argument("--archive", type=Path, required=True)
+    archive_restore = command("restore-archive", "Restore checked evidence; default verifies without writing.",
+                              "crypto-market-analysis restore-archive --archive file.json --apply")
+    archive_restore.add_argument("--archive", type=Path, required=True)
+    archive_restore.add_argument("--apply", action="store_true")
     events = command(
         "import-events",
         "Import a sourced JSON calendar without claiming complete coverage.",
@@ -625,6 +636,42 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         config_path = args.config or (Path("observer.toml") if Path("observer.toml").exists() else None)
         settings = load_settings(config_path, args.data_dir)
+        if args.command in ("maintain", "storage-policy", "verify-archive", "restore-archive"):
+            from types import SimpleNamespace
+
+            from .storage import Store
+            from .storage_policy import (
+                StoragePolicy,
+                inspect_storage,
+                maintain_storage,
+                restore_archive,
+                verify_archive,
+            )
+
+            policy = StoragePolicy.from_settings(settings)
+            if args.command == "verify-archive":
+                checked = verify_archive(args.archive)
+                write_json({key: value for key, value in checked.items() if key != "rows"})
+            elif args.command == "storage-policy":
+                write_json(inspect_storage(settings.database, policy), args.output)
+            elif args.command == "restore-archive" and not args.apply:
+                write_json(restore_archive(args.archive, None))
+            else:
+                if not settings.database.is_file():
+                    raise ValueError("Maintenance requires an existing database; nothing was initialized.")
+                store = Store(settings.database) if args.apply else SimpleNamespace(path=settings.database)
+                store.storage_policy = policy
+                if args.command == "restore-archive":
+                    write_json(restore_archive(args.archive, store, apply=True))
+                else:
+                    result = maintain_storage(store, policy, apply=args.apply)
+                    if args.apply:
+                        from .retention import compact_liquidity
+
+                        result["liquidity"] = compact_liquidity(store, args.keep_days or settings.liquidity_retention_days)
+                    result["storage"] = inspect_storage(settings.database, policy)
+                    write_json(result)
+            return 0
         if args.command in ("capture-books", "collect-official-context"):
             if args.mode != "live" or args.as_of is not None:
                 raise ValueError("Network capture requires --mode live without --as-of.")
@@ -850,15 +897,6 @@ def main(argv: list[str] | None = None) -> int:
             write_json({"path": str(path.resolve()), "data_mode": args.mode})
         elif args.command == "export":
             write_json(engine.store.export_parquet(args.output))
-        elif args.command == "maintain":
-            from .retention import compact_liquidity
-
-            write_json(
-                compact_liquidity(
-                    engine.store,
-                    args.keep_days if args.keep_days is not None else settings.liquidity_retention_days,
-                )
-            )
         elif args.command == "demo":
             from .demo import seed_demo
 

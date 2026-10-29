@@ -239,6 +239,7 @@ class AssessmentJournal:
                 "provenance": _provenance(payload),
             }
             encoded = _canonical(record)
+            self.store.check_write_budget(con, len(encoded.encode()))
             con.execute(
                 "INSERT INTO assessment_journal VALUES(?,?,?,?,?)",
                 (record["assessment_id"], key, issued, content_hash, encoded),
@@ -299,6 +300,7 @@ class AssessmentJournal:
                 "observed_at": observed, "content_hash": content_hash, "payload": json.loads(encoded_payload),
             }
             encoded = _canonical(record)
+            self.store.check_write_budget(con, len(encoded.encode()))
             con.execute(
                 "INSERT INTO assessment_outcomes(assessment_id,outcome_key,content_hash,record) VALUES(?,?,?,?)",
                 (identity, key, content_hash, encoded),

@@ -31,7 +31,7 @@ def _covered(row, aggregate: Observation) -> bool:
 
 
 def compact_liquidity(store: Store, keep_days: int = 7, now: int | None = None) -> dict:
-    """Compact one oldest UTC day per call, retaining complete UTC hours only.
+    """Compact bounded complete hours from one oldest UTC day per call.
 
     Finalized hours cannot be rebuilt from medians. Their late raw versions are
     retained as explicitly unmerged derived observations; the original median and
@@ -66,6 +66,22 @@ def _compact_day(store: Store, keep_days: int, now: int) -> dict:
             return {"aggregates_written": 0, "raw_rows_deleted": 0, "remaining_old_rows": 0}
         day_start = (oldest // 86400) * 86400
         end = min(day_start + 86400, cutoff)
+        # Bound materialization without splitting an hour's median population.
+        # SQL groups at most 24 UTC hours; dense single hours fail closed.
+        hours = con.execute(
+            f"""SELECT (event_time/3600)*3600 AS hour,COUNT(*),SUM(length(CAST(payload AS BLOB)))
+            FROM observations WHERE {_RAW} AND event_time>=? AND event_time<? AND observed_at<=?
+            GROUP BY hour ORDER BY hour""", (day_start, end, now),
+        ).fetchall()
+        row_count = byte_count = 0
+        for hour, count, payload_bytes in hours:
+            if row_count + count > 4096 or byte_count + payload_bytes > 16 * 1024**2:
+                if row_count == 0:
+                    raise ValueError("Liquidity hour exceeds the 4096-row/16-MiB compaction bound; raw evidence preserved.")
+                end = hour
+                break
+            row_count += count
+            byte_count += payload_bytes
         rows = con.execute(
             f"""SELECT * FROM observations WHERE {_RAW} AND event_time >= ?
             AND event_time < ? AND observed_at <= ? ORDER BY event_time,observed_at,id""",
@@ -153,6 +169,19 @@ def _compact_day(store: Store, keep_days: int, now: int) -> dict:
             metadata["band_percent"] = band
         aggregates.append(Observation(source, asset, metric, hour_end, now, statistics.median(values),
                                       first["unit"], first.get("quote"), metadata, mode))
+
+    # Archive every original known-at version before any compaction/pruning.
+    # A crash leaves checked archives and hot originals; retry is lossless.
+    from .storage_policy import StoragePolicy, _batch, archive_rows
+
+    policy = getattr(store, "storage_policy", None) or StoragePolicy()
+    offset = 0
+    while offset < len(rows):
+        batch = _batch(rows[offset:offset + policy.batch_rows], policy)
+        if not batch:
+            raise ValueError("Raw evidence exceeds the archive batch byte bound; nothing pruned.")
+        archive_rows(store, "observations", batch, policy)
+        offset += len(batch)
 
     # One Store transaction writes both preserved statistics and late evidence.
     store.put_observations([*aggregates, *quarantine])

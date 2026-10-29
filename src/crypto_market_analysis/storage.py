@@ -94,9 +94,17 @@ class Store:
         finally:
             con.close()
 
+    def check_write_budget(self, con, payload_bytes: int = 0) -> None:
+        from .storage_policy import check_write_budget
+
+        check_write_budget(con, self.path, policy=getattr(self, "storage_policy", None),
+                           payload_bytes=payload_bytes)
+
     def put_candles(self, rows: list[Candle]) -> int:
         inserted = 0
         with self.connection() as con:
+            con.execute("BEGIN IMMEDIATE")
+            admitted = False
             for c in rows:
                 if c.asset not in ("BTC", "ETH") or c.data_mode not in ("live", "demo", "import"):
                     raise ValueError("Unsupported asset or data mode.")
@@ -133,6 +141,9 @@ class Store:
                 ).fetchone()
                 if latest and latest["fingerprint"] == fingerprint:
                     continue
+                if not admitted:
+                    self.check_write_budget(con, sum(len(_json(asdict(row)).encode()) for row in rows))
+                    admitted = True
                 con.execute(
                     """INSERT INTO candles(source,asset,quote,timeframe,open_time,close_time,
                     observed_at,data_mode,fingerprint,payload) VALUES(?,?,?,?,?,?,?,?,?,?)""",
@@ -144,6 +155,8 @@ class Store:
     def put_observations(self, rows: list[Observation]) -> int:
         inserted = 0
         with self.connection() as con:
+            con.execute("BEGIN IMMEDIATE")
+            admitted = False
             for o in rows:
                 if (isinstance(o.value, bool) or not math.isfinite(o.value)
                     or type(o.event_time) is not int or type(o.observed_at) is not int
@@ -163,6 +176,9 @@ class Store:
                 ).fetchone()
                 if latest and latest[0] == fingerprint:
                     continue
+                if not admitted:
+                    self.check_write_budget(con, sum(len(_json(asdict(row)).encode()) for row in rows))
+                    admitted = True
                 con.execute(
                     """INSERT INTO observations(source,asset,metric,event_time,observed_at,
                     data_mode,dimension,fingerprint,payload) VALUES(?,?,?,?,?,?,?,?,?)""",
@@ -199,6 +215,7 @@ class Store:
             else "empty",
         }
         with self.connection() as con:
+            self.check_write_budget(con, len(_json(payload).encode()))
             con.execute(
                 "INSERT INTO runs(source,task,observed_at,payload) VALUES(?,?,?,?)",
                 (result.source, task, now, _json(payload)),
@@ -714,6 +731,9 @@ class Store:
         identity = str(payload.get("record_id") or payload.get("event_id") or payload.get("uid") or payload.get("id") or fingerprint)
         observed = payload.get("observed_at", int(time.time()))
         with self.connection() as con:
+            con.execute("BEGIN IMMEDIATE")
+            if not con.execute("SELECT 1 FROM local_records WHERE kind=? AND fingerprint=?", (kind, fingerprint)).fetchone():
+                self.check_write_budget(con, len(encoded.encode()))
             cursor = con.execute("INSERT OR IGNORE INTO local_records(kind,identity,observed_at,fingerprint,payload) VALUES(?,?,?,?,?)",
                                  (kind, identity, observed, fingerprint, encoded))
         return {"inserted": cursor.rowcount, "identity": identity, "fingerprint": fingerprint}
@@ -796,6 +816,7 @@ class Store:
     def put_events(self, events: list[dict], now: int) -> int:
         inserted = 0
         with self.connection() as con:
+            self.check_write_budget(con, sum(len(_json(row).encode()) for row in events))
             for event in events:
                 if not event.get("title") or not event.get("source_url", "").startswith("https://"):
                     raise ValueError("Each event requires a title and an HTTPS source URL.")

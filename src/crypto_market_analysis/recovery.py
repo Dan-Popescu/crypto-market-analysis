@@ -353,7 +353,9 @@ def _destination(path: Path) -> Path:
 
 def _publish(stage: Path, destination: Path) -> None:
     _destination(destination)
-    for path in stage.iterdir():
+    for path in stage.rglob("*"):
+        if not path.is_file():
+            continue
         with path.open("rb") as stream:
             os.fsync(stream.fileno())
     # Same-filesystem directory rename publishes all checked files in one step.
@@ -406,6 +408,27 @@ def create_backup(database: Path, destination: Path, *, quiescent_dataset: bool 
                 after = _dataset_scan(database.parent, max_dataset_files, max_dataset_bytes)
                 if (before != after or source.execute("PRAGMA data_version").fetchone()[0] != version):
                     raise ValueError("Named dataset changed during backup; stop its writer and retry.")
+        # Archives are append-only: inventory after the SQLite snapshot includes
+        # every archive that could have preceded a deletion visible in that snapshot.
+        from .storage_policy import StoragePolicy, archive_directory, verify_archive
+
+        archive_source = archive_directory(database)
+        archive_inventory = {}
+        if archive_source.exists():
+            if archive_source.is_symlink():
+                raise ValueError("Retention archive directory cannot be a symlink.")
+            archive_target = archive_directory(target)
+            for path in archive_source.iterdir():
+                if path.suffix == ".pending":
+                    continue  # unpublished archives never authorize hot deletion
+                checked = verify_archive(path)
+                if (len(archive_inventory) >= 4096
+                        or sum(row["bytes"] for row in archive_inventory.values()) + checked["bytes"] > StoragePolicy().archive_max_bytes):
+                    raise ValueError("Recovery archive inventory exceeds its file or byte bound.")
+                archive_target.mkdir(exist_ok=True)
+                shutil.copyfile(path, archive_target / path.name)
+                verify_archive(archive_target / path.name)
+                archive_inventory[path.name] = {"sha256": checked["sha256"], "bytes": checked["bytes"]}
         build = _build_provenance()
         root = Path(__file__).parent.parent.parent
         for name in _BUILD_FILES:
@@ -416,7 +439,9 @@ def create_backup(database: Path, destination: Path, *, quiescent_dataset: bool 
                     "snapshot_method": "sqlite_online_backup", "database_verification": check,
                     "build": build,
                     "files": {path.name: {"sha256": _file_hash(path), "bytes": path.stat().st_size}
-                              for path in sorted(stage.iterdir())}}
+                              for path in sorted(stage.iterdir()) if path.is_file()}}
+        if archive_inventory:
+            manifest["retention_archives"] = archive_inventory
         if named:
             manifest["dataset"] = {"identity": identity, "original_identity": identity,
                                    "directory_rebased": False, "writer_precondition": "stopped_explicitly_confirmed",
@@ -459,13 +484,30 @@ def verify_backup(bundle: Path) -> dict:
             allowed.update(name for name in files if re.fullmatch(r"[0-9a-f]{64}\.payload|pending-[0-9a-f]{64}\.json", name))
         if DATABASE_NAME not in files or set(files) - allowed:
             raise ValueError("Unsupported backup file inventory.")
-        if {path.name for path in bundle.iterdir()} != {*files, _MANIFEST}:
+        archive_inventory = manifest.get("retention_archives", {})
+        if not isinstance(archive_inventory, dict) or len(archive_inventory) > 4096:
+            raise ValueError("Invalid recovery retention archive inventory.")
+        archive_name = Path(DATABASE_NAME).stem + "-archives"
+        extra = {archive_name} if archive_inventory else set()
+        if {path.name for path in bundle.iterdir()} != {*files, _MANIFEST, *extra}:
             raise ValueError("Backup contains missing or unlisted files, including SQLite sidecars.")
         for name, info in files.items():
             path = bundle / name
             if (path.is_symlink() or not path.is_file() or path.stat().st_size != info["bytes"]
                     or _file_hash(path) != info["sha256"]):
                 raise ValueError(f"Backup file checksum or size mismatch: {name}.")
+        if archive_inventory:
+            from .storage_policy import archive_directory, verify_archive
+
+            directory = archive_directory(bundle / DATABASE_NAME)
+            if directory.is_symlink() or {path.name for path in directory.iterdir()} != set(archive_inventory):
+                raise ValueError("Recovery retention archive inventory mismatch.")
+            for name, info in archive_inventory.items():
+                if not re.fullmatch(r"[0-9a-f]{64}\.json", name):
+                    raise ValueError("Invalid recovery retention archive filename.")
+                checked = verify_archive(directory / name)
+                if {"sha256": checked["sha256"], "bytes": checked["bytes"]} != info:
+                    raise ValueError("Recovery retention archive checksum mismatch.")
         for name, key in (("uv.lock", "dependency_lock_hash"), ("pyproject.toml", "project_metadata_hash")):
             if (manifest["build"].get(key) is not None
                     and (name not in files or files[name]["sha256"] != manifest["build"][key])):
@@ -506,6 +548,10 @@ def restore_backup(bundle: Path, destination: Path) -> dict:
     try:
         for name in (*verified["manifest"]["files"], _MANIFEST):
             shutil.copyfile(bundle / name, stage / name)
+        if verified["manifest"].get("retention_archives"):
+            from .storage_policy import archive_directory
+
+            shutil.copytree(archive_directory(bundle / DATABASE_NAME), archive_directory(stage / DATABASE_NAME))
         if json.loads((stage / _MANIFEST).read_text(encoding="utf-8")) != verified["manifest"]:
             raise ValueError("Backup manifest changed during restore; no destination was published.")
         if "dataset" in verified["manifest"]:
