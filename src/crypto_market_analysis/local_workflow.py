@@ -80,7 +80,16 @@ class _BudgetedClient:
         return value
 
 
-def _capture(settings, store, request, clients, http_client):
+def capture_local_inputs(settings, store, request, clients, http_client=None):
+    """Capture normalized one-shot public inputs using a shared operation budget.
+
+    Callers must explicitly authorize refresh and validate the request with
+    ``normalize_local_workflow_request`` before entering this writing seam.
+    Injected clients remain caller-owned.
+    """
+    if (request.get("refresh") is not True or request.get("data_mode") != "live"
+            or request.get("as_of") is not None):
+        raise ValueError("Public input capture requires explicit live refresh without as_of.")
     budget = _OperationBudget(clients, request["max_logical_operations"])
     result = {"market": None, "books": None, "official_context": None, "errors": []}
     tasks = [task for task in request["capture_tasks"]
@@ -136,7 +145,8 @@ def _capture(settings, store, request, clients, http_client):
     return result
 
 
-def _normalize(settings, request):
+def normalize_local_workflow_request(settings, request):
+    """Validate the complete request before any local workflow side effects."""
     if not isinstance(request, dict) or set(request) - _FIELDS:
         raise ValueError("Unknown local workflow request fields.")
     normalized = dict(request)
@@ -271,7 +281,7 @@ def run_local_workflow(settings: Settings, request: dict, *, clients=None,
     from .accumulation_brief import build_accumulation_brief
     from .qualification import qualify_sources
 
-    request = _normalize(settings, request)
+    request = normalize_local_workflow_request(settings, request)
     engine = Engine(settings, request["data_mode"])
     capture = {"status": "not_requested", "network_requested": False}
     if request["refresh"]:
@@ -283,9 +293,9 @@ def run_local_workflow(settings: Settings, request: dict, *, clients=None,
                          liquidity_venues=None)
         if clients is None:
             with ExchangeClients() as owned:
-                capture = _capture(scoped, engine.store, request, owned, http_client)
+                capture = capture_local_inputs(scoped, engine.store, request, owned, http_client)
         else:
-            capture = _capture(scoped, engine.store, request, clients, http_client)
+            capture = capture_local_inputs(scoped, engine.store, request, clients, http_client)
         capture["network_requested"] = True
     as_of = int(time.time()) if request["refresh"] else request.get("as_of", int(clock()))
     if type(as_of) is not int or not 0 <= as_of <= int(time.time()):
