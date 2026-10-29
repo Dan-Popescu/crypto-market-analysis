@@ -83,7 +83,8 @@ def test_restart_keeps_slow_tasks_beyond_200_run_groups(monkeypatch, tmp_path):
 def test_source_failure_backoff_and_restart_do_not_repeat_healthy_source(monkeypatch, tmp_path):
     now = 1_800_000_000
     monkeypatch.setattr("crypto_market_analysis.pipeline.time.time", lambda: now)
-    settings = Settings(data_dir=tmp_path, venues=["kraken", "coinbase"], options=False, context=False)
+    settings = Settings(data_dir=tmp_path, venues=["kraken", "coinbase"], options=False, context=False,
+                        liquidity_venues=[])
     store = Store(settings.database)
     store.record_run(CollectionResult("storage"), "retention", now)
     calls = []
@@ -212,7 +213,7 @@ def test_known_nonlive_history_does_not_reset_live_scheduler(monkeypatch, tmp_pa
     monkeypatch.setattr("crypto_market_analysis.pipeline.collect_exchange", lambda source, *a, **kw:
                         calls.append(source) or CollectionResult(source))
     run_scheduler(settings, store, Once())
-    assert calls == ["kraken"]
+    assert calls == ["kraken", "kraken"]
     assert store.scheduler_runs()[0]["data_mode"] in (None, "live")
 
 
@@ -252,3 +253,66 @@ def test_public_book_empty_and_failed_attempts_are_classified_live(monkeypatch, 
                         CollectionResult(source, errors=errors))
     capture_books(store, sources=["kraken"], assets=["BTC"], quotes=("EUR",), clients=object())
     assert store.runs()[0]["data_mode"] == "live"
+
+
+def test_scheduler_book_failure_does_not_retry_successful_market_after_restart(monkeypatch, tmp_path):
+    from ccxt import RequestTimeout
+
+    now = 1_800_000_000
+    opened = now - 7200
+    monkeypatch.setattr("crypto_market_analysis.pipeline.time.time", lambda: now)
+    settings = Settings(data_dir=tmp_path, venues=["kraken"], assets=["BTC"], quote_currencies=["EUR"],
+                        options=False, context=False, max_pages=1)
+    store = Store(settings.database)
+    store.record_run(CollectionResult("storage"), "retention", now)
+    calls = []
+
+    class PublicExchange:
+        has = {"fetchOHLCV": True, "fetchOrderBook": True}
+
+        def load_markets(self):
+            return {"BTC/EUR": {"base": "BTC", "quote": "EUR", "symbol": "BTC/EUR", "spot": True}}
+
+        def fetch_ohlcv(self, symbol, timeframe, *, since, limit):
+            calls.append("candles")
+            return [[opened * 1000, 100, 101, 99, 100, 1]]
+
+        def fetch_order_book(self, symbol, *, limit):
+            calls.append("book")
+            raise RequestTimeout("Order-book endpoint unavailable")
+
+    exchange = PublicExchange()
+
+    def clients():
+        pool = ExchangeClients()
+        pool._clients["kraken"] = exchange
+        return pool
+
+    monkeypatch.setattr("crypto_market_analysis.pipeline.ExchangeClients", clients)
+    run_scheduler(settings, store, Once())
+    states = Schedule(store, {"market": settings.market_interval, "liquidity": settings.liquidity_interval}).states()
+    assert states[("kraken", "market")]["last_success"] == now
+    assert states[("kraken", "market")]["failures"] == 0
+    assert states[("kraken", "market")]["next_due"] == now + 3600
+    assert states[("kraken", "liquidity")]["last_success"] == 0
+    assert states[("kraken", "liquidity")]["failures"] == 1
+    assert states[("kraken", "liquidity")]["next_due"] == now + 60
+    assert len(store.candles("BTC", source="kraken", quote="EUR")) == 1
+    assert sorted(calls) == ["book", "candles"]
+    now += 61
+    run_scheduler(settings, Store(settings.database), Once())
+    assert calls.count("candles") == 1 and calls.count("book") == 2
+    reports = {row["task"]: row for row in store.runs() if row["source"] == "kraken"}
+    assert reports["market"]["status"] == "ok" and reports["market"]["errors"] == []
+    assert reports["liquidity"]["status"] == "error"
+
+
+def test_one_shot_collect_keeps_combined_market_liquidity_report(monkeypatch, tmp_path):
+    settings = Settings(data_dir=tmp_path, venues=["kraken"], assets=["BTC"], quote_currencies=["EUR"])
+    requested = []
+    monkeypatch.setattr("crypto_market_analysis.pipeline.collect_exchange", lambda source, *a, **kw:
+                        requested.append(kw["include"]) or CollectionResult(source))
+    report = collect(settings, Store(settings.database), tasks=("market", "liquidity"))
+    assert requested == [("candles", "derivatives", "liquidity")]
+    assert len(report["reports"]) == 1
+    assert report["reports"][0]["task"] == "market+liquidity"

@@ -81,8 +81,10 @@ def collect(
                                     and (source_tasks is None or t in source_tasks.get(venue, ()))
                                     and (t != "liquidity" or settings.liquidity_venues is None
                                          or venue in settings.liquidity_venues))
-                if venue_tasks:
-                    futures[pool.submit(exchange, venue, venue_tasks)] = (venue, "+".join(venue_tasks))
+                groups = ((task,) for task in venue_tasks) if source_tasks is not None else (venue_tasks,)
+                for selected in groups:
+                    if selected:
+                        futures[pool.submit(exchange, venue, selected)] = (venue, "+".join(selected))
         if ("options" in tasks and settings.options
                 and (source_tasks is None or "options" in source_tasks.get("deribit", ()))):
             futures[pool.submit(collect_options, settings.assets)] = ("deribit", "options")
