@@ -1,0 +1,14 @@
+{
+  "source": "coinbase",
+  "mode": "import",
+  "markets": [{"asset": "BTC", "quote": "EUR"}, {"asset": "ETH", "quote": "USD"}],
+  "start": 1704067200,
+  "end": 1735689600,
+  "max_pages": 4,
+  "max_requests": 5,
+  "max_rows": 1200,
+  "max_bytes": 2097152,
+  "http_max_requests": 32,
+  "deadline_seconds": 120,
+  "backoff_seconds": 60
+}

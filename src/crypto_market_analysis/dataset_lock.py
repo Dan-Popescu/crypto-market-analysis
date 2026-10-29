@@ -1,4 +1,4 @@
-"""Fail-fast cooperative process lock for an existing named dataset writer.
+"""Fail-fast cooperative process lock for named datasets and ordinary store jobs.
 
 All participating writers must hold this guard before construction/recovery and
 through their final write. Direct HistoryDataset clients are caller-owned. The
@@ -15,7 +15,7 @@ from pathlib import Path
 
 
 class DatasetBusy(RuntimeError):
-    """Another cooperating process already holds this dataset's writer lock."""
+    """Another cooperating process already holds this store's writer lock."""
 
 
 @contextmanager
@@ -28,7 +28,31 @@ def dataset_writer_lock(database):
     database = Path(database).expanduser().resolve()
     if not database.is_file() or not (database.parent / "dataset.json").is_file():
         raise ValueError("Writer locking requires an existing named dataset store.")
-    lock_path = database.parent / ".history-writer.lock"
+    with _writer_lock(database.parent):
+        yield
+
+
+@contextmanager
+def store_writer_lock(database, *, create=False):
+    """Serialize cooperating ordinary-store jobs before initialization.
+
+    Only explicit apply callers may create the parent. Ordinary collectors do
+    not participate in this guard; their transactions remain SQLite-managed.
+    """
+    database = Path(database).expanduser().resolve()
+    if (database.parent / "dataset.json").exists():
+        raise ValueError("Ordinary store jobs cannot write named history datasets.")
+    if create:
+        database.parent.mkdir(parents=True, exist_ok=True)
+    elif not database.is_file():
+        raise ValueError("Store writer locking requires an existing database.")
+    with _writer_lock(database.parent):
+        yield
+
+
+@contextmanager
+def _writer_lock(directory):
+    lock_path = directory / ".history-writer.lock"
     flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(lock_path, flags, 0o600)
     acquired = False
@@ -48,7 +72,7 @@ def dataset_writer_lock(database):
             acquired = True
         except OSError as exc:
             if exc.errno in (errno.EACCES, errno.EAGAIN):
-                raise DatasetBusy("Another process is writing this named dataset.") from None
+                raise DatasetBusy("Another process is writing this store.") from None
             raise
         yield
     finally:
