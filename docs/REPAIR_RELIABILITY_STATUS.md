@@ -24,7 +24,7 @@ BTC/USD and ETH/USD retain separate native identities and import/live/demo linea
 ## Exact application revision and checks
 
 Tested and independently reviewed application revision:
-`de62248e0005a78de623db415008ccdda68049c3`.
+`8bd36bb54ab6265a57150c48d1bda4aef7891ee0`.
 Baseline: `ca5fc0e98eb7a4f98e1ef48dcb3767e7b113b176`.
 Subsequent delivery documentation changes no application, test, tool or dependency
 manifest. Third-party dependency versions remain unchanged; package version is
@@ -35,21 +35,21 @@ UV_CACHE_DIR=/workspace/.cache/uv MPLCONFIGDIR=/workspace/work/improvements/mpl-
 MPLCONFIGDIR=/workspace/work/improvements/mpl-cache .venv/bin/python /workspace/work/improvements/verification/cli_smoke.py
 MPLCONFIGDIR=/workspace/work/improvements/mpl-cache .venv/bin/python /workspace/work/repair-next/verification/cli_capacity_smoke.py
 .venv/bin/python /workspace/work/repair-next/verification/cli_repair_smoke.py
-UV_CACHE_DIR=/workspace/.cache/uv uv run --frozen python tools/verify_crash_recovery.py --output /workspace/work/repair-next/verification/process-crash-de62248e.json --deadline-seconds 60
+UV_CACHE_DIR=/workspace/.cache/uv uv run --frozen python tools/verify_crash_recovery.py --output /workspace/work/repair-next/verification/process-crash-8bd36bb5.json --deadline-seconds 60
 UV_CACHE_DIR=/workspace/.cache/uv uv build --wheel --offline --out-dir /workspace/work/repair-next/dist
 .venv/bin/python /workspace/work/repair-next/verification/verify_wheel.py
 ```
 
-- Required check: lock coherent, **73 packages**, Ruff clean, **1,149 tests passed
-  in 101.72 seconds**. Actual local STDIO/HTTP transports were included. No required
+- Required check: lock coherent, **73 packages**, Ruff clean, **1,150 tests passed
+  in 106.24 seconds**. Actual local STDIO/HTTP transports were included. No required
   offline check remains unavailable.
-- **53 actual CLI invocations passed**: 25 established native-analysis/plan/journal
-  commands, 15 operating-capacity commands and 13 named-dataset operations. The
+- **54 actual CLI invocations passed**: 25 established native-analysis/plan/journal
+  commands, 15 operating-capacity commands and 14 named-dataset operations. The
   latter cover actual init/status/manual planning, import accounting in JSON and
-  Markdown, dry-run planning, four busy writer paths, hardlink/evidence protection
+  Markdown, dry-run planning, five busy writer paths, hardlink/evidence protection
   and normal operation after release. Injected synthetic data stayed unqualified.
 - The clean-revision process experiment passed **18 recovery/integrity cases**
-  in 4.612 seconds with a 60-second process-group deadline. Fifteen cases include
+  in 4.700 seconds with a 60-second process-group deadline. Fifteen cases include
   actual SIGKILL; three check preexisting damaged/nonregular blobs. All child
   processes have bounded rendezvous and cleanup. Network use is denied in workers.
   These are descriptive local checks, not a latency SLO or power-loss simulation.
@@ -59,17 +59,16 @@ UV_CACHE_DIR=/workspace/.cache/uv uv build --wheel --offline --out-dir /workspac
   the missing configured store left absent.
 
 Wheel: `/workspace/work/repair-next/dist/crypto_market_analysis-0.7.1-py3-none-any.whl`.
-SHA256: `f466ca9053f665de67b6cc0ab002f101df2ed04a547fee4ef11f846fc4f45fbf`.
-It was built and checked at the application revision above before final delivery
-documentation, whose README additions are not part of its long description.
+SHA256: `6e7cd3e3a5cc1284946a6bc7bcbac4d98b0d0d7cda33e04679faf8170f0decdc`.
+It was built and checked at the application revision above.
 
 Evidence:
 
-- `/workspace/work/improvements/verification/cli-smoke-results-de62248e.json`
-- `/workspace/work/repair-next/verification/cli-de62248e/results.json`
-- `/workspace/work/repair-next/verification/repair-cli-de62248e/results.json`
-- `/workspace/work/repair-next/verification/process-crash-de62248e.json`
-- `/workspace/work/repair-next/verification/wheel-de62248e.json`
+- `/workspace/work/improvements/verification/cli-smoke-results-8bd36bb5.json`
+- `/workspace/work/repair-next/verification/cli-8bd36bb5/results.json`
+- `/workspace/work/repair-next/verification/repair-cli-8bd36bb5/results.json`
+- `/workspace/work/repair-next/verification/process-crash-8bd36bb5.json`
+- `/workspace/work/repair-next/verification/wheel-8bd36bb5.json`
 
 ## Standards
 
@@ -82,7 +81,9 @@ accounting/planning still succeeded. No remaining documented-standard or
 actionable maintainability finding was substantiated.
 
 Production fixes were reviewed at `3509d8e38f0802f53340a15608e850e98dfe4053`,
-followed by the documentation-only clarification at the final revision above.
+followed by the canonical backup-path correction at the final revision above.
+Both direct and symlink backup paths were independently tested under the writer
+lock. The final verification record replaces the earlier intermediate revision.
 Standards: **1 P2 fixed; 0 remaining**.
 
 ## Spec
@@ -98,8 +99,11 @@ Independent review found three P2 issues, all fixed and independently re-probed:
   the one supported attempt. An unused Requests Session with only HTTPX traffic
   yields uninstrumented/null totals. The owned default CCXT path stays observed.
 
-The reviewer inspected wider guard placement and ran 28 focused tests on the final
-revision. No additional demonstrated bypass or scope creep remained.
+The reviewer inspected wider guard placement and ran 28 focused tests before the
+last backup-path correction, then independently re-probed that correction and ran
+both backup-path cases on the final revision. An outside symlink to the dataset
+database now returns busy/exit 1 with no destination bundle while locked. No
+additional demonstrated bypass or scope creep remained.
 Spec: **3 P2 fixed; 0 remaining**, including the shared hardlink finding.
 
 ## Remaining limits
