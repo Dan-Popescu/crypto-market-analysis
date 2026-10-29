@@ -393,3 +393,74 @@ def test_hour_shares_exclude_manual_and_retry_blocked_markets(tmp_path):
     assert [(t["asset"], t["quote"], t["request_hours"]) for t in plan["tasks"]] == [
         ("BTC", "USD", 12), ("ETH", "USD", 12)]
     assert plan["hours_planned"] == 24 and plan["requests_planned"] == 2
+
+
+def test_archived_hole_does_not_hide_empty_response_backoff_across_restarts(tmp_path):
+    ds = dataset(tmp_path, start=281, end=1000)
+    bounds = request(max_hours=6, request_budget=1)
+    first = run_auto_repairs(ds.store.path, bounds, apply=True, fetch=all_rows, clock=lambda: NOW)
+    assert first["outcomes"][0]["status"] == "pending"
+    assert first["outcomes"][0]["remaining_hours"] == 713
+    assert first["outcomes"][0]["consecutive_failures"] == 0
+    aged_now = NOW + 7 * HOUR
+    for attempt, (offset, delay) in enumerate(((0, 60), (60, 120)), start=1):
+        reopened = HistoryDataset(ds.config, clock=lambda offset=offset: aged_now + offset)
+        result = run_auto_repairs(reopened.store.path, bounds, apply=True, fetch=lambda *_: RESTCapture([]),
+                                  clock=lambda offset=offset: aged_now + offset)
+        state = result["outcomes"][0]
+        assert state["status"] == "unknown_gap"
+        assert state["consecutive_failures"] == attempt
+        assert state["retry_at"] == aged_now + offset + delay
+        assert state["remaining_hours"] == 713
+        assert result["markets"][0]["requires_archives_hours"] == 1
+        assert result["markets"][0]["recoverable_hours"] == 712
+    assert not plan_auto_repairs(ds.store.path, bounds, now=aged_now + 179)["tasks"]
+    resumed = run_auto_repairs(ds.store.path, bounds, apply=True,
+                               fetch=lambda _a, _q, since, _n: RESTCapture([row(since // HOUR)]),
+                               clock=lambda: aged_now + 180)
+    state = resumed["outcomes"][0]
+    assert state["status"] == "pending" and state["consecutive_failures"] == 0
+    assert state["remaining_hours"] == 712 and state["retry_at"] == aged_now + 240
+    assert resumed["markets"][0]["requires_archives_hours"] == 1
+    assert resumed["markets"][0]["recoverable_hours"] == 711
+
+
+def test_retention_advancing_during_empty_fetch_is_not_materialization_progress(tmp_path):
+    ds = dataset(tmp_path, start=281, end=1000)
+    bounds = request(max_hours=6, request_budget=1)
+    clock = [NOW]
+
+    def advancing_empty(*_):
+        clock[0] += HOUR
+        return RESTCapture([])
+
+    first = run_auto_repairs(ds.store.path, bounds, apply=True, fetch=advancing_empty,
+                             clock=lambda: clock[0])
+    assert first["outcomes"][0]["status"] == "unknown_gap"
+    assert first["outcomes"][0]["consecutive_failures"] == 1
+    assert first["markets"][0]["requires_archives_hours"] == 1
+    clock[0] += 60
+    second = run_auto_repairs(ds.store.path, bounds, apply=True, fetch=advancing_empty,
+                              clock=lambda: clock[0])
+    assert second["outcomes"][0]["status"] == "unknown_gap"
+    assert second["outcomes"][0]["consecutive_failures"] == 2
+    assert second["outcomes"][0]["retry_at"] == clock[0] + 120
+    assert second["markets"][0]["requires_archives_hours"] == 2
+    assert second["markets"][0]["remaining_hours"] == 719
+
+
+def test_interrupted_request_checkpoint_counts_archived_and_recent_holes(tmp_path):
+    ds = dataset(tmp_path, start=281, end=1000)
+    bounds = request(max_hours=6, request_budget=1)
+    run_auto_repairs(ds.store.path, bounds, apply=True, fetch=all_rows, clock=lambda: NOW)
+
+    def interrupted(*_):
+        raise KeyboardInterrupt("synthetic interruption with one archived missing hour")
+
+    with pytest.raises(KeyboardInterrupt):
+        run_auto_repairs(ds.store.path, bounds, apply=True, fetch=interrupted, clock=lambda: NOW + 7 * HOUR)
+    state = checkpoint(ds)
+    assert state["status"] == "inflight" and state["remaining_hours"] == 713
+    plan = plan_auto_repairs(ds.store.path, bounds, now=NOW + 7 * HOUR)
+    assert plan["markets"][0]["requires_archives_hours"] == 1
+    assert plan["markets"][0]["recoverable_hours"] == 712

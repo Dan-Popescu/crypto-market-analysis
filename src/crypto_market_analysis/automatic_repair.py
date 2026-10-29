@@ -270,7 +270,11 @@ def run_auto_repairs(database, request: AutoRepairRequest | None = None, *, appl
             continue
         candidate["request_hours"] = (candidate["request_end"] - candidate["request_start"]) // HOUR
         state = {k: v for k, v in candidate.items() if k not in ("request_start", "request_end", "request_hours")}
+        with dataset.store.connection() as con:
+            present_before = _present(con, config, state["asset"], state["quote"], now)
+        requested_missing_before = set(range(candidate["request_start"], candidate["request_end"], HOUR)) - present_before
         state.update(status="inflight", requests=state["requests"] + 1, updated_at=now,
+                     remaining_hours=sum(h not in present_before for h in range(state["start"], state["end"], HOUR)),
                      retry_at=now + request.retry_seconds)
         _save(dataset, state)
         try:
@@ -296,7 +300,9 @@ def run_auto_repairs(database, request: AutoRepairRequest | None = None, *, appl
         elif state["status"] == "pending":
             if all(h < (finished // HOUR - 719) * HOUR for h in missing):
                 state["status"] = "requires_archives"
-            elif len(missing) == candidate["remaining_hours"]:
+            # Count progress only when a requested missing hour materializes;
+            # moving retention never changes this before/after coverage test.
+            elif requested_missing_before.isdisjoint(present):
                 state["status"] = "unknown_gap"
             state["consecutive_failures"] = state.get("consecutive_failures", 0) + 1 if state["status"] == "unknown_gap" else 0
             delay = min(86400, request.retry_seconds * 2 ** min(max(0, state["consecutive_failures"] - 1), 10))
