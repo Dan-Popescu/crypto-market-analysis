@@ -59,11 +59,13 @@ def retained_book(
     ``timestamp`` follows CCXT's epoch-millisecond contract. Missing timestamps
     remain null, including when receipt time is known. Invalid clocks reject the
     capture; future clocks remain evidence but are ineligible before that time.
+    The provider request limit is provenance and can exceed the 500 retained-row
+    bound; aggregate liquidity still uses all rows returned by that request.
     """
     _selectors([source], asset, quote, data_mode, captured_at)
     _label(symbol, "symbol")
-    if type(requested_limit) is not int or not 1 <= requested_limit <= MAX_LEVELS:
-        raise ValueError("requested_limit must be from 1 to 500.")
+    if type(requested_limit) is not int or requested_limit < 1:
+        raise ValueError("requested_limit must be a positive integer.")
     if not isinstance(book, dict):
         raise ValueError("A CCXT book must be an object.")
     timestamp = book.get("timestamp")

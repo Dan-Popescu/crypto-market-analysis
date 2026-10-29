@@ -16,6 +16,7 @@ from crypto_market_analysis.collectors import ExchangeClients, capture_books, co
 from crypto_market_analysis.models import CollectionResult
 from crypto_market_analysis.storage import Store
 from crypto_market_analysis.venue_analysis import analyze_purchase_costs, analyze_venue_disagreement
+from crypto_market_analysis.venues import VENUES
 
 
 class PublicBook:
@@ -282,3 +283,54 @@ def test_midpoint_precision_boundary_is_an_explicit_exclusion(tmp_path):
     assert request["snapshots"] == []
     assert "precision" in request["book_selection"]["excluded"][0]["reason"]
     assert analyze_venue_disagreement(request, 102)["status"] == "unsupported"
+
+
+@pytest.mark.parametrize("source", ["bitvavo", "binance", "kraken"])
+def test_configured_large_book_limits_preserve_full_metrics_and_bounded_evidence(tmp_path, source):
+    import hashlib
+    import json
+
+    limit = VENUES[source].book_limit
+    assert limit == {"bitvavo": 1000, "binance": 5000, "kraken": 500}[source]
+    raw = {
+        "timestamp": 100999,
+        "bids": [[f"10000.{9999 - index:04d}", "0.123400", index] for index in range(limit)],
+        "asks": [[f"10001.{index:04d}", "0.234500", index] for index in range(limit)],
+    }
+
+    class ConfiguredLimitBook(PublicBook):
+        def fetch_order_book(self, symbol, limit):
+            self.calls += 1
+            assert symbol == "BTC/EUR" and limit == len(raw["bids"])
+            return deepcopy(raw)
+
+    client = ConfiguredLimitBook()
+    legacy = collect_exchange(source, ["BTC"], now=101, include=("liquidity",), quotes=("EUR",), client=client)
+    result = collect_exchange(source, ["BTC"], now=101, include=("liquidity",), quotes=("EUR",),
+                              client=client, retain_books=True)
+    assert client.calls == 2
+    assert not result.errors and result.observations == legacy.observations
+    full_bid_depth = sum(float(price) * float(quantity) for price, quantity, _ in raw["bids"])
+    assert next(row.value for row in result.observations if row.metric == "depth_bid_2pct") == full_bid_depth
+    snapshot = result.books[0]
+    assert snapshot["requested_limit"] == limit
+    for side in ("bids", "asks"):
+        assert snapshot[side] == raw[side][:500]
+        assert snapshot["coverage"][f"returned_{side}_levels"] == limit
+        assert snapshot["coverage"][f"retained_{side}_levels"] == 500
+        assert snapshot["coverage"][f"{side}_truncated"] is (limit > 500)
+    content = {key: value for key, value in snapshot.items() if key not in ("content_hash", "input_reference")}
+    expected_hash = hashlib.sha256(json.dumps(content, sort_keys=True, ensure_ascii=False, allow_nan=False,
+                                              separators=(",", ":")).encode()).hexdigest()
+    assert snapshot["content_hash"] == expected_hash
+    store = Store(tmp_path / "db")
+    pool = ExchangeClients()
+    pool._clients[source] = client
+    captured = capture_books(store, sources=[source], assets=["BTC"], quotes=("EUR",), now=101, clients=pool)
+    assert client.calls == 3
+    assert captured["inserted_books"] == 1 and captured["inserted_observations"] == len(result.observations)
+    assert captured["reports"][0]["errors"] == []
+    restored = read_books(store, **{**selectors(), "sources": [source]})[0]
+    assert restored == snapshot
+    assert restored["content_hash"] == expected_hash
+    pool.close()
