@@ -518,14 +518,23 @@ class Store:
 
     def save_local_record(self, kind: str, payload: dict) -> dict:
         """Preserve sourced imports and date-only calendars without invented event times."""
-        if kind not in ("calendar", "history_import") or not isinstance(payload, dict):
+        if kind not in ("calendar", "history_import", "fx_reference", "stablecoin_price") or not isinstance(payload, dict):
             raise ValueError("Unsupported local record kind or payload.")
+        if kind in ("fx_reference", "stablecoin_price"):
+            required = ("record_id", "source", "base", "quote", "source_url", "data_version", "price_type")
+            if (any(not isinstance(payload.get(key), str) or not payload[key].strip() for key in required)
+                    or payload.get("data_mode") not in ("live", "import", "demo")
+                    or type(payload.get("observed_at")) is not int or payload["observed_at"] < 0
+                    or (payload.get("event_time") is not None and (
+                        type(payload["event_time"]) is not int
+                        or not 0 <= payload["event_time"] <= payload["observed_at"]))):
+                raise ValueError("Quote records require explicit provenance, mode and known observation time.")
         encoded = _json(payload)
         if len(encoded.encode()) > 2_000_000:
             raise ValueError("Local record exceeds the 2 MB limit.")
         semantic = {key: value for key, value in payload.items() if key not in ("observed_at", "imported_at")}
         fingerprint = _hash(semantic)
-        identity = str(payload.get("event_id") or payload.get("uid") or payload.get("id") or fingerprint)
+        identity = str(payload.get("record_id") or payload.get("event_id") or payload.get("uid") or payload.get("id") or fingerprint)
         observed = payload.get("observed_at", int(time.time()))
         with self.connection() as con:
             cursor = con.execute("INSERT OR IGNORE INTO local_records(kind,identity,observed_at,fingerprint,payload) VALUES(?,?,?,?,?)",
@@ -533,7 +542,7 @@ class Store:
         return {"inserted": cursor.rowcount, "identity": identity, "fingerprint": fingerprint}
 
     def local_records(self, kind: str, as_of: int | None = None, limit: int = 500) -> list[dict]:
-        if kind not in ("calendar", "history_import") or type(limit) is not int or not 1 <= limit <= 1000:
+        if kind not in ("calendar", "history_import", "fx_reference", "stablecoin_price") or type(limit) is not int or not 1 <= limit <= 1000:
             raise ValueError("Use a supported record kind and a limit from 1 to 1000.")
         now = int(time.time()) if as_of is None else as_of
         with self.connection() as con:
@@ -542,6 +551,70 @@ class Store:
                 FROM local_records WHERE kind=? AND observed_at<=?) WHERE rn=1 ORDER BY id DESC LIMIT ?""",
                 (kind, now, limit)).fetchall()
         return [json.loads(row[0]) for row in rows]
+
+    def stored_analysis_snapshot(self, kind: str, *, as_of: int, mode: str,
+                                 sources: list[str], quote: str, asset: str | None = None,
+                                 history_seconds: int = 172800, limit: int = 5000) -> dict:
+        """Read bounded native evidence and its watermark in one SQLite snapshot.
+
+        Derivatives retain every eligible vintage, including revisions, throughout
+        the explicit history window. A later known version must not erase evidence
+        available at the 4h/24h endpoints. Required evidence exceeding the budget
+        raises rather than silently replacing those endpoints with recent rows.
+        Quote records keep unknown event times; analytical callers decide whether
+        these records support a dated comparison.
+        """
+        if (kind not in ("derivatives", "quotes") or type(as_of) is not int or as_of < 0
+                or mode not in ("live", "import", "demo")
+                or not isinstance(sources, list) or not 1 <= len(sources) <= 32
+                or any(not isinstance(source, str) or not source or len(source) > 256 for source in sources)
+                or len(set(sources)) != len(sources)
+                or not isinstance(quote, str) or not quote or len(quote) > 120
+                or type(history_seconds) is not int or not 86400 <= history_seconds <= 172800
+                or type(limit) is not int or not 1 <= limit <= 5000
+                or (kind == "derivatives" and asset not in ("BTC", "ETH"))):
+            raise ValueError("Stored analysis requires explicit bounded native selectors, mode and cutoff.")
+        placeholders = ",".join("?" for _ in sources)
+        with self.connection() as con:
+            con.execute("BEGIN")
+            watermark = {table: con.execute(f"SELECT COALESCE(MAX(id),0) FROM {table}").fetchone()[0]
+                         for table in ("observations", "local_records")}
+            if kind == "derivatives":
+                rows = con.execute(f"""SELECT id,fingerprint,payload FROM observations
+                    WHERE asset=? AND data_mode=? AND source IN ({placeholders})
+                    AND json_extract(payload,'$.quote')=? AND event_time BETWEEN ? AND ? AND observed_at<=?
+                    AND metric IN ('funding_rate_actual','funding_rate_projected','open_interest_amount','open_interest_value')
+                    ORDER BY event_time,observed_at,id LIMIT ?""",
+                    (asset, mode, *sources, quote, max(0, as_of - history_seconds), as_of, as_of, limit + 1)).fetchall()
+                table = "observations"
+            else:
+                # Filter native pair, source and mode before applying the budget.
+                rows = con.execute(f"""WITH eligible AS (SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY kind,json_extract(payload,'$.source'),json_extract(payload,'$.base'),
+                                 json_extract(payload,'$.quote')
+                    ORDER BY observed_at DESC,id DESC) version_rank FROM local_records
+                    WHERE kind IN ('fx_reference','stablecoin_price') AND observed_at<=?
+                    AND json_extract(payload,'$.data_mode')=?
+                    AND json_extract(payload,'$.source') IN ({placeholders})
+                    AND (json_extract(payload,'$.event_time') IS NULL OR json_extract(payload,'$.event_time')<=?)
+                    AND ((kind='stablecoin_price' AND json_extract(payload,'$.quote')=?
+                          AND json_extract(payload,'$.base') IN ('USDT','USDC'))
+                         OR (kind='fx_reference' AND (
+                            (json_extract(payload,'$.base')='EUR' AND json_extract(payload,'$.quote')='USD')
+                            OR (json_extract(payload,'$.base')='USD' AND json_extract(payload,'$.quote')='EUR')))))
+                    SELECT id,fingerprint,payload,kind FROM eligible WHERE version_rank=1
+                    ORDER BY observed_at,id LIMIT ?""",
+                    (as_of, mode, *sources, as_of, quote, limit + 1)).fetchall()
+                table = "local_records"
+        if len(rows) > limit:
+            raise ValueError(f"Required stored {kind} evidence exceeds the {limit}-row budget; narrow sources or selection.")
+        return {"kind": kind, "as_of": as_of, "watermark": watermark,
+                "selection": {"asset": asset, "sources": sources.copy(), "quote": quote, "data_mode": mode,
+                              "history_seconds": history_seconds if kind == "derivatives" else None},
+                "records": [{"input_reference": f"sqlite:{table}:{row['id']}",
+                             "fingerprint": row["fingerprint"], "payload": json.loads(row["payload"]),
+                             **({"kind": row["kind"]} if kind == "quotes" else {})} for row in rows],
+                "truncation": {"truncated": False, "limit": limit, "captured": len(rows)}}
 
     def put_events(self, events: list[dict], now: int) -> int:
         inserted = 0
