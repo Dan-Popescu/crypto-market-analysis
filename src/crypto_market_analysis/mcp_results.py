@@ -185,10 +185,30 @@ class MCPResultPresenter:
                                         for key, value in result.items()]}
         summary["_mcp_result"] = metadata
         history_page = tool_name == "get_metric_history"
+        dossier_page = tool_name == "get_analysis_dossier"
         while response_bytes(summary) > _RESULT_LIMIT:
             candidates = []
 
             def candidate(parent, key, child, path, candidates=candidates):
+                if dossier_page:
+                    parts = path.split("/")
+                    # A dossier has at most four explicit native markets. Keep
+                    # every identity, section map/status and current context
+                    # visible; its detailed statistics and evidence can page.
+                    if path in ("/markets", "/calendar", "/as_of", "/data_mode", "/watermark"):
+                        return
+                    if path.startswith("/watermark/"):
+                        return
+                    if len(parts) >= 4 and parts[1] == "markets":
+                        if len(parts) == 4 or parts[3] == "selection":
+                            return
+                        if len(parts) == 5 and not isinstance(child, (dict, list)):
+                            return
+                        if (parts[3] == "market_context" and parts[4] in
+                                ("anchor", "market", "coverage", "as_of", "status", "schema_version")):
+                            return
+                    if path == "/calendar/status":
+                        return
                 size = len(canonical_json(child))
                 savings = size - len(canonical_json(_omitted(child, path))) - len(canonical_json(path))
                 if savings <= 0:
@@ -198,6 +218,11 @@ class MCPResultPresenter:
                 # Only after those details are paged may a genuinely oversized
                 # scalar or the deepest remaining map need explicit omission.
                 priority = 2 if isinstance(child, list) else 1 if isinstance(child, str) else 0
+                if dossier_page and key in ("calendar", "lookbacks") and path.count("/") == 4:
+                    # Repeated context calendar/metric dossiers are larger than
+                    # the concise anchor/coverage summary. Page these complete
+                    # detail maps instead of hundreds of individual leaf nodes.
+                    priority = 3
                 if history_page and path.startswith("/points/") and key == "metadata":
                     priority = 3
                 depth = 0 if isinstance(child, list) else path.count("/")
@@ -213,6 +238,9 @@ class MCPResultPresenter:
                             candidate(value, key, child, child_path)
                         visit(child, child_path)
                 elif isinstance(value, list):
+                    if dossier_page and path == "/markets":
+                        for index, row in enumerate(value):
+                            visit(row, _pointer(path, index))
                     if history_page and path == "/points":
                         # Keep every emitted history row and its source/value/unit/clocks.
                         # Only opaque metadata may be summarized; the history cursor
@@ -229,6 +257,8 @@ class MCPResultPresenter:
             if not candidates:
                 if history_page:
                     raise ValueError("History point core values exceed the MCP byte limit; narrow the page limit.")
+                if dossier_page:
+                    raise ValueError("Dossier market summaries exceed the MCP byte limit; narrow the request.")
                 # Path metadata can itself be large: root paging remains complete.
                 summary = {"_mcp_result": {**metadata, "omitted_paths": [""],
                                           "available_paths": [{"path": "", **_shape(result)}]}}
