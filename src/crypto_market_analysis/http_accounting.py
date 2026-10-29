@@ -21,6 +21,9 @@ from urllib.parse import urlsplit
 
 import httpx
 import requests
+from urllib3.util import Timeout
+
+from .http_limits import HTTPBudgetExceeded, current_http_budget, http_budget_scope
 
 MAX_ENDPOINTS = 32
 MAX_READ_RUNS = 10_000
@@ -30,6 +33,7 @@ _current: ContextVar[HTTPAccounting | None] = ContextVar("public_http_accounting
 _requests_source: ContextVar[str | None] = ContextVar("public_requests_source", default=None)
 _httpx_attempt: ContextVar[_Attempt | None] = ContextVar("public_httpx_attempt", default=None)
 _install_lock = RLock()
+_requests_attempts: ContextVar[list | None] = ContextVar("public_requests_attempts", default=None)
 
 
 def _empty() -> dict:
@@ -66,6 +70,7 @@ class HTTPAccounting:
         self.endpoint_limit = endpoint_limit
         self._lock = RLock()
         self._sources: dict[str, dict] = {}
+        self.budget = current_http_budget()
 
     def _source(self, source: str) -> dict:
         # Sources are producer identities, never obtained from HTTP input.
@@ -129,7 +134,8 @@ class HTTPAccounting:
                     "endpoints_truncated": state["omitted_endpoint_requests"] > 0,
                     "body_byte_basis": "decoded_response_body", "wire_bytes": None,
                     "request_bytes": None, "tls_bytes": None,
-                    "request_basis": "transport_attempts_including_connection_failures"}
+                    "request_basis": "transport_attempts_including_connection_failures",
+                    "http_limits": self.budget.snapshot() if self.budget else None}
 
     def delta(self, source: str, before: dict) -> dict:
         after = self.snapshot(source)
@@ -150,14 +156,27 @@ def accounting_scope(source: str):
     The caller owns retention and decides whether its adapter is instrumented.
     Nested scopes restore both the outer meter and producer identity.
     """
-    meter = HTTPAccounting()
-    token = _current.set(meter)
-    source_token = _requests_source.set(source)
+    with http_budget_scope():
+        meter = HTTPAccounting()
+        token = _current.set(meter)
+        source_token = _requests_source.set(source)
+        try:
+            yield meter
+        finally:
+            _requests_source.reset(source_token)
+            _current.reset(token)
+
+
+@contextmanager
+def http_source_scope(source: str):
+    """Bind a public operation's identity while preserving its shared limiter."""
+    requests_token = _requests_source.set(source)
+    httpx_token = _httpx_source.set(source)
     try:
-        yield meter
+        yield
     finally:
-        _requests_source.reset(source_token)
-        _current.reset(token)
+        _httpx_source.reset(httpx_token)
+        _requests_source.reset(requests_token)
 
 
 def account_collection(function):
@@ -166,15 +185,16 @@ def account_collection(function):
     def measured(*args, **kwargs):
         if _current.get() is not None:
             return function(*args, **kwargs)
-        meter = HTTPAccounting()
-        token = _current.set(meter)
-        try:
-            result = function(*args, **kwargs)
-            for row in result if isinstance(result, list) else [result]:
-                row.http_accounting = meter.snapshot(row.source)
-            return result
-        finally:
-            _current.reset(token)
+        with http_budget_scope():
+            meter = HTTPAccounting()
+            token = _current.set(meter)
+            try:
+                result = function(*args, **kwargs)
+                for row in result if isinstance(result, list) else [result]:
+                    row.http_accounting = meter.snapshot(row.source)
+                return result
+            finally:
+                _current.reset(token)
     return measured
 
 
@@ -195,54 +215,120 @@ def account_exchange(function):
     return measured
 
 
-def instrument_exchange(client, source: str) -> bool:
-    """Observe requests adapter sends used by synchronous CCXT, including catalogue.
+def _instrument_pool(pool):
+    """Gate urllib3's actual attempts, below redirect and retry loops."""
+    with _install_lock:
+        if getattr(pool, "_observer_accounted", False):
+            return
+        send = pool._make_request
 
-    CCXT's default requests adapters have no urllib3 retries. A caller enabling
-    hidden urllib3 retries gets partial coverage: those inner attempts are unknown.
+        def measured(conn, method, url, *args, **kwargs):
+            current, identity = _current.get(), _requests_source.get()
+            pending = _requests_attempts.get()
+            budget = current_http_budget()
+            if identity is None or (current is None and budget is None):
+                return send(conn, method, url, *args, **kwargs)
+            # A preceding successful raw response was consumed by urllib3 for a
+            # retry. Its decoded body size is unknown, rather than counted twice.
+            if pending:
+                previous, status = pending[-1]
+                if previous is not None:
+                    previous.meter.finish(previous, status=status)
+            if budget:
+                remaining = budget.admit()
+                original = kwargs.get("timeout")
+                timeout = pool._get_timeout(original)
+                connect = timeout.connect_timeout
+                read = timeout.read_timeout
+                kwargs["timeout"] = Timeout(
+                    total=remaining, connect=min(connect, remaining) if connect is not None else remaining,
+                    read=min(read, remaining) if read is not None else remaining)
+            attempt = current.begin(identity, method, url) if current else None
+            try:
+                response = send(conn, method, url, *args, **kwargs)
+            except Exception:
+                if attempt:
+                    current.finish(attempt, error=True)
+                if budget and budget.remaining() <= 0:
+                    budget.check()
+                raise
+            if pending is not None:
+                pending.append((attempt, response.status))
+            elif attempt:
+                current.finish(attempt, status=response.status)
+            return response
+
+        pool._make_request = measured
+        pool._observer_accounted = True
+
+
+def instrument_exchange(client, source: str) -> bool:
+    """Instrument standard Requests adapters, including urllib3 retries.
+
+    Custom adapters are left explicit as unsupported; shared wrappers consult
+    context at call time and never mutate session/client timeout settings.
     """
     session = getattr(client, "session", None)
-    valid = isinstance(session, requests.Session)
-    meter = _current.get()
-    if not valid:
+    meter, budget = _current.get(), current_http_budget()
+    if not isinstance(session, requests.Session):
         if meter:
             meter.coverage(source, instrumented=False)
+        if budget:
+            budget.unsupported()
         return False
+    supported = True
     with _install_lock:
         for adapter in session.adapters.values():
-            if not isinstance(adapter, requests.adapters.HTTPAdapter):
-                if meter:
-                    meter.coverage(source, instrumented=False)
-                continue
+            valid = type(adapter) is requests.adapters.HTTPAdapter
             if meter:
-                meter.coverage(source, instrumented=True)
-            if getattr(adapter.max_retries, "total", None) not in (0, False):
-                if meter:
-                    meter.coverage(source, instrumented=False)
+                meter.coverage(source, instrumented=valid)
+            if valid and budget:
+                budget.supported()
+            if not valid:
+                supported = False
+                if budget:
+                    budget.unsupported()
+                continue
             if getattr(adapter, "_observer_accounted", False):
                 continue
+            # Both Requests interfaces are handled for supported installed versions.
+            for name in ("get_connection", "get_connection_with_tls_context"):
+                original = getattr(adapter, name, None)
+                if original is None:
+                    continue
+
+                def connection(*args, _original=original, **kwargs):
+                    pool = _original(*args, **kwargs)
+                    _instrument_pool(pool)
+                    return pool
+
+                setattr(adapter, name, connection)
             send = adapter.send
 
             def observed_send(request, *args, _send=send, **kwargs):
-                current = _current.get()
-                identity = _requests_source.get()
-                if current is None or identity is None:
-                    return _send(request, *args, **kwargs)
-                attempt = current.begin(identity, request.method, request.url)
+                pending = []
+                token = _requests_attempts.set(pending)
                 response = None
                 try:
                     response = _send(request, *args, **kwargs)
                     body = response.content
-                    current.finish(attempt, status=response.status_code, decoded_bytes=len(body))
+                    if pending and pending[-1][0] is not None:
+                        attempt, status = pending[-1]
+                        attempt.meter.finish(attempt, status=status, decoded_bytes=len(body))
                     return response
                 except Exception:
-                    current.finish(attempt, status=response.status_code if response is not None else None,
-                                   error=True)
+                    if pending and pending[-1][0] is not None:
+                        attempt, status = pending[-1]
+                        attempt.meter.finish(attempt, status=status, error=True)
+                    if (budget := current_http_budget()) is not None and budget.remaining() <= 0:
+                        budget.check()
                     raise
+                finally:
+                    _requests_attempts.reset(token)
 
             adapter.send = observed_send
             adapter._observer_accounted = True
-    return True
+    return supported
 
 
 def _provider_source(url: str) -> str | None:
@@ -261,7 +347,18 @@ def instrument_httpx(client, source: str) -> bool:
     if meter:
         meter.coverage(source, instrumented=valid)
     if not valid:
+        if (budget := current_http_budget()) is not None:
+            budget.unsupported()
         return False
+    transports = [client._transport, *[t for t in client._mounts.values() if t is not None]]
+    supported = all(type(t) is httpx.HTTPTransport for t in transports)
+    if (budget := current_http_budget()) is not None:
+        if supported:
+            budget.supported()
+        else:
+            budget.unsupported()
+    if not supported and meter:
+        meter.coverage(source, instrumented=False)
     with _install_lock:
         if getattr(client, "_observer_accounted", False):
             return True
@@ -270,14 +367,60 @@ def instrument_httpx(client, source: str) -> bool:
             current = _current.get()
             # Producer source is attached transiently by PublicHTTP, not persisted.
             identity = _httpx_source.get() or _provider_source(str(request.url))
+            if identity is not None and (budget := current_http_budget()) is not None:
+                remaining = budget.admit()
+                request.extensions["timeout"] = {
+                    key: min(value, remaining) if value is not None else remaining
+                    for key, value in request.extensions.get("timeout", {
+                        "connect": None, "read": None, "write": None, "pool": None}).items()}
             if current is not None and identity is not None:
                 attempt = current.begin(identity, request.method, str(request.url))
                 request.extensions["observer_attempt"] = attempt
                 _httpx_attempt.set(attempt)
+            if identity is not None and type(client._transport_for_url(request.url)) is httpx.HTTPTransport:
+                previous_trace = request.extensions.get("trace")
+                if getattr(previous_trace, "_observer_trace", False):
+                    previous_trace = previous_trace._original
+                connects = 0
+
+                def trace(event, info):
+                    nonlocal connects
+                    budget = current_http_budget()
+                    connecting = event.endswith(("connect_tcp.started", "connect_unix_socket.started"))
+                    if connecting:
+                        if connects:
+                            if budget:
+                                budget.admit()
+                            if current:
+                                retry = current.begin(identity, request.method, str(request.url))
+                                request.extensions["observer_attempt"] = retry
+                                _httpx_attempt.set(retry)
+                        connects += 1
+                    if event.endswith(".failed"):
+                        if (failed := request.extensions.get("observer_attempt")) is not None:
+                            failed.meter.finish(failed, error=True)
+                        if budget and budget.remaining() <= 0:
+                            budget.check()
+                    if budget and event.endswith(".started") and "timeout" in info:
+                        # httpcore trace info is the actual operation kwargs.
+                        remaining = budget.remaining()
+                        if remaining <= 0:
+                            budget.check()
+                        value = info["timeout"]
+                        info["timeout"] = min(value, remaining) if value is not None else remaining
+                    if previous_trace:
+                        previous_trace(event, info)
+
+                trace._observer_trace = True
+                trace._original = previous_trace
+                request.extensions["trace"] = trace
 
         def response_hook(response):
             attempt = response.request.extensions.pop("observer_attempt", None)
             if attempt is not None:
+                if response.request.extensions.get("observer_stream"):
+                    attempt.meter.finish(attempt, status=response.status_code)
+                    return
                 try:
                     body = response.read()
                 except Exception:
@@ -302,7 +445,7 @@ def prepare_httpx(client, url: str):
 
 def httpx_get(client, url: str, params: dict | None = None):
     """Keep attempt attribution local even when one HTTPX client spans tasks."""
-    source_token = _httpx_source.set(_provider_source(url))
+    source_token = _httpx_source.set(_provider_source(url) or _httpx_source.get())
     attempt_token = _httpx_attempt.set(None)
     try:
         prepare_httpx(client, url)
@@ -318,6 +461,8 @@ def httpx_get(client, url: str, params: dict | None = None):
 
 
 def mark_uninstrumented(source: str) -> None:
+    if (budget := current_http_budget()) is not None:
+        budget.unsupported()
     if (meter := _current.get()) is not None:
         meter.coverage(source, instrumented=False)
 
@@ -331,6 +476,8 @@ def public_error(exc: Exception, *, include_message: bool = True) -> str:
     importing the entire CCXT package at application startup.
     """
     kind = type(exc).__name__
+    if isinstance(exc, HTTPBudgetExceeded):
+        return f"HTTPBudgetExceeded: {exc.reason}"
     if isinstance(exc, (httpx.HTTPStatusError, requests.exceptions.HTTPError)):
         response = getattr(exc, "response", None)
         status = getattr(response, "status_code", None)

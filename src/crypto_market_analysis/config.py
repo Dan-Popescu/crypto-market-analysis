@@ -17,6 +17,8 @@ class Settings:
     history_days: int = 30
     max_pages: int = 20
     workers: int = 3
+    http_max_requests: int = 10_000
+    http_deadline_seconds: float = 300.0
     options: bool = True
     context: bool = True
     liquidity_interval: int = 300
@@ -100,4 +102,7 @@ def load_settings(path: Path | None = None, data_dir: Path | None = None) -> Set
     from .storage_policy import StoragePolicy
 
     StoragePolicy.from_settings(settings)
+    from .http_limits import HTTPPolicy
+
+    HTTPPolicy.from_settings(settings)
     return settings

@@ -5,12 +5,14 @@ from __future__ import annotations
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import copy_context
 from dataclasses import replace
 from threading import Event
 
 from .collectors import ExchangeClients, collect_exchange
 from .config import Settings
 from .http_accounting import merge_measurements
+from .http_limits import bounded_http, current_http_budget
 from .models import CollectionResult
 from .providers import collect_context, collect_options
 from .storage import Store
@@ -39,6 +41,8 @@ def _combined_exchange_reports(reports: list[dict]) -> list[dict]:
         for key in ("errors", "warnings"):
             report[key] = [value for row in rows for value in row[key]]
         report["http_accounting"] = merge_measurements([row.get("http_accounting") for row in rows])
+        if (budget := current_http_budget()) is not None:
+            report["http_accounting"]["http_limits"] = budget.snapshot()
         has_data = report["candles"] or report["observations"]
         report["status"] = ("partial" if has_data else "error") if report["errors"] else (
             "ok" if has_data else "empty")
@@ -46,6 +50,7 @@ def _combined_exchange_reports(reports: list[dict]) -> list[dict]:
     return combined
 
 
+@bounded_http
 def collect(
     settings: Settings,
     store: Store,
@@ -113,15 +118,15 @@ def collect(
                 groups = ((task,) for task in venue_tasks)
                 for selected in groups:
                     if selected:
-                        futures[pool.submit(exchange, venue, selected)] = (venue, "+".join(selected))
+                        futures[pool.submit(copy_context().run, exchange, venue, selected)] = (venue, "+".join(selected))
         if ("options" in tasks and settings.options
                 and (source_tasks is None or "options" in source_tasks.get("deribit", ()))):
-            futures[pool.submit(collect_options, settings.assets)] = ("deribit", "options")
+            futures[pool.submit(copy_context().run, collect_options, settings.assets)] = ("deribit", "options")
         if "context" in tasks and settings.context:
             sources = tuple(source for source in ("fred", "coinmetrics", "defillama")
                             if source_tasks is None or "context" in source_tasks.get(source, ()))
             if sources:
-                futures[pool.submit(collect_context, days=min(days or 365, 3650), sources=sources)] = ("context", "context")
+                futures[pool.submit(copy_context().run, collect_context, days=min(days or 365, 3650), sources=sources)] = ("context", "context")
         for future in as_completed(futures):
             source, task = futures[future]
             try:
@@ -138,6 +143,7 @@ def collect(
         "started_at": now,
         "completed_at": int(time.time()),
         "paid_collection_apis": False,
+        "http_limits": current_http_budget().snapshot(),
         "reports": sorted(reports, key=lambda r: r["source"]),
         "status": "error"
         if reports and all(r["status"] == "error" for r in reports)

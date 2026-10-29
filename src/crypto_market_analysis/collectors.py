@@ -10,6 +10,7 @@ from threading import RLock
 from typing import TYPE_CHECKING, Any
 
 from .http_accounting import account_exchange, instrument_exchange, public_error
+from .http_limits import HTTPBudgetExceeded, bounded_public_operation, check_http_budget
 from .models import Candle, CollectionResult, Observation
 from .venues import VENUES
 
@@ -242,6 +243,10 @@ def collect_exchange(
         return CollectionResult(venue, errors=[f"Unknown venue: {venue}"])
     if quotes is not None and (not quotes or any(q not in QUOTES for q in quotes)):
         raise ValueError("quotes must contain native EUR, USD, USDT or USDC quotes")
+    try:
+        check_http_budget()
+    except HTTPBudgetExceeded as exc:
+        return CollectionResult(venue, warnings=[public_error(exc)])
     if client is not None:
         instrument_exchange(client, venue)
         return _collect_exchange(
@@ -307,6 +312,11 @@ def _collect_exchange(
         for quote in (dict.fromkeys(quotes) if quotes is not None else (None,))
     )
     for asset, requested_quote in requests:
+        try:
+            check_http_budget()
+        except HTTPBudgetExceeded as exc:
+            result.warnings.append(public_error(exc))
+            break
         preferred = (requested_quote,) if requested_quote else VENUES[venue].preferred_quotes
         market_since = (since_by_market or {}).get((asset, requested_quote), since)
         label = f"{asset}/{requested_quote}" if requested_quote else asset
@@ -368,6 +378,8 @@ def _collect_exchange(
                         result.warnings.append(f"{label}: no closed candles returned for requested history")
                 except Exception as exc:
                     result.errors.append(f"{label} fetchOHLCV: {public_error(exc)}")
+                    if isinstance(exc, HTTPBudgetExceeded):
+                        return result
         if spot and ("liquidity" in include or retain_books):
             if not _cap(client, "fetchOrderBook"):
                 result.warnings.append(
@@ -395,6 +407,8 @@ def _collect_exchange(
                         ))
                 except Exception as exc:
                     result.errors.append(f"{label} fetchOrderBook: {public_error(exc)}")
+                    if isinstance(exc, HTTPBudgetExceeded):
+                        return result
         if "derivatives" in include:
             if not swap:
                 result.warnings.append(
@@ -469,6 +483,8 @@ def _collect_exchange(
                         )
                 except Exception as exc:
                     result.errors.append(f"{label} {capability}: {public_error(exc)}")
+                    if isinstance(exc, HTTPBudgetExceeded):
+                        return result
             if _cap(client, "fetchFundingRateHistory"):
                 try:
                     history = client.fetch_funding_rate_history(
@@ -510,6 +526,8 @@ def _collect_exchange(
                             )
                 except Exception as exc:
                     result.errors.append(f"{label} fetchFundingRateHistory: {public_error(exc)}")
+                    if isinstance(exc, HTTPBudgetExceeded):
+                        return result
             else:
                 result.warnings.append(
                     f"{label}: fetchFundingRateHistory adapter unsupported; provider availability unknown"
@@ -518,6 +536,7 @@ def _collect_exchange(
     return result
 
 
+@bounded_public_operation
 def capture_books(
     store: Store, *, sources: list[str], assets: list[str], quotes: tuple[str, ...],
     now: int | None = None, clients: ExchangeClients | None = None,

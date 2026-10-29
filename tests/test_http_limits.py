@@ -1,0 +1,259 @@
+"""Synthetic loopback evidence for actual HTTP admission, deadlines and sharing."""
+
+import json
+import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from contextvars import copy_context
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Lock, Thread
+from types import SimpleNamespace
+
+import httpx
+import pytest
+import requests
+from urllib3.util import Retry
+
+from crypto_market_analysis.config import Settings, load_settings
+from crypto_market_analysis.http_accounting import (
+    accounting_scope,
+    http_source_scope,
+    instrument_exchange,
+    instrument_httpx,
+    public_error,
+)
+from crypto_market_analysis.http_limits import HTTPBudgetExceeded, HTTPPolicy, http_budget_scope
+from crypto_market_analysis.providers import PublicHTTP
+
+
+@contextmanager
+def loopback():
+    hits, guard = [], Lock()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            with guard:
+                hits.append(self.path)
+                number = hits.count(self.path)
+            if self.path == "/slow":
+                time.sleep(0.2)
+            status = 302 if self.path == "/redirect" else 429 if self.path == "/retry" and number == 1 else 200
+            self.send_response(status)
+            self.send_header("Content-Length", "2")
+            self.send_header("Retry-After", "0")
+            if status == 302:
+                self.send_header("Location", "/ok")
+            self.end_headers()
+            try:
+                self.wfile.write(b"{}")
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}", hits
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.parametrize("requests_limit", [True, 0, -1, 1.1, 1_000_001])
+def test_policy_rejects_invalid_request_limits(requests_limit):
+    with pytest.raises(ValueError):
+        HTTPPolicy(max_requests=requests_limit)
+
+
+@pytest.mark.parametrize("deadline", [True, 0, -1, float("inf"), float("nan"), "3", 86401])
+def test_policy_rejects_nonfinite_or_invalid_deadlines(deadline):
+    with pytest.raises(ValueError):
+        HTTPPolicy(deadline_seconds=deadline)
+
+
+def test_settings_validate_http_policy(tmp_path):
+    path = tmp_path / "observer.toml"
+    path.write_text("http_max_requests = 2\nhttp_deadline_seconds = 0.25\n")
+    assert HTTPPolicy.from_settings(load_settings(path)) == HTTPPolicy(2, 0.25)
+    assert HTTPPolicy.from_settings(Settings()).max_requests == 10_000
+
+
+@pytest.mark.parametrize("path", ["/redirect", "/retry"])
+def test_requests_retries_and_redirects_refuse_before_second_send(path):
+    with loopback() as (root, hits), requests.Session() as session:
+        session.mount("http://", requests.adapters.HTTPAdapter(max_retries=Retry(
+            total=3, status_forcelist=[429], backoff_factor=0)))
+        with http_budget_scope(HTTPPolicy(1, 2)) as budget, accounting_scope("kraken") as meter:
+            assert instrument_exchange(SimpleNamespace(session=session), "kraken")
+            with pytest.raises(HTTPBudgetExceeded, match="request_limit"):
+                session.get(root + path)
+            measurement = meter.snapshot("kraken")
+    assert hits == [path]
+    assert measurement["totals"]["requests"] == budget.used_requests == 1
+    assert measurement["totals"]["responses"] == 1
+    assert budget.refused_requests == 1
+    assert measurement["http_limits"]["enforcement"] == "supported_transports"
+
+
+def test_requests_successful_hidden_retry_counts_both_attempts():
+    with loopback() as (root, hits), requests.Session() as session:
+        session.mount("http://", requests.adapters.HTTPAdapter(max_retries=Retry(total=2, status_forcelist=[429])))
+        with http_budget_scope(HTTPPolicy(2, 2)) as budget, accounting_scope("kraken") as meter:
+            instrument_exchange(SimpleNamespace(session=session), "kraken")
+            assert session.get(root + "/retry").status_code == 200
+            measurement = meter.snapshot("kraken")
+    assert hits == ["/retry", "/retry"]
+    assert measurement["totals"]["requests"] == measurement["totals"]["responses"] == budget.used_requests == 2
+    assert measurement["totals"]["errors"] == 1
+
+
+def test_httpx_redirect_and_public_retry_respect_exact_limit():
+    for path in ("/redirect", "/retry"):
+        with loopback() as (root, hits), httpx.Client(follow_redirects=True) as raw:
+            with http_budget_scope(HTTPPolicy(1, 2)) as budget, accounting_scope("deribit") as meter:
+                instrument_httpx(raw, "deribit")
+                with http_source_scope("deribit"), pytest.raises(HTTPBudgetExceeded):
+                    PublicHTTP(client=raw).get_json(root + path)
+                measurement = meter.snapshot("deribit")
+        assert hits == [path]
+        assert measurement["totals"]["requests"] == budget.used_requests == 1
+        assert measurement["totals"]["responses"] == 1
+
+
+def test_httpx_internal_connection_retries_are_bounded_and_counted():
+    # Reserve a local port, then close the listener: no external address is contacted.
+    with loopback() as (root, _hits):
+        pass
+    with httpx.Client(transport=httpx.HTTPTransport(retries=3)) as raw:
+        with http_budget_scope(HTTPPolicy(2, 2)) as budget, accounting_scope("deribit") as meter:
+            instrument_httpx(raw, "deribit")
+            with http_source_scope("deribit"), pytest.raises(HTTPBudgetExceeded):
+                raw.get(root)
+            measurement = meter.snapshot("deribit")
+    assert measurement["totals"]["requests"] == budget.used_requests == 2
+    assert measurement["totals"]["errors"] == 2
+    assert budget.refused_requests == 1
+    assert measurement["http_limits"]["enforcement"] == "supported_transports"
+
+
+@pytest.mark.parametrize("transport", ["requests", "httpx"])
+def test_deadline_clamps_actual_client_timeout_without_mutating_client(transport):
+    with loopback() as (root, hits), http_budget_scope(HTTPPolicy(5, 0.05)) as budget:
+        with accounting_scope("kraken") as meter:
+            started = time.monotonic()
+            if transport == "requests":
+                with requests.Session() as raw:
+                    instrument_exchange(SimpleNamespace(session=raw), "kraken")
+                    with pytest.raises(HTTPBudgetExceeded, match="deadline"):
+                        raw.get(root + "/slow", timeout=10)
+            else:
+                with httpx.Client(timeout=10) as raw:
+                    instrument_httpx(raw, "kraken")
+                    with http_source_scope("kraken"), pytest.raises(HTTPBudgetExceeded, match="deadline"):
+                        raw.get(root + "/slow")
+                    assert raw.timeout.read == 10
+            elapsed = time.monotonic() - started
+            with pytest.raises(HTTPBudgetExceeded, match="deadline"):
+                budget.check()
+            measurement = meter.snapshot("kraken")
+    assert elapsed < 0.18
+    assert hits == ["/slow"]
+    assert measurement["totals"]["requests"] == budget.used_requests == 1
+    assert measurement["totals"]["errors"] == 1
+
+
+def test_threads_share_allowance_but_keep_independent_source_meters():
+    with loopback() as (root, hits), http_budget_scope(HTTPPolicy(5, 5)) as budget:
+        def worker(source):
+            with requests.Session() as raw, accounting_scope(source) as meter:
+                instrument_exchange(SimpleNamespace(session=raw), source)
+                for _ in range(4):
+                    try:
+                        raw.get(root)
+                    except HTTPBudgetExceeded:
+                        break
+                return meter.snapshot(source)
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = [pool.submit(copy_context().run, worker, f"source-{i}") for i in range(4)]
+            measurements = [future.result() for future in futures]
+    assert len(hits) == budget.used_requests == sum(m["totals"]["requests"] for m in measurements) == 5
+    assert budget.refused_requests >= 1
+
+
+def test_nested_scopes_do_not_reset_outer_limits_and_unknown_is_explicit():
+    with http_budget_scope(HTTPPolicy(1, 1)) as outer:
+        with http_budget_scope(HTTPPolicy(100, 100)) as inner, accounting_scope("injected") as meter:
+            assert inner is outer
+            assert not instrument_exchange(object(), "injected")
+            inner.admit()
+            with pytest.raises(HTTPBudgetExceeded) as exc:
+                inner.admit()
+            assert public_error(exc.value, include_message=False) == "HTTPBudgetExceeded: request_limit"
+            measurement = meter.snapshot("injected")
+    assert measurement["totals"] is None
+    assert measurement["http_limits"]["enforcement"] == "unsupported"
+    assert "http://" not in json.dumps(measurement)
+
+
+def test_collection_workers_share_budget_and_retain_partial_candles(tmp_path):
+    from test_http_accounting import LocalCCXT, local_server
+
+    from crypto_market_analysis.collectors import ExchangeClients
+    from crypto_market_analysis.pipeline import collect
+    from crypto_market_analysis.storage import Store
+
+    class RecentLocal(LocalCCXT):
+        def fetch_ohlcv(self, *args, **kwargs):
+            rows = super().fetch_ohlcv(*args, **kwargs)
+            for row in rows:
+                row[0] = (int(time.time()) // 3600 - 2) * 3_600_000
+            return rows
+
+    settings = Settings(assets=["BTC"], venues=["kraken", "coinbase"], quote_currencies=["USD"],
+                        workers=2, http_max_requests=3, http_deadline_seconds=5, options=False, context=False)
+    with local_server() as (root, hits), ExchangeClients() as clients:
+        clients._clients = {venue: RecentLocal(root) for venue in settings.venues}
+        report = collect(settings, Store(tmp_path / "collection.sqlite"), tasks=("market",), clients=clients)
+    assert len(hits) == report["http_limits"]["used_requests"] == 3
+    assert sum(row["http_accounting"]["totals"]["requests"] for row in report["reports"]) == 3
+    assert sum(row["inserted_candles"] for row in report["reports"]) >= 1
+    assert "HTTPBudgetExceeded" in json.dumps(report)
+
+
+def test_requests_connection_failures_are_actual_attempts():
+    with loopback() as (root, _hits):
+        pass
+    with requests.Session() as raw, http_budget_scope(HTTPPolicy(2, 2)) as budget:
+        raw.mount("http://", requests.adapters.HTTPAdapter(max_retries=Retry(total=5)))
+        with accounting_scope("kraken") as meter:
+            instrument_exchange(SimpleNamespace(session=raw), "kraken")
+            with pytest.raises(HTTPBudgetExceeded):
+                raw.get(root)
+            measurement = meter.snapshot("kraken")
+    assert measurement["totals"]["requests"] == measurement["totals"]["errors"] == budget.used_requests == 2
+    assert measurement["totals"]["responses"] == 0
+
+
+def test_shared_httpx_client_does_not_leak_deadlines_between_threads():
+    with loopback() as (root, hits), httpx.Client(timeout=10) as raw:
+        def worker(deadline):
+            with http_budget_scope(HTTPPolicy(3, deadline)), accounting_scope("kraken"):
+                instrument_httpx(raw, "kraken")
+                with http_source_scope("kraken"):
+                    try:
+                        return raw.get(root + "/slow").status_code
+                    except HTTPBudgetExceeded:
+                        return "deadline"
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            short = pool.submit(worker, 0.05)
+            long = pool.submit(worker, 1)
+            assert short.result() == "deadline"
+            assert long.result() == 200
+        assert raw.timeout.read == 10
+    assert hits == ["/slow", "/slow"]

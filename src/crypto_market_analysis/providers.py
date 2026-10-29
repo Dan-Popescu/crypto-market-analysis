@@ -13,7 +13,8 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from .http_accounting import account_collection, httpx_get, prepare_httpx, public_error
+from .http_accounting import account_collection, httpx_get, mark_uninstrumented, prepare_httpx, public_error
+from .http_limits import HTTPBudgetExceeded, check_http_budget
 from .models import CollectionResult, Observation
 
 
@@ -46,6 +47,7 @@ class PublicHTTP:
         self.client.close()
 
     def _get(self, url: str, params: dict | None = None):
+        check_http_budget()
         prepare_httpx(self.client, url)
         # Keep at most one short retry within a one-second worker sleep budget.
         # Longer server deadlines are returned to the persistent scheduler.
@@ -55,6 +57,7 @@ class PublicHTTP:
         if deadlines.get(origin, 0) > time.time():
             raise RetryDeferred(deadlines[origin], "Origin cooldown")
         for attempt in range(2):
+            check_http_budget()
             try:
                 response = httpx_get(self.client, url, params=params)
                 response.raise_for_status()
@@ -225,6 +228,8 @@ def collect_options(assets: list[str], now: int | None = None, *, client: Any = 
         except Exception as exc:
             result.errors.append(f"Deribit HTTP client: {public_error(exc)}")
             return result
+    if not isinstance(client, PublicHTTP):
+        mark_uninstrumented("deribit")
     for asset in dict.fromkeys(a.upper() for a in assets):
         try:
             root = "https://www.deribit.com/api/v2/public/"
@@ -242,6 +247,8 @@ def collect_options(assets: list[str], now: int | None = None, *, client: Any = 
                 result.warnings.append(f"{asset}: no usable option summaries")
         except Exception as exc:
             result.errors.append(f"{asset} Deribit public options: {public_error(exc)}")
+            if isinstance(exc, HTTPBudgetExceeded):
+                break
     if own_client:
         client.close()
     return result
@@ -262,10 +269,26 @@ def collect_context(now: int | None = None, days: int = 365, *, client: Any = No
                 CollectionResult(source, errors=[f"HTTP client: {public_error(exc)}"])
                 for source in sources
             ]
+    if not isinstance(client, PublicHTTP):
+        for source in sources:
+            mark_uninstrumented(source)
+
+    def stopped(result):
+        try:
+            check_http_budget()
+            return False
+        except HTTPBudgetExceeded as exc:
+            message = public_error(exc)
+            if message not in result.warnings:
+                result.warnings.append(message)
+            return True
+
     results = []
     network = CollectionResult("coinmetrics")
     for asset in (("BTC", "ETH") if "coinmetrics" in sources else ()):
         for metric in ("AdrActCnt", "TxCnt"):
+            if stopped(network):
+                break
             try:
                 data = client.get_json(
                     "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics",
@@ -303,7 +326,7 @@ def collect_context(now: int | None = None, days: int = 365, *, client: Any = No
         results.append(network)
     stable = CollectionResult("defillama")
     try:
-        rows = client.get_json("https://stablecoins.llama.fi/stablecoincharts/all") if "defillama" in sources else []
+        rows = client.get_json("https://stablecoins.llama.fi/stablecoincharts/all") if "defillama" in sources and not stopped(stable) else []
         for row in rows:
             ts = int(row["date"])
             value = (row.get("totalCirculatingUSD") or {}).get("peggedUSD")
@@ -327,6 +350,8 @@ def collect_context(now: int | None = None, days: int = 365, *, client: Any = No
         results.append(stable)
     fred = CollectionResult("fred")
     for series in (("DFII10", "DTWEXBGS", "DGS2", "DGS10", "VIXCLS") if "fred" in sources else ()):
+        if stopped(fred):
+            break
         try:
             raw = client.get_text(
                 "https://fred.stlouisfed.org/graph/fredgraph.csv",

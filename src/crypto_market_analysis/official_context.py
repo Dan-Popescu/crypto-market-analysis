@@ -15,6 +15,8 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from .collectors import ExchangeClients
+from .http_accounting import http_source_scope, instrument_exchange, instrument_httpx, mark_uninstrumented
+from .http_limits import HTTPBudgetExceeded, bounded_public_operation, check_http_budget
 from .venues import VENUES
 
 ECB_FX_URL = "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml"
@@ -62,7 +64,8 @@ class OfficialHTTP:
         )
 
     def get_bytes(self, url: str) -> bytes:
-        with self.client.stream("GET", url) as response:
+        instrument_httpx(self.client, "ecb")
+        with http_source_scope("ecb"), self.client.stream("GET", url, extensions={"observer_stream": True}) as response:
             response.raise_for_status()
             chunks, length = [], 0
             for chunk in response.iter_bytes():
@@ -142,6 +145,7 @@ def _receipt(source: str, url: str, raw: bytes, captured: int, scope: str) -> di
             "bytes": len(raw)}
 
 
+@bounded_public_operation
 def capture_official_context(
     *, now: int | None = None, client: Any = None, clients: ExchangeClients | None = None,
     venues: tuple[str, ...] = ("kraken",), data_mode: str = "live",
@@ -177,14 +181,19 @@ def capture_official_context(
     }
 
     def budget():
+        check_http_budget()
         if result["logical_requests"] >= max_requests:
             raise _BudgetExhausted("Public logical-request budget exhausted.")
         result["logical_requests"] += 1
 
+    http_stopped = False
+
     def failed(source: str, exc: Exception):
+        nonlocal http_stopped
+        http_stopped = http_stopped or isinstance(exc, HTTPBudgetExceeded)
         # Transport exception messages can contain credential-bearing proxy URLs.
         result["errors"].append({"source": source, "status": "unavailable",
-                                 "reason": "budget_exhausted" if isinstance(exc, _BudgetExhausted) else "source_failure",
+                                 "reason": "budget_exhausted" if isinstance(exc, (_BudgetExhausted, HTTPBudgetExceeded)) else "source_failure",
                                  "error": f"{type(exc).__name__}: public source acquisition failed"})
 
     own_http = client is None and "fx" in include
@@ -195,6 +204,8 @@ def capture_official_context(
                 if own_http:
                     client = OfficialHTTP()
                 budget()
+                if not isinstance(client, OfficialHTTP):
+                    mark_uninstrumented("ecb")
                 raw = client.get_bytes(ECB_FX_URL)
                 captured = clock()
                 receipt = _receipt("ecb", ECB_FX_URL, raw, captured, "response_bytes")
@@ -206,10 +217,14 @@ def capture_official_context(
             if own_pool:
                 clients = ExchangeClients()
             for venue in dict.fromkeys(venues):
+                if http_stopped:
+                    break
                 try:
                     budget()
                     exchange = clients.client(venue)
-                    markets = clients.markets(venue, exchange)
+                    instrument_exchange(exchange, venue)
+                    with http_source_scope(venue):
+                        markets = clients.markets(venue, exchange)
                     if len(markets) > 100000:
                         raise ValueError("Public catalogue exceeds market-count limit.")
                     if not getattr(exchange, "has", {}).get("fetchTicker"):
@@ -228,10 +243,13 @@ def capture_official_context(
                     failed(venue, exc)
                     continue
                 for market in by_pair.values():
+                    if http_stopped:
+                        break
                     symbol = market["symbol"]
                     try:
                         budget()
-                        ticker = exchange.fetch_ticker(symbol)
+                        with http_source_scope(venue):
+                            ticker = exchange.fetch_ticker(symbol)
                         captured = clock()
                         raw = json.dumps(ticker, sort_keys=True, separators=(",", ":"),
                                          allow_nan=False).encode()
