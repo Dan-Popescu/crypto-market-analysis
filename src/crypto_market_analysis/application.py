@@ -367,7 +367,7 @@ class AccumulationService:
 
         client = PublicHTTP()
         try:
-            result = collect_calendars(int(time.time()), client=client)
+            result = collect_calendars(int(time.time()), client=client, receipt_clock=time.time)
         finally:
             client.close()
         for event in result["events"]:

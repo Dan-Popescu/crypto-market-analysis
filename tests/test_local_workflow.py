@@ -95,6 +95,24 @@ def test_explicit_offline_demo_remains_synthetic_and_unqualified(setup):
         assert row["data_mode"] == "demo"
 
 
+def test_explicit_demo_issuance_stays_excluded_from_prospective_evidence(setup):
+    from crypto_market_analysis.engine import Engine
+
+    settings, store, now = setup
+    seed(store, now, mode="demo", markets=["BTC/EUR"])
+    result = run_local_workflow(settings, request(
+        now, data_mode="demo", markets=["BTC/EUR"], issue_assessments=True,
+        idempotency_key="synthetic-only"))
+    [report] = result["markets"]
+    assert report["analytics_gate"]["real_source_qualified"] is False
+    assert report["issuance"]["status"] == "issued"
+    original = report["issuance"]["assessment"]
+    assert original["payload"]["input_reference"]["data_mode"] == "demo"
+    summary = Engine(settings, "demo").journal_summary()
+    assert summary["assessment_count"] == 1
+    assert summary["counts"]["issued"] == summary["counts"]["excluded"] > 0
+
+
 def test_demo_exception_does_not_bypass_history_gaps(setup):
     settings, store, now = setup
     seed(store, now, mode="demo", missing=(35,))

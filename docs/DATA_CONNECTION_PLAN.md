@@ -34,6 +34,9 @@ exchange account, paid API or permanent worker.
    current time in live mode. Failed quality gates suppress issuance without
    hiding partial market reports. Logical request/page limits must not be
    misrepresented as complete HTTP accounting when catalogue calls are unknown.
+   Live/import issuance requires the data-quality gate. An explicitly requested
+   offline demonstration can issue only with complete, fresh synthetic coverage;
+   its immutable demo record remains excluded from prospective evidence.
 
 ## Integration and verification
 

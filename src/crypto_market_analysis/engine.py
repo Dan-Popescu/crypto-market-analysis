@@ -284,7 +284,8 @@ class Engine:
             for record in result.get("stablecoin_prices", []):
                 inserted["stablecoin_price"] += self.store.save_local_record("stablecoin_price", record)["inserted"]
             if "calendar" in include:
-                calendar = collect_calendars(int(time.time()), client=client, include_ecb=True)
+                calendar = collect_calendars(int(time.time()), client=client, include_ecb=True,
+                                             receipt_clock=time.time)
                 result["calendar"] = calendar
                 for event in calendar.get("events", []):
                     inserted["calendar"] += self.store.save_local_record("calendar", event)["inserted"]

@@ -91,6 +91,9 @@ are not filesystem quotas.
 Qualification gates each market's analyses and optional issuance independently.
 Missing/stale history suppresses issuance and remains inspectable. A fresh,
 complete offline demonstration may calculate but remains synthetic/unqualified.
+An explicit demo issuance is permitted for testing only with complete, fresh
+coverage; its record retains demo provenance and is excluded from prospective
+cohorts. Missing/stale coverage suppresses issuance in every mode.
 Issuance additionally requires `issue_assessments: true` and an explicit
 `idempotency_key`; it is disabled in both examples. A retry recovers its original
 without manufacturing a new publication or replacing it after data changes.
