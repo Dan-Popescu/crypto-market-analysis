@@ -1,6 +1,7 @@
 # Measured operation and coherent local workflows
 
 Version 0.7.0 implements [the five accepted projects](OPERATING_CAPACITY_PLAN.md).
+Version 0.7.1 strengthens their [repair reliability](REPAIR_RELIABILITY_PLAN.md).
 Native markets, modes, source clocks, journal originals and OBSERVER settings
 remain intact. No paid source, account key, deployment or permanent worker is added.
 
@@ -26,10 +27,22 @@ Aggregation filters source, task, mode and receipt range before selecting at mos
 10,000 runs and 500 endpoints. Missing stores stay missing. Availability depends
 on run retention and explicit archives; this is not a lifetime bill. Wire, request
 and TLS byte totals remain unknown. Existing budgets still count logical adapter
-operations, not a hard HTTP/bandwidth ceiling. Standalone named-dataset repairs
-keep their separately declared OHLC-call budget and do not claim automatic
-inclusion in collection-run accounting. MCP `get_http_accounting` exposes the same
-bounded configured-mode read.
+operations, not a hard HTTP/bandwidth ceiling. Named-dataset REST captures and
+repairs now retain separate `history_rest` runs in import mode, including failed
+catalogue or fetch attempts. Their logical fetch budget remains separate from
+observed transport counts. MCP `get_http_accounting` exposes the same bounded
+configured-mode read. For a named dataset:
+
+```bash
+uv run crypto-market-analysis http-accounting --data-dir data/research --mode import --task history_rest --format markdown
+```
+
+Each explicit REST operation reserves 256 KiB of dataset admission headroom for
+its two bounded accounting records and SQLite allocation before requesting data.
+Accounting errors do not replace the original capture outcome: returned
+`http_accounting_retention` and run IDs disclose successful or failed retention.
+An abrupt process death may interrupt the final accounting commit; missing
+measurement is unknown work, and reconciliation never invents a completed count.
 
 ## Finite automatic history repair
 
@@ -42,7 +55,21 @@ The directory must already contain a named Kraken import dataset. Inspection
 neither initializes nor recovers it. `--apply` opts into one finite automatic
 cycle: discover gaps, resume durable tasks, capture bounded recent ranges and
 recompute remaining holes. Completed coverage does not trigger new capture on a
-repeat. No daemon is started; use one explicit dataset writer at a time.
+repeat. No daemon is started.
+
+Automatic apply acquires a fail-fast cooperative OS writer lock before recovery
+and authoritative planning. Existing-dataset `history-dataset` CLI actions share
+that guard, including manual repair, staging and legacy status (whose constructor
+can recover pending journals). A competing invocation returns `status: busy`,
+`applied: false` and CLI exit 1, without capture or recovery. Read-only automatic
+inspection and MCP status never acquire the lock or create its file. Lock release
+on normal exit or process death permits the next writer; never delete the stable
+`.history-writer.lock` file while a writer may be running. Direct programmatic
+`HistoryDataset` writers must hold `dataset_lock.dataset_writer_lock(database)`
+around construction/recovery and the complete operation. Arbitrary external
+writers and simultaneous creation of a new dataset are outside this guarantee.
+Create new datasets in their own isolated empty directory. Linux locking is
+process-tested; the Windows fallback remains unverified in this environment.
 
 Kraken's 720-entry recent window includes the current open hour. Only the preceding
 719 closed hours are API recoverable; older gaps need archives, future hours stay
@@ -54,10 +81,29 @@ The example permits four OHLC calls and 24 total hours per cycle. Selected reque
 share hours: four eligible long gaps receive six hours each; short ranges release
 unused shares. Defaults are eight ranges, 720 hours, four calls and 60-second
 initial backoff; dataset configuration also caps requests. Known Retry-After and
-bounded exponential backoff apply between invocations without sleeps. Very small
-request/hour budgets retain deterministic ordering rather than promising fair
-concurrent progress. `get_auto_repair_status` reads current mutable checkpoints
-through MCP, without planning, applying, recovering or reconstructing past state.
+bounded exponential backoff apply between invocations without sleeps. A single
+durable round-robin cursor rotates eligible native markets even with one call or
+hour per cycle. Each attempted turn advances atomically with its inflight task
+checkpoint before transport; interruption consumes that turn. Manual ownership,
+unsupported markets and retry deadlines still exclude work. Inspection reports
+the cursor without advancing it. `get_auto_repair_status` reads current mutable
+checkpoints and scheduling state through MCP, without planning, applying,
+recovering or reconstructing past state.
+
+Dataset reports must be outside the dataset and must not overwrite their
+configuration, archive manifest or source parts. Validation precedes recovery.
+
+## Process-death recovery verification
+
+```bash
+uv run --frozen python tools/verify_crash_recovery.py --output /tmp/crash-recovery.json --deadline-seconds 120
+```
+
+The bounded POSIX experiment kills real synthetic workers at observed durable
+capture and archive boundaries, then checks exact receipt times/hashes, missing
+hours, idempotency and SQLite rollback. It records source hashes, each scenario
+and a hard process-group deadline outside Git. These checks establish behavior
+after process death, not filesystem corruption or machine power-loss tolerance.
 
 ## One coherent analysis dossier
 

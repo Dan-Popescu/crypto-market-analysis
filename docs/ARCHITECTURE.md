@@ -10,6 +10,13 @@ independent reader. `installation_qualification` composes the public local captu
 and qualification seams. `capacity_cli` and `capacity_mcp` own transport dispatch,
 without embedding these workflows in the Engine facade or exposing writes to MCP.
 
+Version 0.7.1 adds `dataset_lock`, which owns the fail-fast cooperative OS guard
+shared by automatic apply and existing-dataset CLI construction/recovery/writes.
+It carries no domain state. The automatic repair module owns its single durable
+market cursor and checkpoints the turn atomically before capture. HistoryDataset
+owns REST accounting retention and reuses the existing transport meter and run
+schema; the CLI does not reconstruct HTTP counts from logical operations.
+
 The architecture follow-up to version 0.3.0 targets four demonstrated areas of
 duplicated domain knowledge. It preserves the existing Python application,
 SQLite storage, CLI and MCP interfaces. Domain terms are defined in

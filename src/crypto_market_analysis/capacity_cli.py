@@ -116,6 +116,18 @@ def render_capacity_report(result: dict, command: str) -> str:
     for row in result["markets"]:
         lines.append("| " + " | ".join(_cell(row.get(key)) for key in
                      ("asset", "quote", "remaining_hours", "recoverable_hours", "requires_archives_hours", "not_closed_hours")) + " |")
+    if result.get("status") == "busy":
+        lines.extend(["", "Another process holds the dataset writer lock; this invocation performed no capture or recovery."])
+    if result.get("scheduling"):
+        market = result["scheduling"]["next_market"]
+        lines.extend(["", f"Next eligible turn starts at {_cell(market[0])}/{_cell(market[1])}; unavailable markets are skipped."])
+    if result.get("http_accounting"):
+        measurement = result["http_accounting"]
+        totals = measurement.get("totals") or {}
+        lines.extend(["", f"HTTP coverage: {_cell(measurement['coverage'])}; "
+                      f"observed attempts: {_cell(totals.get('requests'))}; "
+                      f"responses: {_cell(totals.get('responses'))}.",
+                      "Checkpointed capture attempts and observed HTTP requests are separate counts."])
     if result.get("outcomes"):
         lines.extend(["", "| Task | Asset | Native quote | Status | Remaining hours | Retry at UTC |",
                       "| --- | --- | --- | --- | --- | --- |"])

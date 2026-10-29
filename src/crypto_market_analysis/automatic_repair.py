@@ -17,6 +17,7 @@ from pathlib import Path
 from .dataset_lock import DatasetBusy, dataset_writer_lock
 from .evidence import canonical_json as _json
 from .history_dataset import MARKETS, DatasetConfig, HistoryDataset, UnsupportedMarket
+from .http_accounting import merge_measurements
 from .storage import database_table_names as _tables
 from .storage import read_database_if_present as _read
 
@@ -284,7 +285,7 @@ def _apply_cycle(database, request, fetch, mode, clock):
     _reconcile(dataset, config, request.markets, int(clock()))
     # Replay may have restored candles, so do not request already recovered gaps.
     plan = plan_auto_repairs(database, request, mode=mode, now=int(clock()))
-    outcomes = []
+    outcomes, measurements = [], []
     for task in plan["tasks"]:
         now = int(clock())
         # Re-evaluate moving retention, closure, coverage and manual ownership.
@@ -302,19 +303,26 @@ def _apply_cycle(database, request, fetch, mode, clock):
                      remaining_hours=sum(h not in present_before for h in range(state["start"], state["end"], HOUR)),
                      retry_at=now + request.retry_seconds)
         _save(dataset, state, advance_schedule=True)
+        accounting = {}
         try:
             result = dataset.append_rest(state["asset"], state["quote"], fetch,
                                          since=candidate["request_start"], until=candidate["request_end"],
                                          limit=candidate["request_hours"])
             state.update(last_capture=result["id"], status="pending")
             state.pop("error_type", None)
+            accounting = result
         except Exception as exc:
+            accounting = {key: getattr(exc, key, None) for key in
+                          ("http_accounting", "http_accounting_run_id", "http_accounting_retention")}
             failures = state.get("consecutive_failures", 0) + 1
             delay = min(86400, request.retry_seconds * 2 ** min(failures - 1, 10))
             state.update(status="unsupported" if isinstance(exc, UnsupportedMarket) else "error",
                          error_type=type(exc).__name__, consecutive_failures=failures,
                          retry_deadline_basis=getattr(exc, "retry_after_basis", "exception_metadata_or_local_backoff"),
                          retry_at=_retry_at(exc, int(clock()), delay))
+        measurements.append(accounting.get("http_accounting"))
+        state.update(last_http_accounting_run_id=accounting.get("http_accounting_run_id"),
+                     last_http_accounting_retention=accounting.get("http_accounting_retention") or "unavailable")
         finished = int(clock())
         with dataset.store.connection() as con:
             present = _present(con, config, state["asset"], state["quote"], finished)
@@ -336,6 +344,8 @@ def _apply_cycle(database, request, fetch, mode, clock):
         outcomes.append(state)
     return {**plan_auto_repairs(database, request, mode=mode, now=int(clock())), "read_only": False,
             "applied": True, "requests_attempted": len(outcomes), "outcomes": outcomes,
+            "request_basis": "checkpointed_capture_attempts; transport_attempts_are_measured_separately",
+            "http_accounting": merge_measurements(measurements),
             "pending_recovery": "replayed_before_cycle"}
 
 

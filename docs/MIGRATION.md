@@ -1,5 +1,15 @@
 # English repository and output migration
 
+Version 0.7.1 retains the 42 read-only MCP tools. Named-dataset REST attempts now
+record import-mode `history_rest` runs; their returned transport measurements and
+retention status are additive and do not change immutable capture identities.
+Automatic repair adds one durable round-robin cursor on explicit apply, exposed
+in status as `scheduling`. Existing-dataset CLI actions use a cooperative writer
+lock; contention returns a structured busy report and exit 1. Reports must be
+outside dataset evidence and cannot replace configuration or archive inputs.
+Direct dataset API writers must use the same lock. No configuration or analytical
+rule migration is required. See [OPERATING_CAPACITY.md](OPERATING_CAPACITY.md).
+
 Version 0.7.0 adds finite operating commands and four read-only MCP tools, with no
 mandatory configuration change. Existing collection run payloads gain optional
 `http_accounting`; old or unsupported clients keep unknown totals. Named-dataset

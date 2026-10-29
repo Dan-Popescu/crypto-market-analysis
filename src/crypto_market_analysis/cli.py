@@ -7,6 +7,7 @@ import csv
 import json
 import logging
 import sys
+from contextlib import nullcontext
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -138,7 +139,8 @@ def _protect_report_output(args, settings) -> None:
 
 
 def _history_operation(args) -> dict:
-    from .history_dataset import ArchivePart, DatasetConfig, HistoryDataset, KrakenRESTCapture
+    from .dataset_lock import DatasetBusy, dataset_writer_lock
+    from .history_dataset import DatasetConfig
 
     if args.as_of is not None:
         raise ValueError("Dataset operations preserve actual capture times; --as-of is for analysis commands.")
@@ -158,25 +160,48 @@ def _history_operation(args) -> dict:
             raise ValueError("Report output must not overwrite dataset evidence or its configuration and archive inputs.")
     if args.action != "init" and not (Path(config.directory) / "dataset.json").is_file():
         raise ValueError("Initialize this explicit research dataset first with history-dataset init.")
+    archive = _history_archive_inputs(args) if args.action == "stage" else None
+    database = Path(config.directory) / "observer.sqlite"
+    # Construction can replay pending journals, including for legacy status.
+    # New dataset creation still requires an isolated empty directory.
+    lock = dataset_writer_lock(database) if (database.parent / "dataset.json").is_file() else nullcontext()
+    try:
+        with lock:
+            return _run_history_operation(args, config, archive)
+    except DatasetBusy:
+        return {"status": "busy", "reason": "dataset_writer_busy", "applied": False,
+                "dataset": config.name, "data_mode": "import", "action": args.action}
+
+
+def _history_archive_inputs(args):
+    from .history_dataset import ArchivePart
+
+    if args.parts_manifest is None or not args.member or args.captured_at is None:
+        raise ValueError("Archive staging requires --parts-manifest, --member and --captured-at.")
+    manifest = _json_file(args.parts_manifest)
+    if not isinstance(manifest.get("parts"), list):
+        raise ValueError("A parts manifest requires an explicitly ordered parts array.")
+    parts = []
+    for item in manifest["parts"]:
+        part = dict(item)
+        path = Path(part["path"]).expanduser()
+        part["path"] = str(path if path.is_absolute() else args.parts_manifest.resolve().parent / path)
+        if args.output and Path(args.output).resolve() == Path(part["path"]).resolve():
+            raise ValueError("Report output must not overwrite an archive input.")
+        parts.append(ArchivePart(**part))
+    return parts, manifest.get("build_metadata")
+
+
+def _run_history_operation(args, config, archive) -> dict:
+    from .history_dataset import HistoryDataset, KrakenRESTCapture
+
     dataset = HistoryDataset(config)
     if args.action in ("init", "status"):
         return dataset.manifest()
     if args.action == "stage":
-        if args.parts_manifest is None or not args.member or args.captured_at is None:
-            raise ValueError("Archive staging requires --parts-manifest, --member and --captured-at.")
-        manifest = _json_file(args.parts_manifest)
-        if not isinstance(manifest.get("parts"), list):
-            raise ValueError("A parts manifest requires an explicitly ordered parts array.")
-        parts = []
-        for item in manifest["parts"]:
-            part = dict(item)
-            path = Path(part["path"]).expanduser()
-            part["path"] = str(path if path.is_absolute() else args.parts_manifest.resolve().parent / path)
-            if args.output and Path(args.output).resolve() == Path(part["path"]).resolve():
-                raise ValueError("Report output must not overwrite an archive input.")
-            parts.append(ArchivePart(**part))
+        parts, build_metadata = archive
         return dataset.stage_archive(parts, member=args.member, asset=args.asset, quote=args.quote,
-                                     captured_at=args.captured_at, build_metadata=manifest.get("build_metadata"))
+                                     captured_at=args.captured_at, build_metadata=build_metadata)
     if args.action == "plan-repair":
         if args.start is None or args.end is None:
             raise ValueError("A bounded repair plan requires --start and --end.")
@@ -604,8 +629,9 @@ def main(argv: list[str] | None = None) -> int:
             _write_result(preview_plan_funding(_json_file(args.plan_config), now), args)
             return 0
         if args.command == "history-dataset":
-            write_json(_history_operation(args), args.output)
-            return 0
+            result = _history_operation(args)
+            write_json(result, args.output)
+            return 1 if result.get("status") == "busy" else 0
         if args.command in ("backup", "verify-backup", "restore-backup"):
             from .recovery import create_backup, restore_backup, verify_backup
 
