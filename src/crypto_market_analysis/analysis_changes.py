@@ -41,6 +41,57 @@ def _fact(value, *, identity, event=None, known=None, refs=(), unit=None, status
             "event_time": event, "known_at": known, "input_references": list(refs)}
 
 
+def _context_metric_facts(context, records, native, prefix):
+    """Keep metric evidence bounded and independent of the analytical cutoff."""
+    from datetime import datetime
+
+    days = {}
+    for row in records:
+        days.setdefault(row["open_time"] // 86400 * 86400, []).append(row)
+    days = {day: rows for day, rows in days.items() if len(rows) == 24
+            and sorted(row["open_time"] for row in rows) == list(range(day, day + 86400, 3600))}
+    references = {row["open_time"]: "sha256:" + content_hash(row) for rows in days.values() for row in rows}
+    evidence = {}
+    facts = {}
+    for family in ("lookbacks", "calendar"):
+        for period, panel in context[family].items():
+            for name, metric in panel.items():
+                if not isinstance(metric, dict) or "formula" not in metric:
+                    continue
+                coverage = metric["coverage"]
+                bounds = coverage["start"], coverage["end"]
+                if bounds not in evidence:
+                    start, end = (int(datetime.fromisoformat(value).timestamp()) for value in bounds)
+                    selected = [row for day in sorted(days) if start <= day < end for row in
+                                sorted(days[day], key=lambda item: item["open_time"])]
+                    refs = [references[row["open_time"]] for row in selected]
+                    retained = refs if len(refs) <= 16 else refs[:8] + refs[-8:]
+                    evidence[bounds] = {
+                        "event": max((row["close_time"] for row in selected), default=None),
+                        "known": max((row["observed_at"] for row in selected), default=None),
+                        "refs": retained,
+                        "manifest": {"total": len(refs), "retained": len(retained),
+                                     "omitted": len(refs) - len(retained), "input_hash": content_hash(refs),
+                                     "hash_scope": "ordered exact complete-day candle references; no cutoff"}}
+                inputs = evidence[bounds]
+                fact = _fact(metric["value"], identity={**native, "context_family": family, "period": period,
+                                                       "metric": name}, event=inputs["event"], known=inputs["known"],
+                             refs=inputs["refs"], unit=metric["unit"], status=metric["status"])
+                fact.update(formula=metric["formula"], coverage=coverage, reason=metric["reason"],
+                            input_reference_coverage=inputs["manifest"])
+                facts[f"{prefix}/context_metrics/{family}/{period}/{name}"] = fact
+    return facts
+
+
+def _context_metric_projection(fact):
+    if fact is None:
+        return None
+    # Receipt clocks and evidence digests explain a change, but cannot create one.
+    coverage = {key: value for key, value in fact["coverage"].items() if key != "latest_observed_at"}
+    return {"value": fact["value"], "status": fact["status"], "unit": fact["unit"],
+            "formula": fact["formula"], "coverage": coverage, "reason": fact["reason"]}
+
+
 def _facts(snapshot):
     facts = {}
     for index, market in enumerate(snapshot["markets"]):
@@ -52,6 +103,7 @@ def _facts(snapshot):
         event = last["close_time"] if last else None
         known = last["observed_at"] if last else None
         prefix = f"markets/{index}"
+        facts.update(_context_metric_facts(context, records, native, prefix))
         facts[prefix + "/price_anchor"] = _fact(
             context["anchor"]["price"] if context["anchor"] else None, identity=native,
             event=event, known=known, refs=reference, unit=native["quote"] + " per " + native["asset"],
@@ -292,6 +344,15 @@ def build_analysis_changes(store: Store, request: dict, as_of: int | None = None
         changes = []
         for key in sorted(old_facts.keys() | new_facts.keys()):
             old, new = old_facts.get(key), new_facts.get(key)
+            if "/context_metrics/" in key:
+                if _semantic(_context_metric_projection(old)) == _semantic(_context_metric_projection(new)):
+                    continue
+                change = _change(key, old, new, previous)
+                change["derived_metric"] = True
+                if old and new and any(old["coverage"][bound] != new["coverage"][bound] for bound in ("start", "end")):
+                    change["category"] = "derived_metric_window_change"
+                changes.append(change)
+                continue
             if _semantic(old) != _semantic(new):
                 changes.append(_change(key, old, new, previous))
         old_rows, new_rows = _candle_versions(before), _candle_versions(after)

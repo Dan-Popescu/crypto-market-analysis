@@ -224,3 +224,71 @@ def test_exact_omissions_and_shared_candle_budget(store, monkeypatch):
 def test_request_validation(store, patch):
     with pytest.raises(ValueError):
         build_analysis_changes(store, request(**patch), NOW)
+
+
+def test_requested_context_return_revision_is_visible_with_independent_numeric_answer(store):
+    cutoff = 1000 * 86400
+    bars = [candle(event, 100) for event in range(cutoff - 3 * 86400 + 3600, cutoff + 1, 3600)]
+    store.put_candles(bars)
+    wanted = request(previous_as_of=cutoff)
+    wanted["dossier"]["markets"][0]["lookbacks"] = [2]
+    revised = next(row for row in bars if row.close_time == cutoff - 2 * 86400)
+    store.put_candles([replace(revised, high=200, close=200, observed_at=cutoff + 1)])
+    result = build_analysis_changes(store, wanted, cutoff + 1)
+    metric = change(result, "/context_metrics/lookbacks/2/return")
+    # Independent endpoint calculation: the latest close stays 100, and the
+    # earlier daily endpoint is corrected from 100 to 200: 100 / 200 - 1 = -0.5.
+    assert metric["before"]["value"] == 0
+    assert metric["after"]["value"] == -0.5
+    assert metric["before"]["status"] == metric["after"]["status"] == "available"
+    assert metric["after"]["unit"] == "fraction"
+    assert metric["after"]["formula"] == "last_close / first_close - 1"
+    assert metric["after"]["coverage"]["obtained_closes"] == 3
+    assert metric["after"]["known_at"] == cutoff + 1
+    assert metric["after"]["input_reference_coverage"]["total"] == 72
+    assert metric["after"]["input_reference_coverage"]["retained"] == 16
+    assert metric["after"]["input_reference_coverage"]["omitted"] == 56
+    assert len(metric["after"]["input_references"]) == 16
+    assert metric["derived_metric"]
+    assert metric["category"] == "same_event_correction"
+    assert not metric["market_movement"]
+    assert result["summary"]["market_movements"] == 0
+    assert result["omissions"]["changes"] == 0
+
+
+def test_unchanged_context_metrics_ignore_cutoff_and_irrelevant_receipt_changes(store):
+    cutoff = 1000 * 86400
+    bars = [candle(event, 100) for event in range(cutoff - 3 * 86400 + 3600, cutoff + 1, 3600)]
+    store.put_candles(bars)
+    wanted = request(previous_as_of=cutoff)
+    wanted["dossier"]["markets"][0]["lookbacks"] = [2]
+    result = build_analysis_changes(store, wanted, cutoff + 1)
+    assert result["changes"] == []
+    assert result["snapshots"]["before"]["input_hash"] != result["snapshots"]["after"]["input_hash"]
+    # More detailed source evidence changes without altering any calculated
+    # metric. Receipt/reference differences alone cannot create metric changes.
+    store.put_candles([replace(bars[0], quote_volume=100, observed_at=cutoff + 1)])
+    result = build_analysis_changes(store, wanted, cutoff + 1)
+    assert not any("/context_metrics/" in row["path"] for row in result["changes"])
+    assert result["summary"]["market_movements"] == 0
+
+
+def test_calendar_metrics_report_normalized_changes_and_window_only_changes(store):
+    cutoff = 1000 * 86400
+    bars = [candle(event, 100) for event in range(cutoff - 3 * 86400 + 3600, cutoff + 1, 3600)]
+    store.put_candles(bars)
+    wanted = request(previous_as_of=cutoff)
+    revised = next(row for row in bars if row.open_time == cutoff - 86400)
+    store.put_candles([replace(revised, open=200, high=200, observed_at=cutoff + 1)])
+    result = build_analysis_changes(store, wanted, cutoff + 1)
+    metric = change(result, "/context_metrics/calendar/daily/return")
+    assert metric["before"]["value"] == 0
+    assert metric["after"]["value"] == -0.5
+    assert metric["after"]["formula"] == "period_close / period_open - 1"
+    assert not metric["market_movement"]
+    rollover = build_analysis_changes(store, wanted, cutoff + 86400)
+    metric = change(rollover, "/context_metrics/calendar/daily/return")
+    assert metric["after"]["value"] is None
+    assert metric["after"]["status"] == "unavailable"
+    assert metric["category"] == "derived_metric_window_change"
+    assert not metric["market_movement"]
