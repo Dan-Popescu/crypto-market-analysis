@@ -151,7 +151,8 @@ def test_configured_cli_writers_refuse_busy_dataset_before_engine_or_storage(tmp
         assert {p.name: p.read_bytes() for p in dataset.directory.iterdir() if p.is_file()} == before
 
 
-def test_named_backup_uses_writer_lock_without_creating_destination(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("alias", [False, True])
+def test_named_backup_uses_writer_lock_without_creating_destination(tmp_path, monkeypatch, capsys, alias):
     config, _ = _config(tmp_path)
     dataset = HistoryDataset(config, clock=lambda: 7200)
 
@@ -160,8 +161,15 @@ def test_named_backup_uses_writer_lock_without_creating_destination(tmp_path, mo
 
     monkeypatch.setattr("crypto_market_analysis.recovery.create_backup", forbidden)
     destination = tmp_path / "bundle"
+    database = dataset.store.path
+    if alias:
+        database = tmp_path / "external-database-alias.sqlite"
+        try:
+            database.symlink_to(dataset.store.path)
+        except (NotImplementedError, OSError):
+            pytest.skip("Symlinks unavailable")
     with dataset_writer_lock(dataset.store.path):
-        assert main(["backup", "--database", str(dataset.store.path), "--destination", str(destination),
+        assert main(["backup", "--database", str(database), "--destination", str(destination),
                      "--quiescent-dataset"]) == 1
     assert json.loads(capsys.readouterr().out)["reason"] == "dataset_writer_busy"
     assert not destination.exists()

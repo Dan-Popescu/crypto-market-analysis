@@ -682,11 +682,12 @@ def _run_cli(argv, resources) -> int:
                 if any(output == path or output.is_relative_to(path) for path in protected):
                     raise ValueError("Recovery report output must be outside source and destination bundles or datasets.")
             if args.command == "backup":
-                if args.quiescent_dataset and (args.database.parent / "dataset.json").is_file():
+                database = args.database.expanduser().resolve()
+                if args.quiescent_dataset and (database.parent / "dataset.json").is_file():
                     from .dataset_lock import DatasetBusy, dataset_writer_lock
 
                     try:
-                        resources.enter_context(dataset_writer_lock(args.database))
+                        resources.enter_context(dataset_writer_lock(database))
                     except DatasetBusy:
                         write_json({"status": "busy", "reason": "dataset_writer_busy", "applied": False,
                                     "action": "backup"}, args.output)

@@ -8,6 +8,9 @@ history repair, one-snapshot multi-market dossiers and portable source qualifica
 Inspection stays read-only; capture and repairs require explicit local opt-in.
 See [verified delivery, endurance measurements and remaining execution limits](docs/OPERATING_CAPACITY_STATUS.md).
 
+Version 0.7.1 strengthens repair fairness, writer exclusion, transport accounting
+and atomic evidence recovery. See the [verified reliability follow-up](docs/REPAIR_RELIABILITY_STATUS.md).
+
 Version 0.6.0 fixes [history, pipeline and MCP operating costs](docs/EFFICIENCY.md):
 SQL-filtered history pages, incremental refresh, durable source scheduling,
 compact evidence-aware MCP replies and checked archive/admission policies.

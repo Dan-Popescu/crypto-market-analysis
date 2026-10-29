@@ -1,5 +1,9 @@
 # Version 0.7.0 delivery and operating evidence
 
+The subsequent [version 0.7.1 reliability record](REPAIR_RELIABILITY_STATUS.md)
+adds repair accounting, durable fairness, shared writer ownership, atomic evidence
+publication and real process-death checks. This page preserves the 0.7.0 evidence.
+
 All five projects in [OPERATING_CAPACITY_PLAN.md](OPERATING_CAPACITY_PLAN.md) are
 implemented. [OPERATING_CAPACITY.md](OPERATING_CAPACITY.md) gives runnable commands,
 request examples and limits. Real provider qualification remains a separate
