@@ -1,5 +1,15 @@
 # Architecture and invariant ownership
 
+Version 0.7.0 adds the [operating workflows](OPERATING_CAPACITY.md).
+`http_accounting` owns bounded transport measurement and retained-run aggregation;
+`automatic_repair` owns finite named-dataset task progression and consumes the
+dataset's public admission/capture interface. `analysis_dossier` composes existing
+calculators through `Store.read_session`, whose isolated read-only connection owns
+snapshot lifetime and work budgets. Calendar SQL rules remain shared with the
+independent reader. `installation_qualification` composes the public local capture
+and qualification seams. `capacity_cli` and `capacity_mcp` own transport dispatch,
+without embedding these workflows in the Engine facade or exposing writes to MCP.
+
 The architecture follow-up to version 0.3.0 targets four demonstrated areas of
 duplicated domain knowledge. It preserves the existing Python application,
 SQLite storage, CLI and MCP interfaces. Domain terms are defined in

@@ -86,6 +86,10 @@ All registered tools declare read-only behavior. Chart rendering uses temporary 
 | `get_source_status` | Collection failures, configured venues, freshness and entity-specific unknowns. |
 | `get_source_catalog` | Documented endpoint capabilities, rights limitations and dated French entity evidence; no live availability claim. |
 | `get_request_schema` | On-demand nested request contracts, limits and synthetic executable examples; use `tool_name: "list"` for discovery. |
+| `get_http_accounting` | Observed retained-run HTTP attempts, errors, latency and decoded body bytes; unknown instrumentation stays unknown. |
+| `get_auto_repair_status` | Current configured-dataset repair checkpoints without planning, applying or recovery. |
+| `get_analysis_dossier` | Explicit native market contexts and requested stored sections/calendar in one read transaction, with shared cutoff and watermark. |
+| `get_installation_qualification` | Portable local native-market qualification report; this MCP surface forbids refresh. |
 | `get_result_page` | Bounded frozen details by handle, selection/content hashes and JSON pointer; inspect expiry and fragment metadata. |
 | `get_metric_series` | Discover actual source, native quote, unit and dimension identities before requesting history. |
 | `get_dataset_status` | Configured dataset identity, captures, conflicts, attempts and repair state, without recovery or initialization. |

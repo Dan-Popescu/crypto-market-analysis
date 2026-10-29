@@ -1,5 +1,15 @@
 # English repository and output migration
 
+Version 0.7.0 adds finite operating commands and four read-only MCP tools, with no
+mandatory configuration change. Existing collection run payloads gain optional
+`http_accounting`; old or unsupported clients keep unknown totals. Named-dataset
+automatic repair creates its checkpoint table only on explicit `--apply`.
+`analysis-dossier` shares one read transaction across requested sections. New JSON
+request commands accept `--request -` for bounded stdin. `qualify-installation`
+returns exit 1 for valid nonpass acceptance while preserving its report. Existing
+tool names, modes, quotes and analytical rules remain compatible. See
+[OPERATING_CAPACITY.md](OPERATING_CAPACITY.md) for commands, budgets and limitations.
+
 Version 0.6.0 deliberately makes `maintain` a dry run unless `--apply` is supplied.
 Local refresh is incremental; explicit `backfill_days` requests the old refetch
 behavior. MCP dictionary results are bounded projections with `_mcp_result` and
