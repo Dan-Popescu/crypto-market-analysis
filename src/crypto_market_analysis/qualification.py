@@ -31,6 +31,42 @@ class _ReferenceHash:
         return self.digest.hexdigest()
 
 
+class _CoverageSummary:
+    """Accumulate ordered latest references, retaining only bounded details."""
+
+    def __init__(self):
+        self.count = self.gap_count = self.largest_gap = 0
+        self.first = self.last = self.earliest_receipt = self.latest_receipt = None
+        self.gaps, self.samples = [], []
+        self.references = _ReferenceHash()
+
+    def _gap(self, start, end):
+        if end <= start:
+            return
+        hours = (end - start) // 3600
+        self.gap_count += 1
+        self.largest_gap = max(self.largest_gap, hours)
+        if len(self.gaps) < self.gap_limit:
+            self.gaps.append([start, end, hours])
+
+    def step(self, row_id, fingerprint, opened, closed, observed, start, end, sample_limit, gap_limit):
+        self.end, self.gap_limit = end, gap_limit
+        self._gap(self.last if self.last is not None else start, opened)
+        self.first = opened if self.first is None else self.first
+        self.last = closed
+        self.earliest_receipt = min(self.earliest_receipt, observed) if self.count else observed
+        self.latest_receipt = max(self.latest_receipt, observed) if self.count else observed
+        self.count += 1
+        self.references.step(row_id, fingerprint, opened, closed, observed)
+        if len(self.samples) < sample_limit:
+            self.samples.append([row_id, opened, closed, observed, fingerprint])
+
+    def finalize(self):
+        self._gap(self.last, self.end)
+        return canonical_json([self.count, self.first, self.last, self.earliest_receipt, self.latest_receipt,
+                               self.gap_count, self.largest_gap, self.gaps, self.samples, self.references.finalize()])
+
+
 def _integer(request, key, default, minimum=0, maximum=2_000_000):
     value = request.get(key, default)
     if type(value) is not int or not minimum <= value <= maximum:
@@ -167,31 +203,39 @@ def _coverage(con, parameters, request, evidence_budget):
     where = """source=? AND asset=? AND quote=? AND data_mode=? AND timeframe='1h'
         AND open_time>=? AND open_time<? AND close_time<=? AND observed_at<=?
         AND open_time%3600=0 AND close_time=open_time+3600"""
-    cte = f"""WITH versions AS (SELECT id,open_time,close_time,observed_at,fingerprint,
-        ROW_NUMBER() OVER(PARTITION BY open_time ORDER BY observed_at DESC,id DESC) rank
-        FROM candles WHERE {where}), latest AS (SELECT * FROM versions WHERE rank=1) """
-    stats = con.execute(cte + """SELECT COUNT(*),MIN(open_time),MAX(close_time),
-        MIN(observed_at),MAX(observed_at),(SELECT COUNT(*) FROM versions) FROM latest""", parameters).fetchone()
-    count, first, last, earliest_receipt, latest_receipt, versions = stats
-    # Each gap is an exact half-open missing interval, including both outer edges.
-    gaps_cte = cte + """, intervals AS (
-        SELECT COALESCE(LAG(close_time) OVER(ORDER BY open_time),?) start,open_time end FROM latest
-        UNION ALL SELECT COALESCE(MAX(close_time),?),? FROM latest),
-        gaps AS (SELECT start,end,(end-start)/3600 hours FROM intervals WHERE end>start) """
-    gap_parameters = [*parameters, start, start, end]
-    gap_count, largest_gap = con.execute(gaps_cte + "SELECT COUNT(*),COALESCE(MAX(hours),0) FROM gaps",
-                                       gap_parameters).fetchone()
-    gaps = [dict(r) for r in con.execute(gaps_cte + "SELECT * FROM gaps ORDER BY start LIMIT ?",
-                                       [*gap_parameters, request["max_gap_details"]])]
-    samples = [dict(r) for r in con.execute(cte + """SELECT id,open_time,close_time,observed_at,fingerprint
-        FROM latest ORDER BY open_time LIMIT ?""", [*parameters, evidence_budget])]
+    # Rank candidates once, then consume each ordered reference stream once.
+    # The bounded aggregate replaces a second SQL window sort for gaps plus
+    # repeated scans for stats and samples. It never reads candle payloads.
+    con.create_aggregate("qualification_coverage", 9, _CoverageSummary)
+    summary, versions, version_digest = con.execute(f"""WITH versions AS MATERIALIZED (
+        SELECT id,open_time,close_time,observed_at,fingerprint,
+            ROW_NUMBER() OVER(PARTITION BY open_time ORDER BY observed_at DESC,id DESC) rank
+        FROM candles WHERE {where}),
+        latest AS MATERIALIZED (SELECT * FROM versions WHERE rank=1)
+        SELECT
+            (SELECT qualification_coverage(id,fingerprint,open_time,close_time,observed_at,?,?,?,?) FROM
+                (SELECT * FROM latest ORDER BY open_time,observed_at,id)),
+            (SELECT COUNT(*) FROM versions),
+            (SELECT qualification_refs(id,fingerprint,open_time,close_time,observed_at) FROM
+                (SELECT * FROM versions ORDER BY open_time,observed_at,id))""",
+        [*parameters, start, end, evidence_budget, request["max_gap_details"]]).fetchone()
+    empty_digest = hashlib.sha256(b"").hexdigest()
+    if summary is None:
+        count = 0
+        first = last = earliest_receipt = latest_receipt = None
+        largest_gap = (end - start) // 3600
+        gap_count = 1
+        gap_rows = [[start, end, largest_gap]] if request["max_gap_details"] else []
+        sample_rows, selected_digest = [], empty_digest
+    else:
+        (count, first, last, earliest_receipt, latest_receipt, gap_count, largest_gap,
+         gap_rows, sample_rows, selected_digest) = json.loads(summary)
+    gaps = [dict(zip(("start", "end", "hours"), values, strict=True)) for values in gap_rows]
+    samples = [dict(zip(("id", "open_time", "close_time", "observed_at", "fingerprint"), values, strict=True))
+               for values in sample_rows]
     # Row IDs alone are recyclable; fingerprints and receipt times bind references
     # to the actual ordered evidence consumed in this transaction.
-    digests = {}
-    for name, table in (("selected", "latest"), ("versions", "versions")):
-        digest = con.execute(cte + f"""SELECT qualification_refs(id,fingerprint,open_time,close_time,observed_at)
-            FROM (SELECT * FROM {table} ORDER BY open_time,observed_at,id)""", parameters).fetchone()[0]
-        digests[name] = digest or hashlib.sha256(b"").hexdigest()
+    digests = {"selected": selected_digest, "versions": version_digest or empty_digest}
     expected = (end - start) // 3600
     return {
         "required_start": start, "required_end": end, "range_convention": "half_open_UTC_hourly",

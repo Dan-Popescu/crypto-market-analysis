@@ -254,3 +254,65 @@ def test_revision_evidence_is_stable_but_changes_when_selected_data_changes(stor
     revised = one(store)
     assert first["evidence"]["reference"] != revised["evidence"]["reference"]
     assert revised["coverage"]["revision_rows"] == 1
+
+
+@pytest.mark.parametrize(("samples", "gaps", "expected"), [
+    (3, 2, "11aa463ea308f8958f4c8459a5a977c16b2f5d451b25d65163e6a368c951cb32"),
+    (0, 0, "43d6dc1f3e4a8060398242694b6a8e6950a68a9871ef77f706fac830ff6f6c99"),
+    (100, 100, "58556aa96f719dac9591a07d9c830b10749189e0aea622de8250420a127dd012"),
+])
+def test_single_pass_coverage_preserves_baseline_exact_outputs_and_hashes(store, samples, gaps, expected):
+    from crypto_market_analysis.evidence import content_hash
+
+    # Frozen from qualification at 8225db97, before the single-pass optimization.
+    # Includes outer/internal gaps, a later-known revision, equal-receipt ID tie,
+    # excluded future knowledge, ordered samples and both complete-stream hashes.
+    store.put_candles([candle(0, observed_at=86000), candle(2, observed_at=86400),
+                       candle(3, observed_at=86400), candle(22, observed_at=86400), candle(23),
+                       candle(2, close=12), candle(3, observed_at=NOW + 1, close=13),
+                       candle(22, observed_at=86400, close=12)])
+    result = one(store, max_evidence_rows=samples, max_gap_details=gaps)
+    assert content_hash({"coverage": result["coverage"], "evidence": result["evidence"]}) == expected
+
+
+def test_single_pass_empty_coverage_preserves_baseline_exact_output(store):
+    from crypto_market_analysis.evidence import content_hash
+
+    result = one(store, max_evidence_rows=0, max_gap_details=0)
+    assert content_hash({"coverage": result["coverage"], "evidence": result["evidence"]}) == (
+        "cb90fde01b0e29a2be93b528f571a36f28e1964c179a4a24cc3f4617571ea540")
+
+
+def test_four_730_day_native_requirements_fit_shared_dossier_qualification_budget(store):
+    from crypto_market_analysis.analysis_dossier import build_analysis_dossier
+    from crypto_market_analysis.purchase_windows import analyze_windows
+
+    cutoff = 1793232000
+    store.put_candles([
+        Candle("demo", asset, quote, "1h", opened, opened + 3600, 100, 101, 99, 100, 1,
+               opened + 3600, data_mode="demo")
+        for asset, quote in (market.split("/") for market in NATIVE_MARKETS)
+        for opened in range(cutoff - 800 * 86400, cutoff, 3600)])
+    wanted = {
+        "dossier": {"data_mode": "demo", "markets": [
+            {"asset": asset, "source": "demo", "quote": quote, "lookbacks": [7, 30, 365, 730]}
+            for asset, quote in (market.split("/") for market in NATIVE_MARKETS)]},
+        "qualification": {"required_history_days": 730, "max_gap_details": 32, "max_evidence_rows": 32},
+        "windows": {"horizons": [1, 3, 7, 14], "thresholds": [.02, .05]},
+    }
+    # This exercises the production 50M VM-step/15-second read session, without
+    # replacing its progress handler or raising any resource limit.
+    with store.read_session() as session:
+        dossier = build_analysis_dossier(session, wanted["dossier"], cutoff)
+        qualification = qualify_sources(session, {
+            "sources": ["demo"], "data_mode": "demo", **wanted["qualification"]}, cutoff)
+    assert dossier["watermark"]["candles"] == qualification["watermark"]["candles"] == 76800
+    assert qualification["resources"]["candidate_versions_consumed"] == 4 * 730 * 24
+    assert [row["coverage"]["available_hours"] for row in qualification["markets"]] == [17520] * 4
+    assert all(row["coverage"]["coverage_complete"] for row in qualification["markets"])
+    assert sum(len(row["evidence"]["row_samples"]) for row in qualification["markets"]) == 32
+    # Pure calculations consume detached evidence after the bounded read closes.
+    for market in dossier["markets"]:
+        captured = market["market_context"]["stored_inputs"]["consumed_records"]
+        windows = analyze_windows([Candle(**row) for row in captured], cutoff, **wanted["windows"])
+        assert windows["status"] == "experimental"
