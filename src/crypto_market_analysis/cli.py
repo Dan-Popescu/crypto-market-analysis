@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import __version__
-from .config import load_settings
+from .config import Settings, load_settings
 from .engine import Engine, render_brief
 from .models import Candle
 from .reporting import (
@@ -149,6 +149,13 @@ def _history_operation(args) -> dict:
         if isinstance(raw.get(key), str):
             raw[key] = parse_time(raw[key])
     config = DatasetConfig(**raw)
+    _protect_report_output(args, Settings(data_dir=Path(config.directory)))
+    if args.output:
+        output = Path(args.output).resolve()
+        inputs = [args.dataset_config, args.parts_manifest]
+        if (output.is_relative_to(Path(config.directory).resolve())
+                or any(output == path.resolve() for path in inputs if path is not None)):
+            raise ValueError("Report output must not overwrite dataset evidence or its configuration and archive inputs.")
     if args.action != "init" and not (Path(config.directory) / "dataset.json").is_file():
         raise ValueError("Initialize this explicit research dataset first with history-dataset init.")
     dataset = HistoryDataset(config)
@@ -165,6 +172,8 @@ def _history_operation(args) -> dict:
             part = dict(item)
             path = Path(part["path"]).expanduser()
             part["path"] = str(path if path.is_absolute() else args.parts_manifest.resolve().parent / path)
+            if args.output and Path(args.output).resolve() == Path(part["path"]).resolve():
+                raise ValueError("Report output must not overwrite an archive input.")
             parts.append(ArchivePart(**part))
         return dataset.stage_archive(parts, member=args.member, asset=args.asset, quote=args.quote,
                                      captured_at=args.captured_at, build_metadata=manifest.get("build_metadata"))
@@ -180,7 +189,7 @@ def _history_operation(args) -> dict:
             return dataset.append_rest(args.asset, args.quote, fetch, since=args.since, limit=args.limit)
         return dataset.repair(args.asset, args.quote, fetch, request_budget=args.request_budget)
     except Exception as exc:
-        raise ValueError(f"Dataset public capture failed: {type(exc).__name__}: {exc}") from exc
+        raise ValueError(f"Dataset public capture failed: {type(exc).__name__}; transport details withheld.") from exc
     finally:
         session = getattr(fetch.client, "session", None)
         if session is not None and callable(getattr(session, "close", None)):
