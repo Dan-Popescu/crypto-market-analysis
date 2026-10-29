@@ -552,7 +552,7 @@ def capture_books(
             inserted += written
             receipt = (max(row["captured_at"] for row in result.books) if result.books
                        else now if now is not None else int(time.time()))
-            saved = store.save_result(result, "book_capture", receipt)
+            saved = store.save_result(result, "book_capture", receipt, data_mode="live")
             observations += saved["inserted_observations"]
             reports.append({"source": source, "captured_books": len(result.books), "inserted_books": written,
                             "inserted_observations": saved["inserted_observations"],

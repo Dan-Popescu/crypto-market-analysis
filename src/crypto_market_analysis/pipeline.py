@@ -41,7 +41,7 @@ def collect(
         completed = int(time.time())
         result.candles = [replace(c, observed_at=completed) for c in result.candles]
         result.observations = [replace(o, observed_at=completed) for o in result.observations]
-        reports.append(store.save_result(result, task, completed))
+        reports.append(store.save_result(result, task, completed, data_mode="live"))
 
     def exchange(venue: str, venue_tasks: tuple[str, ...]) -> CollectionResult:
         starts = {
@@ -196,7 +196,7 @@ def _run_scheduler(settings: Settings, store: Store, stop: Event | None, clients
                     if (source, task) not in received:
                         # A missing report must still advance a durable failure clock.
                         row = store.record_run(CollectionResult(source, errors=[failure]),
-                                               task, int(completed))
+                                               task, int(completed), data_mode="live")
                         schedule.record(row, task, completed)
             log.info("Collection: %s", report["status"])
         stop.wait(5)

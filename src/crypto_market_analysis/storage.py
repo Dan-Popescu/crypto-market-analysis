@@ -33,6 +33,19 @@ def _hash(value: dict) -> str:
     return hashlib.sha256(_json(value).encode()).hexdigest()
 
 
+def _result_data_mode(result: CollectionResult, explicit: str | None) -> str | None:
+    """Classify only declared evidence or an explicit producer contract."""
+    if explicit is not None and explicit not in ("live", "demo", "import"):
+        raise ValueError("Run data_mode must be live, demo, import or None.")
+    modes = {row.data_mode for row in [*result.candles, *result.observations]}
+    modes.update(row.get("data_mode") for row in result.books)
+    if explicit is not None:
+        if modes and modes != {explicit}:
+            raise ValueError("Run data_mode conflicts with its evidence.")
+        return explicit
+    return next(iter(modes)) if len(modes) == 1 and modes <= {"live", "demo", "import"} else None
+
+
 class Store:
     """Public boundary for idempotent, source-specific, known-at data access."""
 
@@ -197,9 +210,11 @@ class Store:
                 inserted += 1
         return inserted
 
-    def record_run(self, result: CollectionResult, task: str, now: int) -> dict:
+    def record_run(self, result: CollectionResult, task: str, now: int, *,
+                   data_mode: str | None = None) -> dict:
         payload = {
             "source": result.source,
+            "data_mode": _result_data_mode(result, data_mode),
             "task": task,
             "observed_at": now,
             "candles": len(result.candles),
@@ -222,7 +237,9 @@ class Store:
             )
         return payload
 
-    def save_result(self, result: CollectionResult, task: str, now: int) -> dict:
+    def save_result(self, result: CollectionResult, task: str, now: int, *,
+                    data_mode: str | None = None) -> dict:
+        data_mode = _result_data_mode(result, data_mode)
         candles = observations = 0
         try:
             candles = self.put_candles(result.candles)
@@ -235,7 +252,7 @@ class Store:
             result.errors.append(f"Observation validation: {exc}")
             result.observations = []
         return {
-            **self.record_run(result, task, now),
+            **self.record_run(result, task, now, data_mode=data_mode),
             "inserted_candles": candles,
             "inserted_observations": observations,
         }
@@ -482,10 +499,14 @@ class Store:
             rows = con.execute("""
                 SELECT (SELECT payload FROM runs latest
                         WHERE latest.source=groups.source AND latest.task=groups.task
+                        AND (json_extract(latest.payload,'$.data_mode') IS NULL
+                             OR json_extract(latest.payload,'$.data_mode')='live')
                         ORDER BY observed_at DESC,id DESC LIMIT 1), groups.last_success
                 FROM (SELECT source,task,MAX(CASE WHEN json_array_length(payload,'$.errors')=0
                       THEN observed_at ELSE 0 END) last_success
-                      FROM runs GROUP BY source,task) groups
+                      FROM runs WHERE json_extract(payload,'$.data_mode') IS NULL
+                           OR json_extract(payload,'$.data_mode')='live'
+                      GROUP BY source,task) groups
             """).fetchall()
         return [{**json.loads(row[0]), "last_success": row[1]} for row in rows]
 

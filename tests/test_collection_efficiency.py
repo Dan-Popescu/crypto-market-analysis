@@ -196,3 +196,59 @@ def test_context_source_cadences_are_independent(monkeypatch, tmp_path):
     assert requested == [("defillama",)]
     run_scheduler(settings, Store(settings.database), Once())
     assert requested == [("defillama",)]
+
+
+@pytest.mark.parametrize("mode", ["demo", "import"])
+def test_known_nonlive_history_does_not_reset_live_scheduler(monkeypatch, tmp_path, mode):
+    now = 1_800_000_000
+    monkeypatch.setattr("crypto_market_analysis.pipeline.time.time", lambda: now)
+    settings = Settings(data_dir=tmp_path, venues=["kraken"], options=False, context=False)
+    store = Store(settings.database)
+    # Old live collection is due. A recent synthetic/import run cannot hide it.
+    store.record_run(CollectionResult("kraken"), "market+liquidity", now - 86400, data_mode="live")
+    store.record_run(CollectionResult("kraken"), "market+liquidity", now, data_mode=mode)
+    store.record_run(CollectionResult("storage"), "retention", now)
+    calls = []
+    monkeypatch.setattr("crypto_market_analysis.pipeline.collect_exchange", lambda source, *a, **kw:
+                        calls.append(source) or CollectionResult(source))
+    run_scheduler(settings, store, Once())
+    assert calls == ["kraken"]
+    assert store.scheduler_runs()[0]["data_mode"] in (None, "live")
+
+
+def test_public_empty_and_failed_attempts_are_classified_live(monkeypatch, tmp_path):
+    settings = Settings(data_dir=tmp_path, venues=["kraken", "coinbase"], options=False, context=False)
+    store = Store(settings.database)
+    monkeypatch.setattr("crypto_market_analysis.pipeline.collect_exchange", lambda source, *a, **kw:
+                        CollectionResult(source, errors=["RequestTimeout"] if source == "coinbase" else []))
+    report = collect(settings, store, tasks=("market",))
+    assert {row["data_mode"] for row in report["reports"]} == {"live"}
+    assert {row["status"] for row in report["reports"]} == {"empty", "error"}
+
+
+def test_run_mode_infers_unique_evidence_and_preserves_unclassified_records(tmp_path):
+    from dataclasses import replace
+
+    store = Store(tmp_path / "modes.sqlite")
+    candle = Candle("kraken", "BTC", "EUR", "1h", 0, 3600, 1, 1, 1, 1, 1, 3600, data_mode="demo")
+    assert store.record_run(CollectionResult("kraken", candles=[candle]), "market", 3600)["data_mode"] == "demo"
+    assert store.save_result(CollectionResult("kraken", candles=[candle]), "market", 3600)["data_mode"] == "demo"
+    mixed = CollectionResult("kraken", candles=[candle, replace(candle, data_mode="import")])
+    assert store.record_run(mixed, "market", 3600)["data_mode"] is None
+    assert store.record_run(CollectionResult("kraken"), "retention", 3600)["data_mode"] is None
+    assert store.record_run(CollectionResult("kraken", books=[{"data_mode": "import"}]),
+                            "book_capture", 3600)["data_mode"] == "import"
+    with pytest.raises(ValueError, match="conflicts"):
+        store.save_result(CollectionResult("kraken", candles=[candle]), "market", 3600, data_mode="live")
+    assert store.counts()["candles"] == 1
+
+
+@pytest.mark.parametrize("errors", [[], ["RequestTimeout"]])
+def test_public_book_empty_and_failed_attempts_are_classified_live(monkeypatch, tmp_path, errors):
+    from crypto_market_analysis.collectors import capture_books
+
+    store = Store(tmp_path / "books.sqlite")
+    monkeypatch.setattr("crypto_market_analysis.collectors.collect_exchange", lambda source, *a, **kw:
+                        CollectionResult(source, errors=errors))
+    capture_books(store, sources=["kraken"], assets=["BTC"], quotes=("EUR",), clients=object())
+    assert store.runs()[0]["data_mode"] == "live"
