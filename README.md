@@ -6,6 +6,7 @@ Version 0.5.0 adds [automatic local data connections](docs/DATA_CONNECTIONS.md):
 retained books, official context capture, stored calculations, four-market source
 qualification and an explicit local refresh/report workflow. Network captures
 and assessment issuance are opt-in. No deployment is needed.
+See [verified delivery and remaining live checks](docs/DATA_CONNECTION_STATUS.md).
 
 Version 0.4.0 adds verified local backup/restore and original replay, bounded
 prospective scorecards, shared BTC/ETH cash envelopes, explicit snapshot venue

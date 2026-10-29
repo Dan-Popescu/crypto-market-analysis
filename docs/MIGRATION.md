@@ -91,6 +91,14 @@ read-only; there is no MCP issuance or outcome-append operation.
 
 ## Version 0.4.0 offline additions
 
+For the subsequent 0.5.0 connection layer, see [DATA_CONNECTIONS.md](DATA_CONNECTIONS.md).
+Its retained book table is created only by explicit retention/capture. New
+`fx_reference` and `stablecoin_price` local record kinds are additive; store schema
+version 2 and existing backup/restore behavior remain compatible. Existing
+collection defaults do not retain levels, and existing pure-request tools remain
+supported. Official network callers now stamp each calendar response after its
+receipt; injected callers may still supply an explicit frozen clock.
+
 The [offline workflow guide](OFFLINE_WORKFLOWS.md) documents new explicit CLI
 commands and seven read-only MCP tools. Existing commands, configuration, journal
 archives, plan rule `accumulation-v2` and mode/native-quote identities remain

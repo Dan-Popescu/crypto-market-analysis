@@ -71,6 +71,11 @@ All registered tools declare read-only behavior. Chart rendering uses temporary 
 | `calculate_venue_disagreement` | Fresh aligned same-quote dispersion with stale, missing and outlier sources visible. |
 | `get_quote_context` | Explicit indicative FX and stablecoin basis with native input and transformation provenance. |
 | `get_derivatives_context` | Native funding/OI 4h/24h comparisons with known-at endpoints, conventions and missingness. |
+| `get_stored_derivatives` | Build native derivative inputs from bounded stored vintages and report consumed evidence. |
+| `get_stored_quotes` | Read stored native reference/spot inputs, retaining date-only and unknown clocks. |
+| `get_stored_venue_costs` | Use retained books with explicit fee, product and rule assumptions. |
+| `get_stored_venue_disagreement` | Compare eligible retained native books with visible unknown/stale sources. |
+| `qualify_sources` | Read-only independent native-market history, gap, freshness and resource qualification. |
 | `get_analysis_bundle` | Establish as-of time, mode, reference market, observations, source coverage and limitations. |
 | `get_market_context` | Descriptive context, complete UTC periods and explicit lookback coverage. |
 | `get_purchase_windows` | Experimental 1/3/7/14-day endpoint/touch frequencies, reference rates, support and expiry. |
@@ -112,3 +117,8 @@ An assistant request can be: “Compare regular, split and deferred BTC purchase
 Streamable HTTP uses `/mcp`; local HTTP binds to `127.0.0.1` by default. Remote use requires HTTPS, an external compatible OAuth provider and `observer:read` scope; see [OPERATIONS.md](OPERATIONS.md). Add that URL as a custom client connection only after configuring the service. The repository does not deploy a service or connect any account automatically.
 
 Client documentation: [custom MCP in ChatGPT](https://developers.openai.com/api/docs/guides/custom-mcp-server); [Claude remote MCP connectors](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp). Actual access depends on client/provider registration support and account permissions.
+
+Version 0.5.0 stored tools take a bounded `request` and optional integer `as_of`.
+Explicit sources, native quote and data mode determine each read. They do not
+fetch data, repair gaps, issue assessments or expose paths. Capture and the local
+workflow remain explicit CLI operations; see [local data connections](DATA_CONNECTIONS.md).

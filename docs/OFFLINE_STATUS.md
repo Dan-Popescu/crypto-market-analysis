@@ -1,5 +1,8 @@
 # Version 0.4.0 offline completion and verification
 
+This preserves the 0.4.0 record. The later [0.5.0 connection status](DATA_CONNECTION_STATUS.md)
+implements acquisition and stored-data bridges that were still absent here.
+
 This delivery follows [the offline completion plan](OFFLINE_COMPLETION_PLAN.md).
 The preceding four architecture projects were complete, but the broader offline
 backlog was not. This record distinguishes the additional implementation from
