@@ -159,10 +159,12 @@ def test_actual_mcp_history_keeps_legacy_fields_and_adds_native_pagination(tmp_p
 
     async def check():
         args = dict(asset="BTC", metric="funding", source="venue", quote="USD", as_of=NOW, limit=2)
-        _, first = await server.call_tool("get_metric_history", args)
+        response = await server.call_tool("get_metric_history", args)
+        first = response.structuredContent
         assert {"points", "truncated", "asset", "metric", "data_mode"} <= first.keys()
         assert first["truncated"] is True
-        _, second = await server.call_tool("get_metric_history", {**args, "cursor": first["next_cursor"]})
+        response = await server.call_tool("get_metric_history", {**args, "cursor": first["next_cursor"]})
+        second = response.structuredContent
         assert len(first["points"] + second["points"]) == 4
         assert second["truncated"] is False
 

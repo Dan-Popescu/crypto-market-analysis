@@ -135,7 +135,7 @@ def create_server(
         transport_security=TransportSecuritySettings(
             enable_dns_rebinding_protection=True, allowed_hosts=allowed_hosts
         ),
-        instructions="Analyze BTC/ETH over 1–60 days. For accumulation use get_accumulation_brief with an explicitly pinned source/native EUR or USD quote or matching plan. It combines descriptive context through 730 days, experimental 1/3/7/14-day purchase windows and hypothetical plans assessed at 90/180 days on one snapshot. Use compare_cost_sensitivity for caller-declared costs and get_journal_summary for bounded pending/missing cohorts. get_journal_scorecard adds descriptive outcomes with independent sample selection; replay_assessment verifies frozen original calculations without observing outcomes. preview_shared_budget describes declared shared cash constraints. calculate_purchase_costs, calculate_venue_disagreement, get_quote_context and get_derivatives_context use explicit caller-supplied local observations without collection. All tools are read-only; assessment issuance and outcome observation require explicit local CLI operations. get_analysis_bundle provides the broader source dossier. Percentages are experimental; never describe them as calibrated or as a demonstrated edge. Missing data is not a neutral signal. Cite the source, unit and anchor. Keep USD, EUR and stablecoins separate, and distinguish demonstration data from real data. Use render_chart to illustrate observations. Explain contradictions and the conditions that would change the interpretation. No order execution.",
+        instructions="Analyze BTC/ETH over 1–60 days. For accumulation use get_accumulation_brief with an explicitly pinned source/native EUR or USD quote or matching plan. It combines descriptive context through 730 days, experimental 1/3/7/14-day purchase windows and hypothetical plans assessed at 90/180 days on one snapshot. Use compare_cost_sensitivity for caller-declared costs and get_journal_summary for bounded pending/missing cohorts. get_journal_scorecard adds descriptive outcomes with independent sample selection; replay_assessment verifies frozen original calculations without observing outcomes. preview_shared_budget describes declared shared cash constraints. calculate_purchase_costs, calculate_venue_disagreement, get_quote_context and get_derivatives_context use explicit caller-supplied local observations without collection. All tools are read-only; assessment issuance and outcome observation require explicit local CLI operations. get_analysis_bundle provides the broader source dossier. Percentages are experimental; never describe them as calibrated or as a demonstrated edge. Missing data is not a neutral signal. Cite the source, unit and anchor. Keep USD, EUR and stablecoins separate, and distinguish demonstration data from real data. Use render_chart to illustrate observations. Explain contradictions and the conditions that would change the interpretation. No order execution. Use get_request_schema with list or a tool name for bounded input contracts/examples. Inspect _mcp_result for omitted paths, frozen content and selection hashes, and expiry. Use get_result_page for bounded frozen details; expired handles require a fresh calculation. get_metric_series discovers actual native dimensions before paginated get_metric_history reads.",
     )
     engine = Engine(settings, mode)
     presenter = MCPResultPresenter()
@@ -417,6 +417,19 @@ def create_server(
                                            start=start, end=end, cursor=cursor)
 
     @presenter.tool(server, annotations=readonly)
+    def get_metric_series(
+        asset: Literal["BTC", "ETH", "MACRO", "STABLECOINS"],
+        metric: str | None = None, source: str | None = None, quote: str | None = None,
+        unit: str | None = None, dimension: dict[str, Any] | None = None,
+        as_of: StrictInt | None = None, start: StrictInt | None = None,
+        end: StrictInt | None = None, limit: StrictInt = 100,
+    ) -> dict[str, Any]:
+        """Discover stored native series, exact dimensions and known-at date coverage before selecting history. Bounded; no collection or conversion."""
+        return engine.store.metric_series(asset, metric, source=source, mode=mode,
+                                          quote=quote, unit=unit, dimension=dimension,
+                                          as_of=as_of, start=start, end=end, limit=limit)
+
+    @presenter.tool(server, annotations=readonly)
     def explain_metric(metric: str) -> dict[str, Any]:
         """Use for plain English definitions and interpretation limits. Without a matching key, returns available glossary keys."""
         return GLOSSARY.get(metric, {"available_metrics": list(GLOSSARY), "unknown_metric": metric})
@@ -471,5 +484,11 @@ def create_server(
         """Read a frozen result by opaque handle and matching hashes, within 5 minutes unless evicted. Empty path pages the complete result; paths use JSON pointers. Structured items preserve order; oversized rows use canonical-json-text fragments with character offsets: concatenate fragments before JSON parsing. No database reread or file/network access."""
         return result_message(presenter.page(handle, selection_hash, content_hash, path,
                                              offset, limit, fragment_offset))
+
+    from .operational_reads import register_operational_tools
+
+    register_operational_tools(server, engine, readonly,
+                               present=presenter.tool(server, annotations=readonly))
+
 
     return server

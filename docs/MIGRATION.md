@@ -1,5 +1,13 @@
 # English repository and output migration
 
+Version 0.6.0 deliberately makes `maintain` a dry run unless `--apply` is supplied.
+Local refresh is incremental; explicit `backfill_days` requests the old refetch
+behavior. MCP dictionary results are bounded projections with `_mcp_result` and
+read-only `get_result_page` access to full frozen details. Consumers must inspect
+omissions and expiry; history `points` remains a list and its cursor advances from
+the last emitted row. Native tool names and calculation rules stay compatible.
+See [EFFICIENCY.md](EFFICIENCY.md) for conservation defaults and operator commands.
+
 The implementation brief adopted on October 28, 2026 makes English canonical
 for first-party repository content and software output. This supersedes earlier
 French-output requirements. It applies to documentation, examples, code names,

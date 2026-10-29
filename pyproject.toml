@@ -1,6 +1,6 @@
 [project]
 name = "crypto-market-analysis"
-version = "0.5.0"
+version = "0.6.0"
 description = "Public-data BTC/ETH market analysis tools, CLI and MCP server"
 readme = "README.md"
 requires-python = ">=3.11"

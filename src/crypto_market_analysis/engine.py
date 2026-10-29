@@ -41,6 +41,9 @@ class Engine:
                                     "data_mode": dataset.data_mode,
                                     "target_start": dataset.target_start, "target_end": dataset.target_end}
         self.store = Store(settings.database)
+        from .storage_policy import StoragePolicy
+
+        self.store.storage_policy = StoragePolicy.from_settings(settings)
         self.mode = mode
 
     @staticmethod
