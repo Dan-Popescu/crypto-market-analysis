@@ -35,6 +35,16 @@ def change(result, suffix):
     return next(row for row in result["changes"] if row["path"].endswith(suffix))
 
 
+def test_late_history_does_not_crowd_analytical_changes_out_of_retained_slots(store):
+    store.put_candles([replace(candle(event=hour + 3600), observed_at=NOW)
+                       for hour in range(PREVIOUS - 72 * 3600, PREVIOUS, 3600)])
+    result = build_analysis_changes(store, request(max_changes=1), NOW)
+    assert result["summary"]["by_category"]["late_arrival"] >= 72
+    assert result["omissions"]["truncated"] and len(result["changes"]) == 1
+    assert "/context_metrics/" in result["changes"][0]["path"]
+    assert result["changes"][0]["market_movement"] is False
+
+
 def test_nested_sessions_reuse_connection_and_expire(store, monkeypatch):
     with store.read_session() as session:
         with session.read_session() as nested:

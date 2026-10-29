@@ -384,8 +384,10 @@ def build_analysis_changes(store: Store, request: dict, as_of: int | None = None
             change["category"] = ("receipt_only_update" if old and new and _semantic(change["before"]["value"]) == _semantic(change["after"]["value"])
                                   else "calendar_revision" if old and new else "calendar_newly_available" if new else "clock_or_range_exit")
             changes.append(change)
-        # Keep real observations/corrections first, followed by operational/time changes.
-        changes.sort(key=lambda row: (row["category"] in ("receipt_only_update", "clock_or_expiry_change"), row["path"]))
+        # Keep analytical conclusions ahead of individual vintage details, so a
+        # large late backfill cannot consume every retained change slot.
+        changes.sort(key=lambda row: (row["category"] in ("receipt_only_update", "clock_or_expiry_change"),
+                                     "/candle/" in row["path"] or "/derivative_vintage/" in row["path"], row["path"]))
         counts = Counter(row["category"] for row in changes)
         retained = changes[:maximum]
         markets = []
