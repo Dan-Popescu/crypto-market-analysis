@@ -82,6 +82,19 @@ class Clock:
         return getattr(time, name)
 
 
+class WallClock:
+    """Advance domain wall time while resource deadlines keep real monotonic time."""
+
+    def __init__(self, virtual):
+        self.virtual = virtual
+
+    def time(self):
+        return self.virtual.time()
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
 class OneIteration(Event):
     def wait(self, timeout=None):
         self.set()
@@ -236,6 +249,52 @@ def durable_states(store):
         return [dict(row) for row in con.execute("SELECT * FROM scheduler_state ORDER BY source,task")]
 
 
+def validate_dossier(dossier, selected_quote, cutoff):
+    """Check the reconstructed result, including sections omitted from the summary."""
+    require(dossier["as_of"] == cutoff and dossier["data_mode"] == "demo" and dossier["read_only"],
+            "Dossier changed cutoff, mode or read-only contract")
+    require(len(dossier["markets"]) == 1, "Dossier changed native market count")
+    market = dossier["markets"][0]
+    expected_selection = {"asset": "BTC", "source": "kraken", "quote": selected_quote, "data_mode": "demo"}
+    require(market["selection"] == expected_selection, "Dossier changed native market identity")
+    context = market["market_context"]
+    records = context["stored_inputs"]["consumed_records"]
+    require(len(records) <= dossier["resource_limits"]["total_candles"], "Dossier candle budget exceeded")
+    require(len(dossier["calendar"]["rows"]) <= dossier["resource_limits"]["calendar_rows"],
+            "Dossier calendar row budget exceeded")
+    expected_price = (100 if selected_quote == "EUR" else 200) + 1
+    for row in records:
+        require(all(row[key] == value for key, value in expected_selection.items()),
+                "Dossier candle evidence mixed native market identities")
+        require(row["close"] == expected_price and row["close_time"] <= row["observed_at"] <= cutoff,
+                "Dossier changed a native financial value or known-at clock")
+    if records:
+        require(context["anchor"] is not None and context["anchor"]["price"] == expected_price > 0,
+                "Dossier anchor differs from exact positive native candle price")
+    sections = [market[key] for key in ("market_context", "venue_disagreement", "venue_costs",
+                                       "derivatives", "quotes")] + [dossier["calendar"]]
+    for section in sections:
+        evidence = section["stored_inputs"]
+        require(evidence["watermark"] == dossier["watermark"] and evidence["as_of"] == cutoff,
+                "Dossier sections do not share one physical watermark and cutoff")
+    require(len(market["derivatives"]["stored_inputs"]["consumed_records"])
+            <= dossier["resource_limits"]["derivative_rows_per_market"], "Dossier derivative row budget exceeded")
+    return len(records)
+
+
+def validate_http_accounting(accounting):
+    require(accounting["selection"]["mode"] == "demo", "HTTP accounting changed mode")
+    require(accounting["included_runs"] <= 128 and len(accounting["sources"]) <= 1,
+            "HTTP accounting exceeded requested run/source bounds")
+    require(accounting["summary"]["coverage"] in ("unknown", "uninstrumented")
+            and accounting["summary"]["totals"] is None,
+            "Synthetic adapter HTTP instrumentation was falsely reported as measured totals")
+    require(len(accounting["summary"]["endpoints"]) <= 16, "HTTP accounting endpoint bound exceeded")
+    if accounting["included_runs"]:
+        require(accounting["summary"]["coverage"] == "uninstrumented",
+                "Retained synthetic runs lost uninstrumented coverage")
+
+
 def run_phase(folder, args):
     from crypto_market_analysis import collectors, pipeline, retention, storage, storage_policy
     from crypto_market_analysis.collectors import ExchangeClients
@@ -271,6 +330,28 @@ def run_phase(folder, args):
     real_collect = pipeline.collect
     restart = {"performed": args.phase == 2}
     page_calls = []
+    dossier_samples, http_samples = [], []
+
+    async def integrated_reads(server, cutoff, selected_quote, local_samples, local_sizes):
+        wanted = {"data_mode": "demo", "markets": [{"asset": "BTC", "source": "kraken",
+                  "quote": selected_quote, "lookbacks": [1, 7],
+                  "venues": {"sources": ["kraken", "coinbase"], "purchase_costs": {"budget": "100"}},
+                  "derivatives": {"source": "synthetic-oracle", "quote": selected_quote},
+                  "quotes": {"sources": ["synthetic-oracle"]}}]}
+        summary = await mcp_call(server, "get_analysis_dossier", {"request": wanted, "as_of": cutoff},
+                                 local_samples, local_sizes)
+        dossier, pages = await full_result(server, summary, local_samples, local_sizes)
+        rows = validate_dossier(dossier, selected_quote, cutoff)
+        dossier_samples.append({"cutoff": cutoff, "quote": selected_quote, "candle_rows": rows,
+                                "watermark": dossier["watermark"], "frozen_page_calls": pages,
+                                "shared_section_watermarks": True})
+        summary = await mcp_call(server, "get_http_accounting", {"source": "kraken", "task": "market",
+                                 "end": cutoff, "limit": 128, "endpoint_limit": 16}, local_samples, local_sizes)
+        accounting, _ = await full_result(server, summary, local_samples, local_sizes)
+        validate_http_accounting(accounting)
+        http_samples.append({"cutoff": cutoff, "coverage": accounting["summary"]["coverage"],
+                             "totals": accounting["summary"]["totals"],
+                             "included_runs": accounting["included_runs"], "truncated": accounting["truncated"]})
 
     async def read_batch(server, cutoff, selected_quote):
         local_samples, local_sizes = [], []
@@ -302,6 +383,7 @@ def run_phase(folder, args):
                                     "quote": selected_quote, "as_of": cutoff, "lookbacks": [1, 7]},
                                     local_samples, local_sizes)
             await full_result(server, context, local_samples, local_sizes)
+            await integrated_reads(server, cutoff, selected_quote, local_samples, local_sizes)
         with lock:
             samples.extend(local_samples)
             sizes.extend(local_sizes)
@@ -331,7 +413,7 @@ def run_phase(folder, args):
     collection_windows, statuses = [], []
     with ExitStack() as stack:
         for module in (pipeline, collectors, retention, storage, storage_policy):
-            stack.enter_context(patch.object(module, "time", clock))
+            stack.enter_context(patch.object(module, "time", clock if module is collectors else WallClock(clock)))
         stack.enter_context(patch("crypto_market_analysis.server.MCPResultPresenter", return_value=presenter))
         server = create_server(settings, mode="demo")
         with ExchangeClients(catalogue_ttl=86400) as clients, ThreadPoolExecutor(max_workers=args.readers) as readers:
@@ -369,12 +451,24 @@ def run_phase(folder, args):
                                         "counts": store.counts(), "rss_bytes": resident_bytes(),
                                         "warmup": cycle - first < 2})
                 states.append({"cycle": cycle, "states": durable_states(store)})
+            # Concurrent writers are now stopped. The exact same MCP operations
+            # must preserve durable evidence and schema when executed alone.
+            logical_before = storage_policy.inspect_storage(store.path)["families"]
+            database_hash = hashlib.sha256(store.path.read_bytes()).hexdigest()
+            asyncio.run(integrated_reads(server, int(clock.time()), "EUR", samples, sizes))
+            repair = asyncio.run(mcp_call(server, "get_auto_repair_status", {"limit": 1}, samples, sizes))
+            repair, _ = asyncio.run(full_result(server, repair, samples, sizes))
+            require(repair["status"] == "not_configured", "Non-dataset fixture unexpectedly claimed repair coverage")
+            require(storage_policy.inspect_storage(store.path)["families"] == logical_before
+                    and hashlib.sha256(store.path.read_bytes()).hexdigest() == database_hash,
+                    "Read-only dossier/accounting/status tools changed durable evidence or schema")
             lifecycle = lifecycle_checks(store, settings, presenter, server, clock, samples, sizes)
         require(all(a.closed for a in adapters.values()), "Shared client pool did not close")
     overlap = sum(any(r["started"] < end and r["completed"] > begin for begin, end in collection_windows)
                   for r in read_batches)
     require(overlap > 0, "No MCP read batch overlapped collection")
     require(any(s == "ok" for s in statuses), "No successful collection task")
+    require(any(row["candle_rows"] > 0 for row in dossier_samples), "Dossier never consumed real pipeline candles")
     if any(cycle % 4 == 1 for cycle in range(first, end)):
         require(any(s in ("partial", "error") for s in statuses), "Injected partial source was not reported")
     with store.connection() as con:
@@ -415,6 +509,8 @@ def run_phase(folder, args):
             "adapter_returned_candle_rows": sum(c.get("returned_rows", 0) for c in calls),
             "storage_samples": storage_samples, "scheduler_samples": states,
             "native_candle_oracle_rows": len(candles),
+            "dossier_samples": dossier_samples, "stored_http_accounting_samples": http_samples,
+            "integrated_mcp_preserved_database": True, "auto_repair_status": "not_configured",
             "peak_process_rss_bytes": peak if sys.platform == "darwin" else peak * 1024,
             "lifecycle": lifecycle, "correctness_mismatches": []}
 
@@ -541,10 +637,12 @@ def main(argv=None):
               "limitations": ["Accelerated sparse workload; virtual days are not real elapsed soak time.",
                               "Local single-machine observations are not a production SLO or distributed capacity proof.",
                               "Synthetic CCXT adapter calls/returned rows are not observed HTTP requests or wire bytes.",
+                              "Stored HTTP counters remain uninstrumented/null; zero socket egress is established separately by the guard.",
                               "MCP uses real registered request handlers and SDK serialization, without transport framing.",
                               "Fixture-only Store subclass explicitly labels pipeline-produced evidence demo at ingestion.",
                               "Process restart is graceful, not a power loss or interrupted SQLite transaction.",
                               "RSS samples include imports/fixture setup; first two cycles per process are warmup.",
+                              "Domain wall clocks and catalogue/result TTLs are accelerated; runtime resource deadlines use real monotonic time.",
                               "SQLite budgets are admission limits, not an OS filesystem quota; no provider acceptance tested."],
               "phases": [], "correctness_mismatches": []}
     started = time.perf_counter()

@@ -4,6 +4,8 @@ import importlib.util
 import json
 import socket
 import subprocess
+import time
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -83,3 +85,58 @@ def test_finite_pipeline_restarts_and_checks_native_values(tmp_path):
     assert all(p["native_candle_oracle_rows"] > 0 for p in report["phases"])
     assert all(p["frozen_history_page_calls"] > 0 for p in report["phases"])
     assert all(p["lifecycle"]["archive_quota_preserved_hot_evidence"] for p in report["phases"])
+    assert all(p["integrated_mcp_preserved_database"] for p in report["phases"])
+    assert all(p["auto_repair_status"] == "not_configured" for p in report["phases"])
+    assert all(any(s["candle_rows"] > 0 and s["shared_section_watermarks"] for s in p["dossier_samples"])
+               for p in report["phases"])
+    assert all(s["totals"] is None for p in report["phases"] for s in p["stored_http_accounting_samples"])
+    assert all(any(s["coverage"] == "uninstrumented" for s in p["stored_http_accounting_samples"])
+               for p in report["phases"])
+
+
+def test_virtual_days_do_not_advance_runtime_resource_deadlines():
+    clock = HARNESS.Clock(1000)
+    runtime = HARNESS.WallClock(clock)
+    clock.now += 7 * 86400
+    assert runtime.time() == clock.now
+    assert runtime.monotonic is time.monotonic
+    assert clock.monotonic() == clock.now  # Catalogue/cache TTLs intentionally advance.
+
+
+def test_dossier_oracle_rejects_split_watermarks_and_changed_native_price(tmp_path):
+    from crypto_market_analysis.analysis_dossier import build_analysis_dossier
+    from crypto_market_analysis.models import Candle
+
+    store = HARNESS.demo_store(tmp_path / "observer.sqlite")
+    now = 1780272000
+    store.put_candles([Candle("kraken", "BTC", "EUR", "1h", now - 3600, now,
+                              100, 102, 99, 101, 2, now, data_mode="demo")])
+    wanted = {"data_mode": "demo", "markets": [{"asset": "BTC", "source": "kraken", "quote": "EUR",
+              "lookbacks": [1, 7], "venues": {"sources": ["kraken"], "purchase_costs": {"budget": "100"}},
+              "derivatives": {"source": "synthetic-oracle", "quote": "EUR"},
+              "quotes": {"sources": ["synthetic-oracle"]}}]}
+    dossier = build_analysis_dossier(store, wanted, now)
+    assert HARNESS.validate_dossier(dossier, "EUR", now) == 1
+    split = deepcopy(dossier)
+    split["calendar"]["stored_inputs"]["watermark"]["candles"] += 1
+    with pytest.raises(AssertionError, match="one physical watermark"):
+        HARNESS.validate_dossier(split, "EUR", now)
+    changed = deepcopy(dossier)
+    changed["markets"][0]["market_context"]["anchor"]["price"] = 201
+    with pytest.raises(AssertionError, match="positive native candle price"):
+        HARNESS.validate_dossier(changed, "EUR", now)
+
+
+def test_http_oracle_preserves_unknown_instrumentation_instead_of_zero(tmp_path):
+    from crypto_market_analysis.http_accounting import stored_http_accounting
+    from crypto_market_analysis.models import CollectionResult
+
+    store = HARNESS.demo_store(tmp_path / "observer.sqlite")
+    store.record_run(CollectionResult("kraken"), "market", 100)
+    accounting = stored_http_accounting(store.path, source="kraken", task="market", mode="demo", end=100,
+                                        limit=128, endpoint_limit=16)
+    HARNESS.validate_http_accounting(accounting)
+    assert accounting["summary"]["coverage"] == "uninstrumented"
+    accounting["summary"]["totals"] = {"requests": 0}
+    with pytest.raises(AssertionError, match="falsely reported"):
+        HARNESS.validate_http_accounting(accounting)
