@@ -167,3 +167,49 @@ def test_named_cli_selectors_preserve_native_market_and_reject_conflicts(connect
     request.write_text(json.dumps({**requests()["stored-venue-disagreement"], "quote": "USD"}))
     assert main([*args, "--request", str(request)]) == 2
     assert "--quote conflicts" in capsys.readouterr().err
+
+
+def test_named_import_dataset_uses_request_mode_without_global_mode_flag(tmp_path):
+    from crypto_market_analysis.history_dataset import DatasetConfig, HistoryDataset
+
+    end = NOW // 3600 * 3600
+    dataset = HistoryDataset(DatasetConfig("native-import", str(tmp_path / "dataset"), end - 86400, end))
+    dataset.store.put_candles([
+        Candle("kraken", "BTC", "EUR", "1h", start, start + 3600,
+               100, 101, 99, 100, 1, start + 3600, data_mode="import")
+        for start in range(end - 86400, end, 3600)
+    ])
+    counts_before = dataset.store.counts()
+    identity_before = (dataset.directory / "dataset.json").read_bytes()
+    env = {**os.environ, "PYTHONPATH": str(ROOT / "src")}
+    for command, request in requests().items():
+        request = {**request, "data_mode": "import"}
+        path = tmp_path / f"{command}.json"
+        path.write_text(json.dumps(request))
+        output = subprocess.run([
+            sys.executable, "-m", "crypto_market_analysis", command, "--request", str(path),
+            "--data-dir", str(dataset.directory), "--as-of", str(NOW),
+        ], capture_output=True, text=True, env=env, check=True)
+        result = json.loads(output.stdout)
+        assert result["data_mode"] == "import"
+        assert result["as_of"] == NOW
+        if command in ("qualify-sources", "local-workflow"):
+            assert result["markets"][0]["data_mode"] == "import"
+        if command == "qualify-sources":
+            assert result["markets"][0]["coverage"]["available_hours"] == 24
+        if command == "local-workflow":
+            assert result["refresh"] is False
+            assert result["issuance_requested"] is False
+            assert result["collection"]["network_requested"] is False
+            row = result["markets"][0]
+            assert row["issuance"]["status"] == "not_requested"
+            reference = row["accumulation_brief"]["input_reference"]
+            assert reference["data_mode"] == "import"
+            assert reference["dataset_lineage"] == {
+                "name": "native-import", "source": "kraken", "data_mode": "import",
+                "target_start": end - 86400, "target_end": end,
+            }
+    assert dataset.store.counts() == counts_before
+    assert (dataset.directory / "dataset.json").read_bytes() == identity_before
+    with dataset.store.connection() as con:
+        assert con.execute("SELECT name FROM sqlite_master WHERE name='assessment_journal'").fetchone() is None
