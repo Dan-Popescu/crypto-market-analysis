@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from .http_accounting import account_collection, httpx_get, mark_uninstrumented, prepare_httpx, public_error
-from .http_limits import HTTPBudgetExceeded, check_http_budget
+from .http_limits import HTTPBudgetExceeded, check_http_budget, current_http_budget
 from .models import CollectionResult, Observation
 
 
@@ -35,6 +35,17 @@ def _retry_delay(value: str | None, now: float) -> float:
             return max(0.0, parsedate_to_datetime(value).timestamp() - now)
         except (ValueError, TypeError, OverflowError):
             return 0.25
+
+
+def _sleep_before_retry(delay: float) -> None:
+    """Bound our own wait; the next attempt still needs transport admission."""
+    budget = current_http_budget()
+    if budget is not None:
+        budget.check()
+        delay = min(delay, budget.remaining())
+    time.sleep(delay)
+    if budget is not None:
+        budget.check()
 
 
 class PublicHTTP:
@@ -72,13 +83,24 @@ class PublicHTTP:
                     deadline = now + max(delay, 1)
                     deadlines[origin] = deadline
                     raise RetryDeferred(deadline, f"HTTP {status}") from exc
-                time.sleep(delay)
+                try:
+                    _sleep_before_retry(delay)
+                except HTTPBudgetExceeded:
+                    # A shorter invocation deadline must not erase the server's
+                    # remaining cooldown when this client is reused later.
+                    deadlines[origin] = now + delay
+                    raise
             except httpx.TransportError as exc:
                 if attempt:
                     deadline = time.time() + 1
                     deadlines[origin] = deadline
                     raise RetryDeferred(deadline, type(exc).__name__) from exc
-                time.sleep(0.25)
+                now = time.time()
+                try:
+                    _sleep_before_retry(0.25)
+                except HTTPBudgetExceeded:
+                    deadlines[origin] = now + 0.25
+                    raise
         raise RuntimeError("unreachable")
 
     def get_json(self, url: str, params: dict | None = None):

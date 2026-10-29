@@ -27,7 +27,7 @@ from crypto_market_analysis.providers import PublicHTTP
 
 
 @contextmanager
-def loopback():
+def loopback(*, retry_after="0"):
     hits, guard = [], Lock()
 
     class Handler(BaseHTTPRequestHandler):
@@ -37,10 +37,10 @@ def loopback():
                 number = hits.count(self.path)
             if self.path == "/slow":
                 time.sleep(0.2)
-            status = 302 if self.path == "/redirect" else 429 if self.path == "/retry" and number == 1 else 200
+            status = 302 if self.path == "/redirect" else 429 if self.path in ("/retry", "/long-retry") and number == 1 else 200
             self.send_response(status)
             self.send_header("Content-Length", "2")
-            self.send_header("Retry-After", "0")
+            self.send_header("Retry-After", retry_after)
             if status == 302:
                 self.send_header("Location", "/ok")
             self.end_headers()
@@ -374,3 +374,156 @@ def test_local_workflow_capture_shares_configured_cap_across_native_markets_and_
     assert result["http_limits"]["used_requests"] == result["http_limits"]["max_requests"] == 2
     assert all(row["http_limits"]["max_requests"] == 2 for row in result["market"]["markets"])
     assert all(row["http_limits"]["used_requests"] == 2 for row in result["books"]["markets"])
+
+
+def test_public_http_retry_after_wait_ends_at_monotonic_deadline(monkeypatch):
+    from crypto_market_analysis.providers import RetryDeferred
+
+    with loopback(retry_after="0.8") as (root, hits), httpx.Client() as raw:
+        route_to_loopback(monkeypatch, raw, root)
+        client = PublicHTTP(client=raw)
+        with http_budget_scope(HTTPPolicy(5, 0.05)), accounting_scope("deribit") as meter:
+            started = time.monotonic()
+            with pytest.raises(HTTPBudgetExceeded, match="deadline"):
+                client.get_json("https://www.deribit.com/long-retry")
+            elapsed = time.monotonic() - started
+            measurement = meter.snapshot("deribit")
+        # The server deadline survives the invocation deadline; it is neither
+        # replaced by the shorter wait nor reported as a sent second attempt.
+        with pytest.raises(RetryDeferred) as deferred:
+            client.get_json("https://www.deribit.com/long-retry")
+        assert deferred.value.retry_at > time.time() + 0.3
+    assert 0.03 <= elapsed < 0.2
+    assert hits == ["/long-retry"]
+    assert measurement["totals"]["requests"] == measurement["totals"]["responses"] == 1
+    assert measurement["http_limits"]["used_requests"] == 1
+    assert measurement["http_limits"]["refused_requests"] == 0
+    assert measurement["http_limits"]["exceeded"] == "deadline"
+    assert measurement["http_limits"]["remaining_seconds"] == 0
+
+
+def test_public_http_connection_failure_wait_ends_at_monotonic_deadline(monkeypatch):
+    with loopback() as (root, _hits):
+        pass
+    with httpx.Client() as raw:
+        route_to_loopback(monkeypatch, raw, root)
+        with http_budget_scope(HTTPPolicy(5, 0.05)), accounting_scope("deribit") as meter:
+            started = time.monotonic()
+            with pytest.raises(HTTPBudgetExceeded, match="deadline"):
+                PublicHTTP(client=raw).get_json("https://www.deribit.com/connection-failure")
+            elapsed = time.monotonic() - started
+            measurement = meter.snapshot("deribit")
+    assert 0.03 <= elapsed < 0.2
+    assert measurement["totals"]["requests"] == measurement["totals"]["errors"] == 1
+    assert measurement["totals"]["responses"] == 0
+    assert measurement["http_limits"]["used_requests"] == 1
+    assert measurement["http_limits"]["refused_requests"] == 0
+    assert measurement["http_limits"]["exceeded"] == "deadline"
+    assert measurement["http_limits"]["remaining_seconds"] == 0
+
+
+@contextmanager
+def delayed_tls_proxy(tmp_path, *, connect_delay=0.15, response_delay=0.25):
+    """Actual standard HTTP CONNECT and local TLS, with independent delayed stages."""
+    import select
+    import socket
+    import socketserver
+    import ssl
+    import subprocess
+
+    cert, key = tmp_path / "test-cert.pem", tmp_path / "test-key.pem"
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", str(key),
+                    "-out", str(cert), "-subj", "/CN=localhost", "-days", "1"],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+    hits = []
+
+    class Target(BaseHTTPRequestHandler):
+        def do_GET(self):
+            hits.append(self.path)
+            time.sleep(response_delay)
+            try:
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"{}")
+            except (BrokenPipeError, ConnectionResetError, ssl.SSLError):
+                pass
+
+        def log_message(self, *_args):
+            pass
+
+    target = ThreadingHTTPServer(("127.0.0.1", 0), Target)
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls.load_cert_chain(cert, key)
+    target.socket = tls.wrap_socket(target.socket, server_side=True)
+
+    class Proxy(socketserver.BaseRequestHandler):
+        def handle(self):
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = self.request.recv(4096)
+                if not chunk:
+                    return
+                data += chunk
+            with socket.create_connection(("127.0.0.1", target.server_port)) as upstream:
+                time.sleep(connect_delay)
+                try:
+                    self.request.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                    while True:
+                        readable, _, _ = select.select([self.request, upstream], [], [], 1)
+                        for incoming in readable:
+                            chunk = incoming.recv(65536)
+                            if not chunk:
+                                return
+                            (upstream if incoming is self.request else self.request).sendall(chunk)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+    proxy = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Proxy)
+    proxy.daemon_threads = True
+    threads = [Thread(target=server.serve_forever, daemon=True) for server in (target, proxy)]
+    for thread in threads:
+        thread.start()
+    try:
+        yield (f"https://127.0.0.1:{target.server_port}/", f"http://127.0.0.1:{proxy.server_address[1]}", hits)
+    finally:
+        for server in (proxy, target):
+            server.shutdown()
+            server.server_close()
+        for thread in threads:
+            thread.join(timeout=2)
+
+
+def test_standard_httpx_proxy_tls_reclamps_timeout_after_connect_stage(tmp_path):
+    with delayed_tls_proxy(tmp_path) as (url, proxy, hits):
+        with httpx.Client(proxy=proxy, verify=False, timeout=10) as raw:
+            with http_budget_scope(HTTPPolicy(5, 0.25)), accounting_scope("deribit") as meter:
+                instrument_httpx(raw, "deribit")
+                started = time.monotonic()
+                with http_source_scope("deribit"), pytest.raises(HTTPBudgetExceeded, match="deadline"):
+                    raw.get(url)
+                elapsed = time.monotonic() - started
+                measurement = meter.snapshot("deribit")
+            assert raw.timeout.read == 10
+    assert 0.2 <= elapsed < 0.36
+    assert hits == ["/"]
+    assert measurement["http_limits"]["enforcement"] == "supported_transports"
+    assert measurement["http_limits"]["exceeded"] == "deadline"
+    assert measurement["http_limits"]["remaining_seconds"] == 0
+    assert measurement["totals"]["requests"] == measurement["totals"]["errors"] == 1
+
+
+def test_httpx_response_completion_checks_deadline_after_trickled_body():
+    class SlowBody(httpx.SyncByteStream):
+        def __iter__(self):
+            time.sleep(0.03)
+            yield b"{}"
+
+    with httpx.Client(transport=httpx.MockTransport(lambda _r: httpx.Response(200, stream=SlowBody()))) as raw:
+        with http_budget_scope(HTTPPolicy(5, 0.01)), accounting_scope("deribit") as meter:
+            with pytest.raises(HTTPBudgetExceeded, match="deadline"):
+                PublicHTTP(client=raw).get_json("https://www.deribit.com/completion")
+            measurement = meter.snapshot("deribit")
+    assert measurement["http_limits"]["enforcement"] == "unsupported"
+    assert measurement["http_limits"]["exceeded"] == "deadline"
+    assert measurement["totals"]["responses"] == measurement["totals"]["requests"] == 1

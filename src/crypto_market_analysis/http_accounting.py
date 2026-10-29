@@ -403,13 +403,29 @@ def instrument_httpx(client, source: str) -> bool:
                             failed.meter.finish(failed, error=True)
                         if budget and budget.remaining() <= 0:
                             budget.check()
-                    if budget and event.endswith(".started") and "timeout" in info:
-                        # httpcore trace info is the actual operation kwargs.
+                    if budget and event.endswith(".started"):
                         remaining = budget.remaining()
                         if remaining <= 0:
                             budget.check()
-                        value = info["timeout"]
-                        info["timeout"] = min(value, remaining) if value is not None else remaining
+                        # HTTP/1.1 and HTTP/2 operations read timeout extensions
+                        # after this trace callback; proxy CONNECT may have its
+                        # own request object. TLS/connect use scalar kwargs.
+                        operation = info.get("request", request)
+                        for scoped_request in (request, operation):
+                            timeouts = scoped_request.extensions.get("timeout", {})
+                            scoped_request.extensions["timeout"] = {
+                                key: min(value, remaining) if value is not None else remaining
+                                for key, value in timeouts.items()}
+                        if "timeout" in info:
+                            value = info["timeout"]
+                            info["timeout"] = min(value, remaining) if value is not None else remaining
+                    if budget and event.endswith(".complete") and budget.remaining() <= 0:
+                        if (late := request.extensions.get("observer_attempt")) is not None:
+                            received = info.get("return_value")
+                            status = (received[1] if event.endswith("receive_response_headers.complete")
+                                      and isinstance(received, tuple) and len(received) > 1 else None)
+                            late.meter.finish(late, status=status, error=True)
+                        budget.check()
                     if previous_trace:
                         previous_trace(event, info)
 
@@ -429,6 +445,8 @@ def instrument_httpx(client, source: str) -> bool:
                     attempt.meter.finish(attempt, status=response.status_code, error=True)
                     raise
                 attempt.meter.finish(attempt, status=response.status_code, decoded_bytes=len(body))
+            if (budget := current_http_budget()) is not None and budget.remaining() <= 0:
+                budget.check()
 
         client.event_hooks["request"].append(request_hook)
         client.event_hooks["response"].append(response_hook)
