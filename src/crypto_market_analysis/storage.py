@@ -165,11 +165,16 @@ class Store:
         with reader.connection() as con:
             started = time.monotonic()
             steps = 0
+            exhausted_reason = None
 
             def exhausted():
-                nonlocal steps
+                nonlocal steps, exhausted_reason
                 steps += 1000
-                return steps > 50_000_000 or time.monotonic() - started > 15
+                if steps > 50_000_000:
+                    exhausted_reason = "50-million SQLite VM-step budget"
+                elif time.monotonic() - started > 15:
+                    exhausted_reason = "15-second SQLite read-session deadline"
+                return exhausted_reason is not None
 
             returned_bytes = 0
 
@@ -195,6 +200,10 @@ class Store:
                 yield session
                 if time.monotonic() - started > 15:
                     raise ValueError("SQLite read session exceeded its 15-second lifetime budget.")
+            except sqlite3.OperationalError as exc:
+                if exhausted_reason is not None:
+                    raise ValueError(f"Analytical read exceeded its {exhausted_reason}; narrow the request.") from exc
+                raise
             finally:
                 session._active = False
                 con.set_progress_handler(None, 0)

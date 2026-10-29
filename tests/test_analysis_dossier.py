@@ -344,7 +344,7 @@ def test_invalid_cutoffs_fail_before_reading_database(tmp_path, cutoff):
 
 
 def test_read_session_bounds_actual_sqlite_vm_work(store):
-    with pytest.raises(ValueError, match="interrupted"):
+    with pytest.raises(ValueError, match="50-million SQLite VM-step budget"):
         with store.read_session() as session, session.connection() as con:
             con.execute("""WITH RECURSIVE rows(n) AS (VALUES(0) UNION ALL
                 SELECT n+1 FROM rows WHERE n<100000000) SELECT SUM(n) FROM rows""").fetchone()
