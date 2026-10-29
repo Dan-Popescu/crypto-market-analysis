@@ -201,7 +201,8 @@ def read_book_snapshot(
     """
     _selectors(sources, asset, quote, data_mode, as_of)
     with store.connection() as con:
-        con.execute("BEGIN")
+        if not getattr(con, "in_transaction", False):
+            con.execute("BEGIN")
         if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='book_snapshots'").fetchone() is None:
             return {"books": [], "watermark": {"max_eligible_id": None, "as_of": as_of}}
         slots = ",".join("?" for _ in sources)

@@ -186,37 +186,44 @@ def collection_history(database, mode, *, source=None, as_of=None, limit=20, cur
 
 def upcoming_calendar(database, mode, *, source=None, as_of=None, start=None, end=None, limit=20, cursor=None):
     _source(source)
+    with _read(database) as con:
+        return upcoming_calendar_snapshot(con, mode, source=source, as_of=as_of,
+                                          start=start, end=end, limit=limit, cursor=cursor)
+
+
+def upcoming_calendar_snapshot(con, mode, *, source=None, as_of=None, start=None, end=None, limit=20, cursor=None):
+    """Use an existing read transaction with the independent calendar rules."""
+    _source(source)
     # Date-only schedules use their civil date for filtering, never a fabricated event clock.
     selection = {"kind": "calendar", "data_mode": mode, "source": source, "start": start, "end": end}
-    with _read(database) as con:
-        available = "local_records" in _tables(con)
-        state = _page(con if available else None, "local_records", selection, as_of, limit, cursor)
-        lower = state["as_of"] if start is None else bounded_as_of(start)
-        upper = lower + 30 * 86400 if end is None else bounded_as_of(end)
-        if not lower <= upper <= lower + 366 * 86400:
-            raise ValueError("Calendar range must span at most 366 days.")
-        rows = []
-        if available:
-            # Rank every known revision before source/range/status filtering so a
-            # moved or cancelled event cannot resurrect an earlier version.
-            sql = f"""WITH versions AS (SELECT id,payload,ROW_NUMBER() OVER(PARTITION BY identity
-                ORDER BY {_LOCAL_RECORD_VERSION_ORDER}) rn FROM local_records
-                WHERE kind='calendar' AND observed_at<=? AND id<=?), latest AS
-                (SELECT id,payload FROM versions WHERE rn=1)
-                SELECT payload FROM latest WHERE (? IS NULL OR json_extract(payload,'$.source')=?)
-                AND (json_extract(payload,'$.data_mode')=? OR json_extract(payload,'$.data_mode') IS NULL)
-                AND COALESCE(json_extract(payload,'$.status'),'planned') NOT IN ('cancelled','canceled')
-                AND (json_extract(payload,'$.event_time') BETWEEN ? AND ? OR
-                    (json_extract(payload,'$.event_time') IS NULL AND
-                     COALESCE(json_extract(payload,'$.local_date'),json_extract(payload,'$.date')) BETWEEN date(?,'unixepoch') AND date(?,'unixepoch')))
-                ORDER BY COALESCE(json_extract(payload,'$.event_time'),
-                    unixepoch(COALESCE(json_extract(payload,'$.local_date'),json_extract(payload,'$.date')))),id
-                LIMIT ? OFFSET ?"""
-            rows = [json.loads(r[0]) for r in con.execute(sql, (state["as_of"], state["high"], source, source,
-                    mode, lower, upper, lower, upper, limit + 1, state["offset"]))]
-        return {**_result(state, rows, limit, selection), "range": {"start": lower, "end": upper},
-                "calendar_mode_basis": "explicit matching modes plus unlabelled source schedules; never market observations",
-                "time_basis": "verified event clocks or inclusive source civil dates; schedule is not publication"}
+    available = "local_records" in _tables(con)
+    state = _page(con if available else None, "local_records", selection, as_of, limit, cursor)
+    lower = state["as_of"] if start is None else bounded_as_of(start)
+    upper = lower + 30 * 86400 if end is None else bounded_as_of(end)
+    if not lower <= upper <= lower + 366 * 86400:
+        raise ValueError("Calendar range must span at most 366 days.")
+    rows = []
+    if available:
+        # Rank every known revision before source/range/status filtering so a
+        # moved or cancelled event cannot resurrect an earlier version.
+        sql = f"""WITH versions AS (SELECT id,payload,ROW_NUMBER() OVER(PARTITION BY identity
+            ORDER BY {_LOCAL_RECORD_VERSION_ORDER}) rn FROM local_records
+            WHERE kind='calendar' AND observed_at<=? AND id<=?), latest AS
+            (SELECT id,payload FROM versions WHERE rn=1)
+            SELECT payload FROM latest WHERE (? IS NULL OR json_extract(payload,'$.source')=?)
+            AND (json_extract(payload,'$.data_mode')=? OR json_extract(payload,'$.data_mode') IS NULL)
+            AND COALESCE(json_extract(payload,'$.status'),'planned') NOT IN ('cancelled','canceled')
+            AND (json_extract(payload,'$.event_time') BETWEEN ? AND ? OR
+                (json_extract(payload,'$.event_time') IS NULL AND
+                 COALESCE(json_extract(payload,'$.local_date'),json_extract(payload,'$.date')) BETWEEN date(?,'unixepoch') AND date(?,'unixepoch')))
+            ORDER BY COALESCE(json_extract(payload,'$.event_time'),
+                unixepoch(COALESCE(json_extract(payload,'$.local_date'),json_extract(payload,'$.date')))),id
+            LIMIT ? OFFSET ?"""
+        rows = [json.loads(r[0]) for r in con.execute(sql, (state["as_of"], state["high"], source, source,
+                mode, lower, upper, lower, upper, limit + 1, state["offset"]))]
+    return {**_result(state, rows, limit, selection), "range": {"start": lower, "end": upper},
+            "calendar_mode_basis": "explicit matching modes plus unlabelled source schedules; never market observations",
+            "time_basis": "verified event clocks or inclusive source civil dates; schedule is not publication"}
 
 
 def storage_status(database, mode, *, source=None, as_of=None, policy=None):

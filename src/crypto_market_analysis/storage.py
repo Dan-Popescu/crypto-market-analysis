@@ -124,6 +124,54 @@ class Store:
             if con is not None:
                 con.close()
 
+    @contextmanager
+    def read_session(self):
+        """Yield an isolated read view pinned to one WAL-aware SQLite transaction.
+
+        The view never initializes a database, cannot write, and expires when the
+        context exits. Readers reuse this connection without changing this Store
+        or other threads. Physical watermarks are captured before any section.
+        SQLite work is bounded to 50 million VM steps, 64 MiB of returned text,
+        2 MiB per SQLite value and 15 elapsed seconds.
+        """
+        reader = Store(self.path, initialize=False)
+        with reader.connection() as con:
+            started = time.monotonic()
+            steps = 0
+
+            def exhausted():
+                nonlocal steps
+                steps += 1000
+                return steps > 50_000_000 or time.monotonic() - started > 15
+
+            returned_bytes = 0
+
+            def bounded_row(cursor, values):
+                nonlocal returned_bytes
+                returned_bytes += sum(len(value.encode("utf-8")) if isinstance(value, str)
+                                      else len(value) if isinstance(value, bytes) else 8
+                                      for value in values)
+                if returned_bytes > 64 * 1024 * 1024:
+                    raise ValueError("SQLite read session exceeds its 64 MiB returned-data budget.")
+                return sqlite3.Row(cursor, values)
+
+            con.row_factory = bounded_row
+            con.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 2 * 1024 * 1024)
+            con.set_progress_handler(exhausted, 1000)
+            con.execute("BEGIN")
+            tables = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            watermark = {table: con.execute(f"SELECT COALESCE(MAX(rowid),0) FROM {table}").fetchone()[0]
+                         if table in tables else None for table in
+                         ("candles", "observations", "events", "runs", "local_records", "book_snapshots")}
+            session = _StoreReadSession(self.path, con, watermark, started)
+            try:
+                yield session
+                if time.monotonic() - started > 15:
+                    raise ValueError("SQLite read session exceeded its 15-second lifetime budget.")
+            finally:
+                session._active = False
+                con.set_progress_handler(None, 0)
+
     def check_write_budget(self, con, payload_bytes: int = 0) -> None:
         from .storage_policy import check_write_budget
 
@@ -362,7 +410,8 @@ class Store:
         if token is not None and (token.get("selection") != selected or token.get("database") != database):
             raise ValueError("Metric history cursor does not match this selection or store.")
         with self.connection() as con:
-            con.execute("BEGIN")
+            if not getattr(con, "in_transaction", False):
+                con.execute("BEGIN")
             if token is None:
                 cutoff = int(time.time()) if as_of is None else as_of
                 watermark = con.execute("SELECT COALESCE(MAX(id),0) FROM observations").fetchone()[0]
@@ -452,7 +501,8 @@ class Store:
         selected = history_selection(asset, metric, mode, source, quote, unit, dimension, as_of, start, end)
         cutoff = int(time.time()) if as_of is None else as_of
         with self.connection() as con:
-            con.execute("BEGIN")
+            if not getattr(con, "in_transaction", False):
+                con.execute("BEGIN")
             watermark = con.execute("SELECT COALESCE(MAX(id),0) FROM observations").fetchone()[0]
             query, values, lower, upper = self._metric_history_query(selected, cutoff, watermark)
             rows = con.execute(query + """SELECT source,metric,dimension,COUNT(*) AS points,
@@ -668,7 +718,8 @@ class Store:
                 conditions.append(f"{name}=?")
                 values.append(value)
         with self.connection() as con:
-            con.execute("BEGIN")
+            if not getattr(con, "in_transaction", False):
+                con.execute("BEGIN")
             watermark = {table: con.execute(f"SELECT COALESCE(MAX(rowid),0) FROM {table}").fetchone()[0]
                          for table in ("candles", "observations", "events", "runs", "local_records")}
             cte = f"""WITH versions AS (SELECT *,
@@ -812,7 +863,8 @@ class Store:
             raise ValueError("Stored analysis requires explicit bounded native selectors, mode and cutoff.")
         placeholders = ",".join("?" for _ in sources)
         with self.connection() as con:
-            con.execute("BEGIN")
+            if not getattr(con, "in_transaction", False):
+                con.execute("BEGIN")
             watermark = {table: con.execute(f"SELECT COALESCE(MAX(id),0) FROM {table}").fetchone()[0]
                          for table in ("observations", "local_records")}
             if kind == "derivatives":
@@ -917,3 +969,20 @@ class Store:
                     pq.write_table(pa.Table.from_pylist(rows), path, compression="zstd")
                     result[table] = {"path": str(path.resolve()), "rows": len(rows)}
         return result
+
+
+class _StoreReadSession(Store):
+    """Lifetime-scoped Store view; its connection belongs to read_session only."""
+
+    def __init__(self, path, connection, watermark, started):
+        self.path, self.read_only = path, True
+        self._connection, self._active, self._started = connection, True, started
+        self.watermark_at_start = watermark
+
+    @contextmanager
+    def connection(self):
+        if not self._active:
+            raise ValueError("SQLite read session has expired; open a new read_session context.")
+        if time.monotonic() - self._started > 15:
+            raise ValueError("SQLite read session exceeded its 15-second lifetime budget.")
+        yield self._connection
