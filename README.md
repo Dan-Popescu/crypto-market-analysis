@@ -6,6 +6,8 @@ Version 0.6.0 fixes [history, pipeline and MCP operating costs](docs/EFFICIENCY.
 SQL-filtered history pages, incremental refresh, durable source scheduling,
 compact evidence-aware MCP replies and checked archive/admission policies.
 No deployment or new paid dependency is required.
+See [verified delivery and measured gains](docs/EFFICIENCY_STATUS.md), including
+the remaining single-host and real-source qualification limits.
 
 Version 0.5.0 adds [automatic local data connections](docs/DATA_CONNECTIONS.md):
 retained books, official context capture, stored calculations, four-market source

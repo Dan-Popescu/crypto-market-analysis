@@ -1,5 +1,9 @@
 # Version 0.5.0 data connections: delivery and evidence
 
+For subsequent pipeline, storage and MCP corrections, see the
+[version 0.6.0 verification record](EFFICIENCY_STATUS.md). This page preserves the
+original version 0.5.0 evidence.
+
 All five projects in [DATA_CONNECTION_PLAN.md](DATA_CONNECTION_PLAN.md) are
 implemented. [DATA_CONNECTIONS.md](DATA_CONNECTIONS.md) gives local commands.
 This completes the selected software connection work, not real-source acceptance
