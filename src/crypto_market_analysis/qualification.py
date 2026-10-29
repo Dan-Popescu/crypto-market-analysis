@@ -8,6 +8,7 @@ downloads history, aliases quotes or combines source/data-mode histories.
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import asdict
 
 from .evidence import canonical_json, content_hash
@@ -37,7 +38,7 @@ def _integer(request, key, default, minimum=0, maximum=2_000_000):
     return value
 
 
-def _selection(request, as_of):
+def normalize_qualification_request(request, as_of):
     if not isinstance(request, dict):
         raise ValueError("Qualification requires a request object.")
     if type(as_of) is not int or as_of < 0:
@@ -114,6 +115,22 @@ def _history_access(con, tables, source, asset, quote, mode, as_of):
     result = {"status": "untested", "last_success": None, "last_failure": None,
               "scope": "This native source/market/data-mode only; documentation is not runtime evidence.",
               "evidence": None}
+    if "local_records" in tables:
+        imported = con.execute("""SELECT id,observed_at,payload FROM local_records
+            WHERE kind='history_import' AND observed_at<=?
+            AND json_extract(payload,'$.source')=? AND json_extract(payload,'$.asset')=?
+            AND json_extract(payload,'$.quote')=? AND json_extract(payload,'$.data_mode')=?
+            AND json_extract(payload,'$.capture_evidence')='public_backfill_adapter'
+            AND json_extract(payload,'$.validated_rows')>0
+            ORDER BY observed_at DESC,id DESC LIMIT 1""", (as_of, source, asset, quote, mode)).fetchone()
+        if imported:
+            payload = json.loads(imported["payload"])
+            result.update(status="success", last_success=imported["observed_at"],
+                          evidence={"table": "local_records", "id": imported["id"],
+                                    "capture_evidence": payload["capture_evidence"],
+                                    "captured_at": payload.get("captured_at"),
+                                    "response_sha256": payload.get("response_sha256"),
+                                    "hash_basis": "normalized CCXT OHLCV rows; original provider body not retained"})
     if "history_captures" not in tables:
         return result
     row = con.execute("""SELECT id,materialized_at,
@@ -124,7 +141,7 @@ def _history_access(con, tables, source, asset, quote, mode, as_of):
         AND json_extract(payload,'$.capture_evidence')='public_rest_adapter'
         AND json_extract(payload,'$.acquisition')='public_rest'
         ORDER BY materialized_at DESC,id DESC LIMIT 1""", (asset, quote, as_of, source, mode)).fetchone()
-    if row:
+    if row and (result["last_success"] is None or row[2] > result["last_success"]):
         result.update(status="success", last_success=row[2],
                       evidence={"table": "history_captures", "id": row[0], "materialized_at": row[1],
                                 "capture_evidence": row[3], "raw_response_sha256": row[4]})
@@ -212,7 +229,7 @@ def qualify_sources(store: Store, request: dict, as_of: int) -> dict:
     storage/query budgets produce unavailable evidence, never a false pass.
     ``max_requests`` is reported but this read operation always makes zero calls.
     """
-    rules, selected = _selection(request, as_of)
+    rules, selected = normalize_qualification_request(request, as_of)
     start, end, mode = rules["required_start"], rules["required_end"], rules["data_mode"]
     results = []
     remaining_samples = rules["max_evidence_rows"]

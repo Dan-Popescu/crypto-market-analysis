@@ -26,7 +26,7 @@ def _differences(current, reference):
             for name in DIFFERENCE_FIELDS}
 
 
-def _cases(config, cost_cases):
+def validated_cost_cases(config, cost_cases):
     if not isinstance(cost_cases, list) or not 1 <= len(cost_cases) <= 3:
         raise ValueError('cost_cases must contain one to three named cost cases')
     names = set()
@@ -68,7 +68,7 @@ def compare_cost_sensitivity(
     with localcontext() as context:
         context.prec = 28
         normalized = validate_config(config)
-        scenarios = _cases(normalized, cost_cases)
+        scenarios = validated_cost_cases(normalized, cost_cases)
         cases, comparisons = [], []
         for name, scenario in scenarios:
             comparison = compare_plans(scenario, candles, as_of, validation=validation)

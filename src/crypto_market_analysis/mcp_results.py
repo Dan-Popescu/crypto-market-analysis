@@ -177,6 +177,12 @@ class MCPResultPresenter:
         if tool_name == "get_assessment" and "evidence" in summary:
             summary["evidence"] = _omitted(summary["evidence"], "/evidence")
             omitted.append("/evidence")
+        if tool_name == "get_analysis_readiness" and len(summary.get("next_actions", [])) > 3:
+            total = len(summary["next_actions"])
+            summary["next_actions"] = summary["next_actions"][:3]
+            omitted.append("/next_actions")
+            previews.append({"path": "/next_actions", "returned_count": 3,
+                             "total_count": total, "selection": "first 3 ordered actions"})
         metadata = {"handle": handle, "selection_hash": frozen.selection_hash,
                     "content_hash": frozen.content_hash, "expires_at": frozen.expires_at,
                     "full_bytes": len(frozen.data), "response_byte_limit": RESPONSE_BYTE_LIMIT,
@@ -186,10 +192,32 @@ class MCPResultPresenter:
         summary["_mcp_result"] = metadata
         history_page = tool_name == "get_metric_history"
         dossier_page = tool_name == "get_analysis_dossier"
+        market_page = tool_name in ("get_analysis_changes", "get_analysis_readiness")
+        analysis_page = market_page or tool_name == "get_plan_robustness"
         while response_bytes(summary) > _RESULT_LIMIT:
             candidates = []
 
             def candidate(parent, key, child, path, candidates=candidates):
+                if analysis_page:
+                    core = ("/as_of", "/previous_as_of", "/data_mode", "/status", "/watermark", "/summary", "/snapshots")
+                    if path in core or any(path.startswith(prefix + "/") for prefix in core):
+                        return
+                    if tool_name == "get_plan_robustness" and (path == "/stability" or path.startswith("/stability/")):
+                        return
+                    if market_page:
+                        parts = path.split("/")
+                        if path == "/markets" or (len(parts) == 3 and parts[1] == "markets"):
+                            return
+                        if len(parts) >= 4 and parts[1] == "markets":
+                            if parts[3] in ("selection", "claim_statuses"):
+                                return
+                            if len(parts) == 4 and not isinstance(child, (dict, list)):
+                                return
+                            if (tool_name == "get_analysis_changes" and len(parts) >= 5
+                                    and parts[3] in ("before", "after") and parts[4] == "price_anchor"):
+                                return
+                    if tool_name == "get_analysis_readiness" and path == "/next_actions":
+                        return
                 if dossier_page:
                     parts = path.split("/")
                     # A dossier has at most four explicit native markets. Keep
@@ -238,7 +266,7 @@ class MCPResultPresenter:
                             candidate(value, key, child, child_path)
                         visit(child, child_path)
                 elif isinstance(value, list):
-                    if dossier_page and path == "/markets":
+                    if (dossier_page or market_page) and path == "/markets":
                         for index, row in enumerate(value):
                             visit(row, _pointer(path, index))
                     if history_page and path == "/points":
@@ -259,6 +287,8 @@ class MCPResultPresenter:
                     raise ValueError("History point core values exceed the MCP byte limit; narrow the page limit.")
                 if dossier_page:
                     raise ValueError("Dossier market summaries exceed the MCP byte limit; narrow the request.")
+                if analysis_page:
+                    raise ValueError("Analytical core summaries exceed the MCP byte limit; narrow the request.")
                 # Path metadata can itself be large: root paging remains complete.
                 summary = {"_mcp_result": {**metadata, "omitted_paths": [""],
                                           "available_paths": [{"path": "", **_shape(result)}]}}

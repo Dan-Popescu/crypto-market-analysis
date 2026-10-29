@@ -75,10 +75,12 @@ def run_capacity_command(args, settings, request: dict | None) -> dict:
         if not args.apply:
             return run_auto_repairs(settings.database, request, mode=mode)
         from .history_dataset import KrakenRESTCapture
+        from .http_limits import HTTPPolicy, http_budget_scope
 
         fetch = KrakenRESTCapture()
         try:
-            return run_auto_repairs(settings.database, request, apply=True, fetch=fetch, mode=mode)
+            with http_budget_scope(HTTPPolicy.from_settings(settings)):
+                return run_auto_repairs(settings.database, request, apply=True, fetch=fetch, mode=mode)
         finally:
             session = getattr(fetch.client, "session", None)
             if session is not None:

@@ -43,10 +43,14 @@ def _decimal(value, name, *, positive=False):
     return result
 
 
-def _time(value, name):
+def validate_plan_timestamp(value, name):
+    """Validate the shared UTC timestamp convention for plan operations."""
     if isinstance(value, bool) or not isinstance(value, int) or abs(value) > 10**11:
         raise ValueError(f'{name} must be integer UTC epoch seconds')
     return value
+
+
+_time = validate_plan_timestamp
 
 
 def validate_config(config: dict) -> dict:
@@ -188,7 +192,8 @@ def future_plan_snapshot(config: dict, as_of: int) -> dict:
             'assumptions': ['The frozen plan has not started; no future price, fill or outcome is assumed.']}
 
 
-def _market_bars(config, candles, as_of, validation):
+def plan_market_bars(config, candles, as_of, validation):
+    """Select validated native vintages using the existing execution time policy."""
     if len(candles) > 100000:
         raise ValueError('At most 100000 candle versions are supported')
     latest = {}
@@ -220,6 +225,9 @@ def _market_bars(config, candles, as_of, validation):
         elif candle.observed_at == previous.observed_at and candle != previous:
             raise ValueError('Conflicting candle versions at identical availability')
     return sorted(latest.values(), key=lambda c: c.open_time)
+
+
+_market_bars = plan_market_bars
 
 
 def _notional_slices(config: dict, family: str, amount: Decimal) -> list[dict]:

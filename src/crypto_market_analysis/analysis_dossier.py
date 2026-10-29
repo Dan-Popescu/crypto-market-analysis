@@ -40,7 +40,7 @@ def _sources(value):
         raise ValueError("Dossier sources must be unique.")
 
 
-def _validate(request):
+def validate_dossier_request(request):
     bounded_object(request, "analysis dossier request")
     if len(canonical_json(request).encode()) > 65536:
         raise ValueError("Analysis dossier request exceeds the 64 KiB limit.")
@@ -162,7 +162,7 @@ def build_analysis_dossier(store: Store, request: dict, as_of: int | None = None
     The complete returned evidence is bounded to 32 MiB and suitable for frozen
     presentation paging. No connection or live cursor escapes this operation.
     """
-    request = _validate(request)
+    request = validate_dossier_request(request)
     cutoff = bounded_as_of(as_of)
     if cutoff > 253402300799:
         raise ValueError("Dossier as_of is outside the supported UTC range.")

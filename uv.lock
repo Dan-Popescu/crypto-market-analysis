@@ -667,7 +667,7 @@ wheels = [
 
 [[package]]
 name = "crypto-market-analysis"
-version = "0.7.1"
+version = "0.8.0"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },

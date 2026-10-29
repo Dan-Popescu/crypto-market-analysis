@@ -11,11 +11,11 @@ import shlex
 from copy import deepcopy
 from datetime import datetime
 
-from .analysis_dossier import MAX_RESULT_BYTES, _validate, build_analysis_dossier
+from .analysis_dossier import MAX_RESULT_BYTES, build_analysis_dossier, validate_dossier_request
 from .evidence import canonical_json, content_hash
 from .models import Candle
 from .purchase_windows import analyze_windows
-from .qualification import _selection, qualify_sources
+from .qualification import normalize_qualification_request, qualify_sources
 from .reporting import bounded_as_of, bounded_object
 from .storage import Store
 
@@ -32,7 +32,7 @@ def _request(request, cutoff):
     if set(request) - {"dossier", "windows", "qualification", "freshness_seconds"} or "dossier" not in request:
         raise ValueError("Readiness requires dossier and only optional windows, qualification and freshness_seconds.")
     request = deepcopy(request)
-    request["dossier"] = _validate(request["dossier"])
+    request["dossier"] = validate_dossier_request(request["dossier"])
     freshness = request.get("freshness_seconds", 7200)
     if type(freshness) is not int or not 0 <= freshness <= 604800:
         raise ValueError("freshness_seconds must be an integer from zero to 604800.")
@@ -53,12 +53,15 @@ def _request(request, cutoff):
                      "market_sources": sources, "freshness_seconds": freshness, **options}
     if "required_start" not in options and type(end) is int and type(days) is int:
         qualification["required_start"] = max(0, end - days * 86400)
-    _selection(qualification, cutoff)
+    normalize_qualification_request(qualification, cutoff)
     if "windows" in request:
         windows = request["windows"]
         if not isinstance(windows, dict) or set(windows) - {"horizons", "thresholds", "max_price_age"}:
             raise ValueError("Readiness windows accepts horizons, thresholds and max_price_age only.")
-        analyze_windows([], cutoff, **windows)
+        probe = analyze_windows([], cutoff, **windows)
+        cells = sum(len(thresholds) for thresholds in probe["windows"].values()) * len(selected)
+        if cells > 64:
+            raise ValueError("Readiness exceeds its 64 market/horizon/threshold calculation budget; narrow the windows request.")
     return request, qualification
 
 
@@ -284,9 +287,11 @@ def build_analysis_readiness(store: Store, request: dict, as_of: int | None = No
             "omissions": ["Archive contents and live network availability are not inspected.",
                           "Future issued-window outcomes are not requested or inferred from retrospective frequencies.",
                           "Data permission acceptance and contracted France entity/service verification remain external decisions."],
-            "resource_limits": {"request_bytes": 65536, "result_bytes": MAX_RESULT_BYTES, "next_actions": 128}}
+            "resource_limits": {"request_bytes": 65536, "result_bytes": MAX_RESULT_BYTES, "next_actions": 128,
+                                "window_calculation_cells": 64}}
     if not store.path.is_file():
         markets = [{"selection": {**{k: row[k] for k in ("asset", "source", "quote")}, "data_mode": mode},
+                    "claim_statuses": {"stored_evidence": "missing"},
                     "claims": [_claim("stored_evidence", {"status": "missing"}, [], reasons=["configured_database_missing"],
                                       needed=["Initialize an explicit local store and import or collect native evidence"])]}
                    for row in request["dossier"]["markets"]]
@@ -308,7 +313,8 @@ def build_analysis_readiness(store: Store, request: dict, as_of: int | None = No
                 captured = market["market_context"]["stored_inputs"]["consumed_records"]
                 windows = analyze_windows([Candle(**row) for row in captured], cutoff, **request["windows"])
             claims = _market_claims(market, empirical, windows, mode == "demo", cutoff, request["freshness_seconds"])
-            markets.append({"selection": selection, "claims": claims, "windows": windows})
+            markets.append({"selection": selection, "claims": claims, "windows": windows,
+                            "claim_statuses": {row["claim"]: row["status"] for row in claims}})
         calendar = dossier["calendar"]
         calendar_claim = _claim("upcoming_calendar", calendar, _refs(calendar), demo=mode == "demo",
                                 reasons=["Rows describe known schedules; empty rows do not establish that no events exist"],

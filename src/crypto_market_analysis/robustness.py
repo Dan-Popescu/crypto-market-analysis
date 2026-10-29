@@ -14,8 +14,16 @@ from decimal import Decimal, localcontext
 
 from .evidence import canonical_json, content_hash
 from .models import Candle
-from .plans import DAY, RULE_VERSION, _market_bars, _time, compare_plans, decimal_string, validate_config
-from .sensitivity import _cases
+from .plans import (
+    DAY,
+    RULE_VERSION,
+    compare_plans,
+    decimal_string,
+    plan_market_bars,
+    validate_config,
+    validate_plan_timestamp,
+)
+from .sensitivity import validated_cost_cases
 
 MAX_ROWS = 100000
 MAX_RESULT_BYTES = 2 * 1024 * 1024
@@ -51,20 +59,20 @@ def validate_robustness_request(request: dict) -> dict:
     origins = request.get('origins')
     if not isinstance(origins, list) or not 1 <= len(origins) <= 4:
         raise ValueError('origins must contain one to four predeclared UTC timestamps')
-    origins = [_time(origin, 'origin') for origin in origins]
+    origins = [validate_plan_timestamp(origin, 'origin') for origin in origins]
     if len(set(origins)) != len(origins):
         raise ValueError('origins must be unique')
     origins = sorted(origins)
     validation = request.get('validation', 'known_at')
     if validation not in ('known_at', 'retrospective'):
         raise ValueError('validation must be known_at or retrospective')
-    frozen = _time(request.get('policy_frozen_at', config['start_time']), 'policy_frozen_at')
-    held_out = _time(request.get('held_out_start', config['start_time']), 'held_out_start')
+    frozen = validate_plan_timestamp(request.get('policy_frozen_at', config['start_time']), 'policy_frozen_at')
+    held_out = validate_plan_timestamp(request.get('held_out_start', config['start_time']), 'held_out_start')
     if frozen > held_out:
         raise ValueError('Policies must be declared frozen before the held-out period')
     cost_cases = request.get('cost_cases')
     # Existing sensitivity validation pins all policy/timing/identity parameters.
-    _cases(config, cost_cases)
+    validated_cost_cases(config, cost_cases)
     missing = request.get('missing_data_cases', [])
     if not isinstance(missing, list) or len(missing) > 2:
         raise ValueError('missing_data_cases must contain at most two scenarios')
@@ -76,7 +84,7 @@ def validate_robustness_request(request: dict) -> dict:
         hours = case['removed_hours']
         if not isinstance(hours, list) or not 1 <= len(hours) <= 168:
             raise ValueError('removed_hours requires one to 168 aligned UTC hour open times')
-        hours = [_time(hour, 'removed_hour') for hour in hours]
+        hours = [validate_plan_timestamp(hour, 'removed_hour') for hour in hours]
         if len(set(hours)) != len(hours) or any(hour % 3600 for hour in hours):
             raise ValueError('removed_hours must be unique aligned UTC hour open times')
         normalized_missing.append({'name': name, 'removed_hours': sorted(hours)})
@@ -140,7 +148,7 @@ def analyze_plan_robustness(candles: list[Candle], request: dict, as_of: int) ->
     No fabricated bars or fills replace missing observations.
     """
     normalized = validate_robustness_request(request)
-    as_of = _time(as_of, 'as_of')
+    as_of = validate_plan_timestamp(as_of, 'as_of')
     if not isinstance(candles, (list, tuple)) or len(candles) > MAX_ROWS:
         raise ValueError(f'At most {MAX_ROWS} candle versions are supported')
     with localcontext() as context:
@@ -151,7 +159,7 @@ def analyze_plan_robustness(candles: list[Candle], request: dict, as_of: int) ->
 def _analyze(candles, request, as_of):
     config, validation = request['config'], request['validation']
     # Validate every native identity, even rows removed by stress scenarios.
-    _market_bars(config, candles, as_of, validation)
+    plan_market_bars(config, candles, as_of, validation)
     variants = [('observed', candles, [])]
     for case in request['missing_data_cases']:
         hours = case['removed_hours']
@@ -175,11 +183,11 @@ def _analyze(candles, request, as_of):
             previous = origin
     evidence, scenario_coverage = [], []
     for missing_name, rows, hours in variants:
-        market = _market_bars(config, rows, as_of, validation)
+        market = plan_market_bars(config, rows, as_of, validation)
         scenario_coverage.append({'name': missing_name, 'removed_hours': hours,
                                   'removed_versions': len(candles) - len(rows),
                                   'remaining_eligible_bars': len(market)})
-        for cost_name, scenario in _cases(config, request['cost_cases']):
+        for cost_name, scenario in validated_cost_cases(config, request['cost_cases']):
             for origin in request['origins']:
                 reason = origin_reasons.get(origin)
                 anchors = [c for c in market if c.close_time <= origin
@@ -261,7 +269,7 @@ def _analyze(candles, request, as_of):
 def build_plan_robustness(store, request: dict, as_of: int | None = None) -> dict:
     """Capture versions once in one read-only snapshot, then calculate offline."""
     normalized = validate_robustness_request(request)
-    now = _time(int(time.time()) if as_of is None else as_of, 'as_of')
+    now = validate_plan_timestamp(int(time.time()) if as_of is None else as_of, 'as_of')
     config = normalized['config']
     with store.read_session() as session:
         captured = session.capture(config['asset'], now, config['data_mode'], source=config['source'],

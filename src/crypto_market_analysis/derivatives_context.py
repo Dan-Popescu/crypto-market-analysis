@@ -104,7 +104,7 @@ def _validate(request):
     return selectors, policy, observations
 
 
-def _dimension(observation):
+def derivative_dimension(observation):
     dimension = metric_dimension(observation)
     # Contract-size units and native value currency are essential even when two
     # providers happen to publish the same numeric contract size or OI amount.
@@ -223,7 +223,7 @@ def analyze_derivatives_context(request: dict, as_of: int) -> dict:
                 or (row.observed_at is not None and row.observed_at > as_of)):
             excluded['after_as_of'] += 1
             continue
-        identity = (row.source, row.asset, row.metric, row.data_mode, canonical_json(_dimension(row)))
+        identity = (row.source, row.asset, row.metric, row.data_mode, canonical_json(derivative_dimension(row)))
         groups.setdefault(identity, []).append(row)
         if len(groups) > MAX_SERIES:
             raise ValueError(f'At most {MAX_SERIES} separate native derivatives series are supported')

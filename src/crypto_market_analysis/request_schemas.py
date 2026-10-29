@@ -240,6 +240,45 @@ REGISTRY["get_installation_qualification"] = _contract("request", obj(_INSTALLAT
     {"request": {"sources": ["synthetic"], "data_mode": "demo", "refresh": False,
                  "required_history_days": 730}, "as_of": AS_OF}, as_of=_AS_OF)
 
+CHANGES = obj({"dossier": DOSSIER, "previous_as_of": integer(), "max_changes": integer(500, 1, default=100)},
+              ("dossier", "previous_as_of"),
+              description="Previous cutoff must precede as_of. Both known-at views share one physical snapshot; deleted evidence is unknown.")
+REGISTRY["get_analysis_changes"] = _contract("request", CHANGES,
+    {"request": {"dossier": {"data_mode": "demo", "markets": [{"asset": "BTC", "source": "synthetic", "quote": "EUR", "lookbacks": [7]}]},
+                 "previous_as_of": AS_OF - 3600}}, as_of=_AS_OF)
+_READINESS_DOSSIER = deepcopy(DOSSIER)
+_READINESS_DOSSIER["properties"]["markets"]["items"]["properties"]["source"]["maxLength"] = 64
+READINESS = obj({"dossier": _READINESS_DOSSIER,
+    "qualification": obj({key: value for key, value in QUALIFICATION["properties"].items()
+                          if key not in ("sources", "markets", "market_sources", "data_mode")}),
+    "windows": obj({"horizons": array(integer(365, 1), 16, 1, uniqueItems=True),
+                    "thresholds": array({"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1}, 12, 1, uniqueItems=True),
+                    "max_price_age": integer(604800, 1)},
+                   description="Runtime limits the aggregate market × horizon × threshold grid to 64 cells."),
+    "freshness_seconds": integer(604800, default=7200)}, ("dossier",),
+    description="Evidence readiness is independent of provider access, rights and France eligibility. No collection or mutation.")
+REGISTRY["get_analysis_readiness"] = _contract("request", READINESS,
+    {"request": {"dossier": {"data_mode": "demo", "markets": [{"asset": "BTC", "source": "synthetic", "quote": "EUR", "lookbacks": [7]}]},
+                 "qualification": {"required_history_days": 7, "max_gap_details": 8},
+                 "windows": {"horizons": [1], "thresholds": [0.05]}}}, as_of=_AS_OF)
+_ROBUST_PLAN = deepcopy(PLAN)
+_ROBUST_PLAN["required"] = [*_ROBUST_PLAN["required"], "fees"]
+_ROBUST_PLAN["properties"]["fees"] = obj(deepcopy(FEES["properties"]), ("asset", "rate", "fixed"),
+    description="Explicit hypothetical fee assumptions are required; omitted costs are not scored as zero.")
+ROBUSTNESS = obj({"schema_version": {"type": "integer", "const": 1}, "config": _ROBUST_PLAN,
+    "origins": array(integer(10**11), 4, 1, uniqueItems=True), "validation": enum("known_at", "retrospective", default="known_at"),
+    "policy_frozen_at": integer(10**11), "held_out_start": integer(10**11),
+    "cost_cases": array(obj({"name": {**TEXT, "maxLength": 40}, "fees": FEES,
+                              "execution": obj({"spread_bps": DECIMAL, "slippage_bps": DECIMAL})}, ("name",)), 3, 1),
+    "missing_data_cases": array(obj({"name": {**TEXT, "maxLength": 40},
+                                     "removed_hours": array(integer(10**11, multipleOf=3600), 168, 1, uniqueItems=True)},
+                                    ("name", "removed_hours")), 2)},
+    ("schema_version", "config", "origins", "cost_cases"),
+    description="Fixed predeclared grid with bounded operation/action work. No fitting, ranking or prospective performance claim.")
+REGISTRY["get_plan_robustness"] = _contract("request", ROBUSTNESS,
+    {"request": {"schema_version": 1, "config": PLAN_EXAMPLE, "origins": [AS_OF],
+                 "cost_cases": [{"name": "declared costs"}]}}, as_of=_AS_OF)
+
 
 def get_request_schema(tool_name: str) -> dict:
     """Return one bounded contract instead of serializing the complete registry."""

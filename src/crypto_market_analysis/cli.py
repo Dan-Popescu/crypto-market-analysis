@@ -195,6 +195,7 @@ def _history_archive_inputs(args):
 
 def _run_history_operation(args, config, archive) -> dict:
     from .history_dataset import HistoryDataset, KrakenRESTCapture
+    from .http_limits import HTTPPolicy, http_budget_scope
 
     dataset = HistoryDataset(config)
     if args.action in ("init", "status"):
@@ -211,9 +212,12 @@ def _run_history_operation(args, config, archive) -> dict:
         raise ValueError("One-shot refresh requires an explicit --since timestamp.")
     fetch = KrakenRESTCapture()
     try:
-        if args.action == "refresh":
-            return dataset.append_rest(args.asset, args.quote, fetch, since=args.since, limit=args.limit)
-        return dataset.repair(args.asset, args.quote, fetch, request_budget=args.request_budget)
+        config_path = args.config or (Path("observer.toml") if Path("observer.toml").exists() else None)
+        policy = HTTPPolicy.from_settings(load_settings(config_path))
+        with http_budget_scope(policy):
+            if args.action == "refresh":
+                return dataset.append_rest(args.asset, args.quote, fetch, since=args.since, limit=args.limit)
+            return dataset.repair(args.asset, args.quote, fetch, request_budget=args.request_budget)
     except Exception as exc:
         raise ValueError(f"Dataset public capture failed: {type(exc).__name__}; transport details withheld.") from exc
     finally:
@@ -252,6 +256,9 @@ def parser() -> argparse.ArgumentParser:
     from .capacity_cli import register_capacity_commands
 
     register_capacity_commands(command, parse_time)
+    from .analysis_cli import register_analysis_commands
+
+    register_analysis_commands(command)
 
     init = command(
         "init", "Create an editable configuration.", "crypto-market-analysis init --file observer.toml"
@@ -608,12 +615,13 @@ def _guard_configured_dataset(args, settings, resources):
     """
     if not (settings.data_dir / "dataset.json").is_file():
         return
+    from .analysis_cli import COMMANDS as ANALYSIS_COMMANDS
     from .capacity_cli import COMMANDS
     from .dataset_lock import DatasetBusy, dataset_writer_lock
 
     if getattr(args, "output", None):
         _protect_report_output(args, settings)
-    if (args.command in COMMANDS or args.command in ("serve", "storage-policy", "verify-archive")
+    if (args.command in COMMANDS | ANALYSIS_COMMANDS or args.command in ("serve", "storage-policy", "verify-archive")
             or (args.command in ("maintain", "restore-archive") and not args.apply)):
         return
     try:
@@ -730,23 +738,29 @@ def _run_cli(argv, resources) -> int:
         if busy:
             write_json(busy, getattr(args, "output", None))
             return 1
+        from .analysis_cli import COMMANDS as ANALYSIS_COMMANDS
+        from .analysis_cli import analysis_exit_code, render_analysis_report, run_analysis_command
         from .capacity_cli import COMMANDS, capacity_exit_code, render_capacity_report, run_capacity_command
 
-        if args.command in COMMANDS:
+        if args.command in COMMANDS | ANALYSIS_COMMANDS:
             _protect_report_output(args, settings)
             request = _json_file(args.request) if getattr(args, "request", None) else None
-            result = run_capacity_command(args, settings, request)
+            if args.command in ANALYSIS_COMMANDS:
+                run_command, render_report, exit_code = run_analysis_command, render_analysis_report, analysis_exit_code
+            else:
+                run_command, render_report, exit_code = run_capacity_command, render_capacity_report, capacity_exit_code
+            result = run_command(args, settings, request)
             if args.format == "json":
                 write_json(result, args.output)
             else:
-                text = render_capacity_report(result, args.command)
+                text = render_report(result, args.command)
                 if args.output:
                     path = Path(args.output)
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_text(text, encoding="utf-8")
                 else:
                     print(text, end="")
-            return capacity_exit_code(args.command, result, apply=getattr(args, "apply", False))
+            return exit_code(args.command, result, apply=getattr(args, "apply", False))
         if args.command in ("maintain", "storage-policy", "verify-archive", "restore-archive"):
             from types import SimpleNamespace
 

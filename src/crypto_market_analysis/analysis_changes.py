@@ -6,13 +6,13 @@ import json
 from collections import Counter
 from decimal import Decimal, InvalidOperation
 
-from .analysis_dossier import MAX_CANDLES, _validate, build_analysis_dossier
-from .derivatives_context import _dimension
+from .analysis_dossier import MAX_CANDLES, build_analysis_dossier, validate_dossier_request
+from .derivatives_context import derivative_dimension
 from .evidence import canonical_json, content_hash
 from .freshness import assess_freshness
 from .models import Observation
 from .reporting import bounded_as_of, bounded_object
-from .storage import _LOCAL_RECORD_VERSION_ORDER, Store
+from .storage import LOCAL_RECORD_VERSION_ORDER, Store
 
 MAX_CHANGES = 500
 MAX_TOTAL_CANDLES = 2 * MAX_CANDLES
@@ -214,7 +214,7 @@ def _calendar(session, request, snapshot, previous_identities=()):
     with session.connection() as con:
         placeholders = ",".join("?" for _ in previous_identities) or "NULL"
         rows = con.execute(f"""WITH ranked AS (SELECT identity,payload,ROW_NUMBER() OVER(PARTITION BY identity
-            ORDER BY {_LOCAL_RECORD_VERSION_ORDER}) rn FROM local_records WHERE kind='calendar' AND observed_at<=?)
+            ORDER BY {LOCAL_RECORD_VERSION_ORDER}) rn FROM local_records WHERE kind='calendar' AND observed_at<=?)
             SELECT identity,payload FROM ranked WHERE rn=1 AND (? IS NULL OR json_extract(payload,'$.source')=?)
             AND (json_extract(payload,'$.data_mode')=? OR json_extract(payload,'$.data_mode') IS NULL)
             AND (identity IN ({placeholders}) OR json_extract(payload,'$.event_time') BETWEEN ? AND ? OR (json_extract(payload,'$.event_time') IS NULL
@@ -233,7 +233,7 @@ def _derivative_versions(snapshot):
         for record in market["derivatives"].get("stored_inputs", {}).get("consumed_records", []):
             row = record["payload"]
             identity = {key: row.get(key) for key in ("source", "asset", "metric", "quote", "unit", "data_mode")}
-            identity["dimension"] = _dimension(Observation(**row))
+            identity["dimension"] = derivative_dimension(Observation(**row))
             key = index, canonical_json(identity), row["event_time"]
             if key not in rows or (row["observed_at"], record["input_reference"]) > (
                     rows[key]["payload"]["observed_at"], rows[key]["input_reference"]):
@@ -246,7 +246,7 @@ def _derivative_fact(record):
         return None
     row = record["payload"]
     identity = {key: row.get(key) for key in ("source", "asset", "metric", "quote", "unit", "data_mode")}
-    identity["dimension"] = _dimension(Observation(**row))
+    identity["dimension"] = derivative_dimension(Observation(**row))
     return _fact(row["value"], identity=identity, event=row["event_time"], known=row["observed_at"],
                  refs=[record["input_reference"]], unit=row.get("unit"), status=row.get("metadata", {}).get("status", "observed"))
 
@@ -269,7 +269,7 @@ def build_analysis_changes(store: Store, request: dict, as_of: int | None = None
     bounded_object(request, "analysis changes request")
     if set(request) - {"dossier", "previous_as_of", "max_changes"} or "previous_as_of" not in request:
         raise ValueError("Analysis changes requires dossier and previous_as_of with optional max_changes.")
-    dossier = _validate(request.get("dossier"))
+    dossier = validate_dossier_request(request.get("dossier"))
     previous, current = bounded_as_of(request["previous_as_of"]), bounded_as_of(as_of)
     if previous >= current or current > 253402300799:
         raise ValueError("Analysis changes requires previous_as_of strictly before the supported as_of cutoff.")

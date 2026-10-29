@@ -18,11 +18,12 @@ from .models import Candle, CollectionResult, Observation
 
 # A later receipt of an older manual ECB revision must not undo a known
 # cancellation. Apply the same known-at version order to both calendar readers.
-_LOCAL_RECORD_VERSION_ORDER = """CASE WHEN kind='calendar'
+LOCAL_RECORD_VERSION_ORDER = """CASE WHEN kind='calendar'
     AND json_extract(payload,'$.source_format')='ecb-manual-calendar-v1'
     AND json_type(payload,'$.sequence')='integer'
     AND json_extract(payload,'$.sequence') BETWEEN 0 AND 2147483647
     THEN json_extract(payload,'$.sequence') ELSE 0 END DESC,observed_at DESC,id DESC"""
+_LOCAL_RECORD_VERSION_ORDER = LOCAL_RECORD_VERSION_ORDER
 
 
 def _json(value: object) -> str:
