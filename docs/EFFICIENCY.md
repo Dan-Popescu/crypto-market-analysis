@@ -22,6 +22,12 @@ Known `Retry-After` deadlines are respected
 without a long blocking worker sleep. Context providers can be scheduled separately.
 The scheduler remains a single local orchestrator, not a distributed job queue.
 
+One-shot collection retains its combined public venue summary while persisting
+separate market/liquidity run records. A later scheduler startup therefore keeps
+the same task isolation. Old compound failures without task-level evidence are
+handled conservatively; their successful component cannot be inferred from a
+combined error list.
+
 ## Select history before paging
 
 Use MCP `get_metric_series` to discover available source/quote/unit/dimension
