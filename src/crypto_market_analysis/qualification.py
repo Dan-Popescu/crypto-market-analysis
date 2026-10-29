@@ -219,7 +219,8 @@ def qualify_sources(store: Store, request: dict, as_of: int) -> dict:
     remaining_gaps = rules["max_gap_details"]
     remaining_rows = rules["max_query_rows"]
     with store.connection() as con:
-        con.execute("BEGIN")
+        if not con.in_transaction:
+            con.execute("BEGIN")
         con.create_aggregate("qualification_refs", 5, _ReferenceHash)
         watermark = {t: con.execute(f"SELECT COALESCE(MAX(id),0) FROM {t}").fetchone()[0]
                      for t in ("candles", "runs")}
