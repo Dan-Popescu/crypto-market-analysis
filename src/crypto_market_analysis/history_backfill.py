@@ -9,7 +9,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import re
 import time
 from dataclasses import replace
 from email.utils import parsedate_to_datetime
@@ -41,6 +40,58 @@ MAXIMUMS = {"max_pages": 32, "max_requests": 64, "max_rows": 32000,
 
 def _json(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _retry_deadline(exc, now, delay, *, client=None):
+    """Retain only a bounded numeric deadline and its evidence basis.
+
+    Current exception metadata takes precedence over potentially stale CCXT
+    client headers. Expired, malformed and nonfinite values cannot shorten the
+    local exponential cooldown. No response headers or provider text survive.
+    """
+    deadline, basis = now + delay, "local_exponential_backoff"
+    candidates = []
+    absolute = getattr(exc, "retry_at", None)
+    if type(absolute) in (int, float):
+        candidates.append((absolute, True, "exception_retry_at"))
+    retry = getattr(exc, "retry_after", None)
+    if retry is not None:
+        origin = ("ccxt_client_last_response_header_unverified"
+                  if getattr(exc, "retry_after_basis", None) == "ccxt_client_last_response_header_unverified"
+                  else "exception_retry_after")
+        candidates.append((retry, False, origin))
+    headers = getattr(exc, "headers", None) or getattr(getattr(exc, "response", None), "headers", None)
+    header = headers.get("Retry-After", headers.get("retry-after")) if hasattr(headers, "get") else None
+    if header is not None:
+        candidates.append((header, False, "exception_response_retry_after"))
+    if not candidates:
+        headers = getattr(client, "last_response_headers", None)
+        header = headers.get("Retry-After", headers.get("retry-after")) if hasattr(headers, "get") else None
+        if header is not None:
+            candidates.append((header, False, "ccxt_client_last_response_header_unverified"))
+    for value, absolute, origin in candidates:
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            continue
+        if isinstance(value, str) and len(value) > 128:
+            continue
+        try:
+            number = float(value)
+            candidate = number if absolute else now + number
+            if not absolute and number < 0:
+                continue
+        except (ValueError, TypeError, OverflowError):
+            if absolute or not isinstance(value, str):
+                continue
+            try:
+                parsed = parsedate_to_datetime(value)
+                if parsed.tzinfo is None:
+                    continue
+                candidate = parsed.timestamp()
+            except (ValueError, TypeError, OverflowError):
+                continue
+        if math.isfinite(candidate) and deadline < candidate <= 253402300799:
+            deadline, basis = candidate, origin
+    return deadline, basis
 
 
 def normalize_backfill_request(request):
@@ -248,8 +299,12 @@ def _run(path, request, clients, clock):
             # durable intent before catalogue transport as well as every page.
             job["updated_at"] = now
             job["status"] = "catalogue_inflight"
-            job["catalogue"] = {"status": "inflight", "next_retry": now + request["backoff_seconds"],
-                                "updated_at": now}
+            failures = job.get("catalogue", {}).get("failures", 0)
+            catalogue_delay = min(request["backoff_seconds"] * 2 ** min(failures, 9), 21600)
+            catalogue_retry, catalogue_basis = now + catalogue_delay, "local_exponential_backoff"
+            client = None
+            job["catalogue"] = {"status": "inflight", "next_retry": catalogue_retry,
+                                "retry_deadline_basis": catalogue_basis, "failures": failures, "updated_at": now}
             _save_job(store, job)
             used["logical_requests"] += 1
             catalogue_error = None
@@ -268,6 +323,10 @@ def _run(path, request, clients, clock):
                         raise ValueError("Empty public market catalogue.")
                 except Exception as exc:
                     catalogue_error = public_error(exc, include_message=isinstance(exc, BackfillPageError))
+                    catalogue_retry, catalogue_basis = _retry_deadline(
+                        exc, _receipt(clock), catalogue_delay, client=client)
+                    if catalogue_basis != "local_exponential_backoff":
+                        catalogue_error += f" retry_at={catalogue_retry}"
                 measured = meter.snapshot(request["source"])
             measurements.append(measured)
             record = CollectionResult(request["source"], http_accounting=measured,
@@ -275,7 +334,9 @@ def _run(path, request, clients, clock):
             store.record_run(record, "history_backfill_catalogue", _receipt(clock), data_mode="import")
             job["catalogue"].update({"status": "error" if catalogue_error else "ready",
                                      "error": catalogue_error, "http_accounting": measured,
-                                     "next_retry": _receipt(clock) + request["backoff_seconds"] if catalogue_error else 0})
+                                     "next_retry": catalogue_retry if catalogue_error else 0,
+                                     "retry_deadline_basis": catalogue_basis,
+                                     "failures": failures + 1 if catalogue_error else 0})
             if catalogue_error:
                 attempts.append({"status": "catalogue_error", "error": catalogue_error})
             else:
@@ -348,6 +409,7 @@ def _fetch_turns(store, request, job, client, catalogue, clock, used, attempts, 
         used["logical_requests"] += 1
         error = None
         hard_limit = False
+        page_exception = None
         candles = []
         with accounting_scope(request["source"]) as meter:
             instrument_exchange(client, request["source"])
@@ -388,37 +450,26 @@ def _fetch_turns(store, request, job, client, catalogue, clock, used, attempts, 
             except Exception as exc:
                 hard_limit = isinstance(exc, HTTPBudgetExceeded)
                 error = public_error(exc, include_message=isinstance(exc, BackfillPageError))
-                retry = getattr(exc, "retry_after", None)
-                headers = getattr(exc, "headers", None) or getattr(getattr(exc, "response", None), "headers", None)
-                if retry is None and headers:
-                    retry = headers.get("Retry-After", headers.get("retry-after"))
-                try:
-                    seconds = float(retry)
-                    if math.isfinite(seconds) and seconds >= 0:
-                        error += f" retry_at={_receipt(clock) + seconds}"
-                except (ValueError, TypeError):
-                    if isinstance(retry, str):
-                        try:
-                            error += f" retry_at={parsedate_to_datetime(retry).timestamp()}"
-                        except (ValueError, TypeError, OverflowError):
-                            pass
-                retry_at = getattr(exc, "retry_at", None)
-                if type(retry_at) in (int, float) and math.isfinite(retry_at):
-                    error += f" retry_at={retry_at}"
+                page_exception = exc
             measured = meter.snapshot(request["source"])
         measurements.append(measured)
         receipt = _receipt(clock)
+        if error:
+            failures = checkpoint["failures"] + 1
+            delay = min(request["backoff_seconds"] * 2 ** min(failures - 1, 9), 21600)
+            retry_deadline, retry_basis = _retry_deadline(
+                page_exception, receipt, delay, client=client if page_exception else None)
+            if retry_basis != "local_exponential_backoff":
+                error += f" retry_at={retry_deadline}"
         record = CollectionResult(request["source"], candles=candles,
                                   errors=[error] if error else [], http_accounting=measured)
         store.record_run(record, "history_backfill", receipt, data_mode="import")
         checkpoint.update({"status": "unknown_gap" if error else "captured", "updated_at": receipt,
                            "error": error, "rows": len(candles), "http_accounting": measured})
         if error:
-            checkpoint["failures"] += 1
-            delay = min(request["backoff_seconds"] * 2 ** min(checkpoint["failures"] - 1, 9), 21600)
-            # Preserve known server-supplied deadlines without sleeping.
-            deadlines = [float(value) for value in re.findall(r"retry_at=(\d+(?:\.\d+)?)", error)]
-            checkpoint["next_retry"] = max([receipt + delay, *deadlines])
+            checkpoint["failures"] = failures
+            checkpoint["next_retry"] = retry_deadline
+            checkpoint["retry_deadline_basis"] = retry_basis
             blocked.add(key)
         else:
             checkpoint["failures"] = 0

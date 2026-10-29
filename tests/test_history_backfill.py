@@ -349,3 +349,100 @@ def test_empty_page_provenance_cannot_claim_nonempty_capture(tmp_path):
         payload = json.loads(con.execute("SELECT payload FROM local_records WHERE kind='history_import'").fetchone()[0])
     assert payload["validated_rows"] == 0
     assert payload["capture_evidence"] == "injected_clients_unqualified"
+
+
+@pytest.mark.parametrize("phase", ["catalogue", "page"])
+@pytest.mark.parametrize("metadata", ["seconds", "date", "absolute", "client_header"])
+def test_retry_deadline_survives_restart_and_preserves_native_independence(tmp_path, phase, metadata):
+    from datetime import UTC, datetime
+    from email.utils import format_datetime
+
+    class Throttled(RuntimeError):
+        pass
+
+    exception = Throttled("https://provider.invalid?secret=header-or-body")
+    deadline = NOW + 300
+    date = format_datetime(datetime.fromtimestamp(deadline, UTC), usegmt=True)
+    if metadata == "seconds":
+        exception.headers = {"Retry-After": "300"}
+    elif metadata == "date":
+        exception.headers = {"Retry-After": date}
+    elif metadata == "absolute":
+        exception.retry_at = deadline
+
+    def behavior(symbol, stamp, count):
+        if symbol == "BTC/EUR":
+            raise exception
+        return [row(stamp + index * 3600) for index in range(count)]
+
+    pool = Pool(Client(behavior))
+    if metadata == "client_header":
+        pool.adapter.last_response_headers = {"Retry-After": date, "Authorization": "never-retain-header"}
+    if phase == "catalogue":
+        def fail_catalogue(source, client):
+            pool.catalogue_calls += 1
+            raise exception
+        pool.markets = fail_catalogue
+    database = tmp_path / "market.sqlite"
+    req = request(markets=[{"asset": "BTC", "quote": "EUR"}, {"asset": "ETH", "quote": "USD"}])
+    first = apply(database, req, pool)
+    checkpoint = (first["catalogue_checkpoint"] if phase == "catalogue"
+                  else first["markets"][0]["checkpoint"])
+    assert checkpoint["next_retry"] == deadline
+    assert checkpoint["retry_deadline_basis"] == {
+        "seconds": "exception_response_retry_after", "date": "exception_response_retry_after",
+        "absolute": "exception_retry_at", "client_header": "ccxt_client_last_response_header_unverified"}[metadata]
+    if phase == "page":
+        assert first["markets"][1]["missing_hours"] == 0
+    assert "header-or-body" not in str(first)
+    assert "never-retain-header" not in str(first)
+    restarted = Pool()
+    assert apply(database, req, restarted, now=deadline - 1)["status"] == "deferred"
+    assert restarted.catalogue_calls == 0
+    assert restarted.adapter.calls == []
+    resumed = apply(database, req, restarted, now=deadline)
+    assert resumed["status"] == "complete"
+    if phase == "page":
+        assert [call[0] for call in restarted.adapter.calls] == ["BTC/EUR"]
+
+
+@pytest.mark.parametrize("phase", ["catalogue", "page"])
+def test_expired_retry_header_uses_local_exponential_minimum(tmp_path, phase):
+    from datetime import UTC, datetime
+    from email.utils import format_datetime
+
+    class Expired(RuntimeError):
+        headers = {"Retry-After": format_datetime(datetime.fromtimestamp(NOW - 10, UTC), usegmt=True)}
+
+    def fail(symbol, stamp, count):
+        raise Expired("never-retain-provider-message")
+
+    pool = Pool(Client(fail))
+    # A stale client header must not override an explicit current response's
+    # expired header; the local minimum wins instead.
+    pool.adapter.last_response_headers = {"Retry-After": "86400"}
+    if phase == "catalogue":
+        def fail_catalogue(source, client):
+            pool.catalogue_calls += 1
+            raise Expired("never-retain-provider-message")
+        pool.markets = fail_catalogue
+    database = tmp_path / "market.sqlite"
+    first = apply(database, pool=pool)
+    checkpoint = (first["catalogue_checkpoint"] if phase == "catalogue"
+                  else first["markets"][0]["checkpoint"])
+    assert checkpoint["next_retry"] == NOW + 60
+    assert checkpoint["retry_deadline_basis"] == "local_exponential_backoff"
+    second = apply(database, pool=pool, now=NOW + 60)
+    checkpoint = (second["catalogue_checkpoint"] if phase == "catalogue"
+                  else second["markets"][0]["checkpoint"])
+    assert checkpoint["next_retry"] == NOW + 60 + 120
+    assert checkpoint["failures"] == 2
+    assert "never-retain-provider-message" not in str(second)
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-1", "x" * 129, True, "not a date"])
+def test_invalid_retry_metadata_is_bounded_and_cannot_shorten_backoff(value):
+    class Invalid(RuntimeError):
+        headers = {"Retry-After": value}
+
+    assert backfill._retry_deadline(Invalid(), NOW, 60) == (NOW + 60, "local_exponential_backoff")
