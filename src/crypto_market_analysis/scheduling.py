@@ -28,7 +28,10 @@ class Schedule:
         # Bootstrap old installations from all run groups, never a bounded global tail.
         # Existing durable state wins, including server-provided retry deadlines.
         baseline = {}
-        for report in sorted(store.scheduler_runs(), key=lambda row: row["observed_at"]):
+        # Legacy compound errors lack task attribution: conservatively apply them
+        # to every named task. Precise task reports win ties at the same second.
+        for report in sorted(store.scheduler_runs(),
+                             key=lambda row: (row["observed_at"], "+" not in row["task"])):
             for task in report["task"].split("+"):
                 if task not in intervals:
                     continue
@@ -37,8 +40,16 @@ class Schedule:
                 baseline[key] = {**report, "last_success": last_success}
         existing = self.states()
         for (source, task), report in baseline.items():
-            if report["observed_at"] > existing.get((source, task), {}).get("last_attempt", -1):
-                self.record(report, task, report["observed_at"])
+            previous = existing.get((source, task), {})
+            completed = report["observed_at"]
+            # A precise success can correct an already-seeded ambiguous legacy
+            # failure at the same second. Once reconciled, subsequent restarts
+            # leave both success and failure counters unchanged.
+            corrected_success = (completed == previous.get("last_attempt")
+                                 and "+" not in report["task"] and not report["errors"]
+                                 and previous.get("last_success", 0) < completed)
+            if completed > previous.get("last_attempt", -1) or corrected_success:
+                self.record(report, task, completed)
 
     def states(self) -> dict[tuple[str, str], dict]:
         with self.store.connection() as con:

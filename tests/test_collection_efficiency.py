@@ -312,7 +312,109 @@ def test_one_shot_collect_keeps_combined_market_liquidity_report(monkeypatch, tm
     requested = []
     monkeypatch.setattr("crypto_market_analysis.pipeline.collect_exchange", lambda source, *a, **kw:
                         requested.append(kw["include"]) or CollectionResult(source))
-    report = collect(settings, Store(settings.database), tasks=("market", "liquidity"))
-    assert requested == [("candles", "derivatives", "liquidity")]
+    store = Store(settings.database)
+    report = collect(settings, store, tasks=("market", "liquidity"))
+    assert {row["task"] for row in store.runs()} == {"market", "liquidity"}
+    assert sorted(requested) == [("candles", "derivatives"), ("liquidity",)]
     assert len(report["reports"]) == 1
     assert report["reports"][0]["task"] == "market+liquidity"
+
+
+@pytest.mark.parametrize("failed_tasks", [("liquidity",), ("market",), ("market", "liquidity")])
+def test_one_shot_outcomes_seed_independent_clocks_on_scheduler_restart(monkeypatch, tmp_path, failed_tasks):
+    from ccxt import RequestTimeout
+
+    now = 1_800_000_000
+    opened = now - 7200
+    monkeypatch.setattr("crypto_market_analysis.pipeline.time.time", lambda: now)
+    settings = Settings(data_dir=tmp_path, venues=["kraken"], assets=["BTC"], quote_currencies=["EUR"],
+                        options=False, context=False, max_pages=1)
+    store = Store(settings.database)
+    store.record_run(CollectionResult("storage"), "retention", now)
+    calls = []
+
+    class PublicExchange:
+        has = {"fetchOHLCV": True, "fetchOrderBook": True}
+
+        def load_markets(self):
+            return {"BTC/EUR": {"base": "BTC", "quote": "EUR", "symbol": "BTC/EUR", "spot": True}}
+
+        def fetch_ohlcv(self, symbol, timeframe, *, since, limit):
+            calls.append("market")
+            if "market" in failed_tasks:
+                raise RequestTimeout("Candle endpoint unavailable")
+            return [[opened * 1000, 100, 101, 99, 100, 1]]
+
+        def fetch_order_book(self, symbol, *, limit):
+            calls.append("liquidity")
+            if "liquidity" in failed_tasks:
+                raise RequestTimeout("Book endpoint unavailable")
+            return {"timestamp": now * 1000, "bids": [[99.9, 2]], "asks": [[100.1, 2]]}
+
+    exchange = PublicExchange()
+
+    def clients():
+        pool = ExchangeClients()
+        pool._clients["kraken"] = exchange
+        return pool
+
+    with clients() as pool:
+        report = collect(settings, store, tasks=("market", "liquidity"), clients=pool)
+    assert len(report["reports"]) == 1
+    summary = report["reports"][0]
+    assert summary["task"] == "market+liquidity" and summary["data_mode"] == "live"
+    assert summary["status"] == ("error" if len(failed_tasks) == 2 else "partial")
+    task_reports = {row["task"]: row for row in store.runs() if row["source"] == "kraken"}
+    assert set(task_reports) == {"market", "liquidity"}
+    assert summary["errors"] == task_reports["market"]["errors"] + task_reports["liquidity"]["errors"]
+    assert summary["warnings"] == task_reports["market"]["warnings"] + task_reports["liquidity"]["warnings"]
+    assert summary["observed_at"] == max(row["observed_at"] for row in task_reports.values())
+    assert summary["inserted_candles"] == (0 if "market" in failed_tasks else 1)
+    assert summary["inserted_observations"] == task_reports["liquidity"]["observations"]
+    states = Schedule(store, {"market": 3600, "liquidity": 300}).states()
+    for task in ("market", "liquidity"):
+        row = states[("kraken", task)]
+        assert row["failures"] == (1 if task in failed_tasks else 0)
+        assert row["last_success"] == (0 if task in failed_tasks else now)
+        assert row["next_due"] == now + (60 if task in failed_tasks else 3600 if task == "market" else 300)
+    # Startup from the actual one-shot run history, without preexisting state.
+    with store.connection() as con:
+        con.execute("DELETE FROM scheduler_state")
+    monkeypatch.setattr("crypto_market_analysis.pipeline.ExchangeClients", clients)
+    now += 61
+    run_scheduler(settings, Store(settings.database), Once())
+    assert calls.count("market") == (2 if "market" in failed_tasks else 1)
+    assert calls.count("liquidity") == (2 if "liquidity" in failed_tasks else 1)
+
+
+def test_legacy_ambiguous_combined_errors_remain_conservative(tmp_path):
+    store = Store(tmp_path / "legacy.sqlite")
+    store.record_run(CollectionResult("kraken", errors=["RequestTimeout"]), "market+liquidity", 100)
+    schedule = Schedule(store, {"market": 3600, "liquidity": 300})
+    assert all(row["failures"] == 1 and row["last_success"] == 0 for row in schedule.states().values())
+
+
+def test_precise_task_result_wins_legacy_compound_tie(tmp_path):
+    store = Store(tmp_path / "tie.sqlite")
+    store.record_run(CollectionResult("kraken"), "market", 100, data_mode="live")
+    store.record_run(CollectionResult("kraken", errors=["RequestTimeout"]), "market+liquidity", 100)
+    states = Schedule(store, {"market": 3600, "liquidity": 300}).states()
+    assert states[("kraken", "market")]["last_success"] == 100
+    assert states[("kraken", "market")]["next_due"] == 3700
+    assert states[("kraken", "liquidity")]["last_success"] == 0
+    assert states[("kraken", "liquidity")]["next_due"] == 160
+
+
+def test_precise_success_reconciles_already_seeded_legacy_failure_once(tmp_path):
+    store = Store(tmp_path / "reconcile.sqlite")
+    intervals = {"market": 3600, "liquidity": 300}
+    store.record_run(CollectionResult("kraken", errors=["RequestTimeout"]), "market+liquidity", 100)
+    assert Schedule(store, intervals).states()[("kraken", "market")]["failures"] == 1
+    store.record_run(CollectionResult("kraken"), "market", 100, data_mode="live")
+    for _ in range(3):
+        states = Schedule(Store(store.path), intervals).states()
+        assert states[("kraken", "market")]["last_success"] == 100
+        assert states[("kraken", "market")]["failures"] == 0
+        assert states[("kraken", "market")]["next_due"] == 3700
+        assert states[("kraken", "liquidity")]["failures"] == 1
+        assert states[("kraken", "liquidity")]["next_due"] == 160

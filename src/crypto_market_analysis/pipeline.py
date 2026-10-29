@@ -17,6 +17,33 @@ from .storage import Store
 log = logging.getLogger(__name__)
 
 
+def _combined_exchange_reports(reports: list[dict]) -> list[dict]:
+    """Keep the one-shot summary shape while storing independent task outcomes."""
+    grouped = {}
+    combined = []
+    for report in reports:
+        if report["task"] in ("market", "liquidity"):
+            grouped.setdefault(report["source"], []).append(report)
+        else:
+            combined.append(report)
+    for rows in grouped.values():
+        if len(rows) == 1:
+            combined.extend(rows)
+            continue
+        rows.sort(key=lambda row: ("market", "liquidity").index(row["task"]))
+        report = {**rows[0], "task": "+".join(row["task"] for row in rows),
+                  "observed_at": max(row["observed_at"] for row in rows)}
+        for key in ("candles", "observations", "inserted_candles", "inserted_observations"):
+            report[key] = sum(row[key] for row in rows)
+        for key in ("errors", "warnings"):
+            report[key] = [value for row in rows for value in row[key]]
+        has_data = report["candles"] or report["observations"]
+        report["status"] = ("partial" if has_data else "error") if report["errors"] else (
+            "ok" if has_data else "empty")
+        combined.append(report)
+    return combined
+
+
 def collect(
     settings: Settings,
     store: Store,
@@ -81,7 +108,7 @@ def collect(
                                     and (source_tasks is None or t in source_tasks.get(venue, ()))
                                     and (t != "liquidity" or settings.liquidity_venues is None
                                          or venue in settings.liquidity_venues))
-                groups = ((task,) for task in venue_tasks) if source_tasks is not None else (venue_tasks,)
+                groups = ((task,) for task in venue_tasks)
                 for selected in groups:
                     if selected:
                         futures[pool.submit(exchange, venue, selected)] = (venue, "+".join(selected))
@@ -103,6 +130,8 @@ def collect(
                 failed_sources = sources if source == "context" else (source,)
                 for failed_source in failed_sources:
                     ingest(CollectionResult(failed_source, errors=[f"Collection: {type(exc).__name__}: {exc}"]), task)
+    if source_tasks is None:
+        reports = _combined_exchange_reports(reports)
     return {
         "started_at": now,
         "completed_at": int(time.time()),
