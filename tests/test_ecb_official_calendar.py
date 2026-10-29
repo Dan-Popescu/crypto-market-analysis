@@ -79,3 +79,61 @@ def test_calendar_ecb_failure_is_local_to_feed():
 
     result = collect_calendars(100, client=Client(), include_ecb=True)
     assert result["errors"][0]["source"] == "ecb"
+
+
+def test_each_calendar_source_is_known_only_after_its_response():
+    clock = {"now": 100}
+
+    class Client:
+        def get_text(self, url):
+            clock["now"] += 10
+            if "bls.gov" in url:
+                return ("BEGIN:VCALENDAR\nBEGIN:VEVENT\nSUMMARY:Consumer Price Index\n"
+                        "DTSTART;VALUE=DATE:20261029\nEND:VEVENT\nEND:VCALENDAR")
+            return ('<h4>2026 FOMC Meetings</h4><div class="fomc-meeting">'
+                    '<div class="fomc-meeting__month">October</div>'
+                    '<div class="fomc-meeting__date">27-28</div></div>')
+
+        def get_bytes(self, url):
+            clock["now"] += 10
+            return html().encode()
+
+    result = collect_calendars(100, client=Client(), include_ecb=True, receipt_clock=lambda: clock["now"])
+    assert result["observed_at"] == 130
+    assert {row["source"]: row["observed_at"] for row in result["events"]} == {
+        "bls": 110, "federalreserve": 120, "ecb": 130,
+    }
+    assert all(row["observed_at"] == row["materialized_at"] and row["event_time"] is None
+               for row in result["events"])
+
+
+@pytest.mark.parametrize("failure", ["transport", "parser"])
+def test_calendar_source_errors_are_timestamped_after_request_finishes(failure):
+    clock = {"now": 100.0}
+
+    class Client:
+        def get_text(self, url):
+            clock["now"] += 10.75
+            raise OSError("Synthetic source unavailable")
+
+        def get_bytes(self, url):
+            clock["now"] += 10.75
+            if failure == "transport":
+                raise OSError("Synthetic source unavailable")
+            return b"Synthetic markup drift"
+
+    result = collect_calendars(100, client=Client(), include_ecb=True, receipt_clock=lambda: clock["now"])
+    assert [error["observed_at"] for error in result["errors"]] == [110, 121, 132]
+    assert all(error["observed_at"] == error["materialized_at"] for error in result["errors"])
+    assert result["events"] == [] and result["observed_at"] == 132
+
+
+def test_invalid_receipt_clock_cannot_create_early_calendar_availability():
+    class Client:
+        def get_text(self, url):
+            return html()
+
+    for invalid in (99, True, float("nan"), float("inf")):
+        result = collect_calendars(100, client=Client(), include_ecb=True, receipt_clock=lambda invalid=invalid: invalid)
+        assert result["events"] == []
+        assert all(error["observed_at"] is None for error in result["errors"])

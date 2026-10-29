@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
+from collections.abc import Callable
 from datetime import UTC, date, datetime
 from html.parser import HTMLParser
 from typing import Any
@@ -350,14 +352,35 @@ def parse_ecb_calendar(html: str, observed_at: int) -> list[dict[str, Any]]:
     return output
 
 
-def collect_calendars(observed_at: int, *, client: Any, include_ecb: bool = False) -> dict[str, Any]:
+def collect_calendars(
+    observed_at: int, *, client: Any, include_ecb: bool = False,
+    receipt_clock: Callable[[], float] | None = None,
+) -> dict[str, Any]:
     """Use an injected PublicHTTP-compatible client; failures are per-source.
 
     No default network client is created. Callers choose whether to fetch.
+    Live callers supply receipt_clock to sample availability after each response,
+    including failed requests. With no receipt clock the explicit observation
+    time is retained for deterministic imports and existing injected clients.
     """
     result: dict[str, Any] = {"events": [], "errors": [], "observed_at": observed_at}
     if type(include_ecb) is not bool:
         raise ValueError("include_ecb must be a boolean.")
+    _bounded("", observed_at)
+    if receipt_clock is not None and not callable(receipt_clock):
+        raise ValueError("receipt_clock must be callable.")
+
+    def receipt_time():
+        if receipt_clock is None:
+            return observed_at
+        value = receipt_clock()
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value < result["observed_at"]):
+            raise ValueError("Calendar receipt clock must be finite and cannot move backwards.")
+        captured = int(value)
+        result["observed_at"] = captured
+        return captured
+
     sources = [
         ("bls", BLS_URL, parse_bls_ics),
         ("federalreserve", FOMC_URL, parse_fomc_calendar),
@@ -365,25 +388,35 @@ def collect_calendars(observed_at: int, *, client: Any, include_ecb: bool = Fals
     if include_ecb:
         sources.append(("ecb", ECB_URL, parse_ecb_calendar))
     for source, url, parser in sources:
+        captured = None
         try:
             if source == "ecb" and callable(getattr(client, "get_bytes", None)):
                 raw = client.get_bytes(url)
+                captured = receipt_time()
                 if not isinstance(raw, bytes) or len(raw) > _MAX_BYTES:
                     raise ValueError("Calendar exceeds the byte response limit.")
-                events = parser(raw.decode("utf-8-sig"), observed_at)
+                events = parser(raw.decode("utf-8-sig"), captured)
                 digest, scope = hashlib.sha256(raw).hexdigest(), "response_bytes"
             else:
                 text = client.get_text(url)
-                events = parser(text, observed_at)
+                captured = receipt_time()
+                events = parser(text, captured)
                 digest, scope = hashlib.sha256(text.encode()).hexdigest(), "decoded_text_utf8"
             for event in events:
-                event.update(raw_sha256=digest, hash_scope=scope, materialized_at=observed_at)
+                event.update(raw_sha256=digest, hash_scope=scope, materialized_at=captured)
                 if scope == "response_bytes":
                     event["data_version"] = "sha256:" + digest
             result["events"].extend(events)
         except Exception as exc:
+            if captured is None:
+                try:
+                    captured = receipt_time()
+                except Exception:
+                    # A broken capture clock cannot establish availability.
+                    captured = None
             result["errors"].append(
-                {"source": source, "status": "unavailable", "error": f"{type(exc).__name__}: {exc}"}
+                {"source": source, "status": "unavailable", "error": f"{type(exc).__name__}: {exc}",
+                 "observed_at": captured, "materialized_at": captured}
             )
     return result
 
