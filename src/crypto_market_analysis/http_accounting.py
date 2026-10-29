@@ -114,10 +114,15 @@ class HTTPAccounting:
     def snapshot(self, source: str) -> dict:
         with self._lock:
             state = self._source(source)
-            coverage = ("partial" if state["uninstrumented"] and state["instrumented"] else
-                        "observed" if state["instrumented"] else "uninstrumented")
+            # Installing one supported adapter proves neither that an injected
+            # client used it nor that other transports did no work. An incomplete
+            # scope needs actual measured attempts before it has a known subset.
+            observed = state["instrumented"] and (
+                not state["uninstrumented"] or state["totals"]["requests"] > 0)
+            coverage = ("partial" if state["uninstrumented"] and observed else
+                        "observed" if observed else "uninstrumented")
             return {"version": 1, "coverage": coverage,
-                    "totals": dict(state["totals"]) if state["instrumented"] else None,
+                    "totals": dict(state["totals"]) if observed else None,
                     "endpoints": [{"endpoint": endpoint, **values}
                                   for endpoint, values in sorted(state["endpoints"].items())],
                     "omitted_endpoint_requests": state["omitted_endpoint_requests"],

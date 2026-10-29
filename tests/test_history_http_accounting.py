@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 import ccxt
+import httpx
 import pytest
 import requests
 
@@ -118,6 +119,7 @@ def test_catalogue_and_fetch_measured_without_changing_immutable_capture(tmp_pat
             client.close()
     assert hits == ["/catalogue", "/candles", "/candles"]
     assert result["http_accounting"]["totals"]["requests"] == 2
+    assert result["http_accounting"]["coverage"] == "partial"
     assert result["http_accounting"]["totals"]["responses"] == 2
     assert result["http_accounting"]["totals"]["decoded_body_bytes"] == 2 + len(RAW)
     assert repeated["http_accounting"]["totals"]["requests"] == 1
@@ -237,6 +239,62 @@ def test_injected_clients_and_custom_adapters_keep_unknown_http_totals(tmp_path)
     runs, attempts = retained(ds)
     assert runs[-1]["http_accounting"]["totals"] is None
     assert_private(runs, attempts)
+
+
+@pytest.mark.parametrize("uses_requests", [True, False])
+def test_injected_mixed_transports_never_claim_complete_coverage(tmp_path, uses_requests):
+    ds = dataset(tmp_path)
+    with transport() as (root, hits), requests.Session() as session, httpx.Client() as other:
+        class MixedClient:
+            def __init__(self):
+                self.session = session
+
+            def load_markets(self):
+                # The unused standard Requests session is deliberately present
+                # in both variants, including the wholly unsupported transport.
+                transport_client = self.session if uses_requests else other
+                transport_client.get(root + "/catalogue?token=secret-query").raise_for_status()
+                return {"BTC/EUR": {"spot": True}}
+
+            def fetch_ohlcv(self, *_args, **_kwargs):
+                response = other.get(root + "/candles?token=secret-query")
+                response.raise_for_status()
+                return response.json()
+
+        result = ds.append_rest("BTC", "EUR", KrakenRESTCapture(MixedClient()), since=0, limit=1)
+    assert hits == ["/catalogue", "/candles"]
+    measurement = result["http_accounting"]
+    if uses_requests:
+        assert measurement["coverage"] == "partial"
+        assert measurement["totals"]["requests"] == measurement["totals"]["responses"] == 1
+        assert measurement["totals"]["decoded_body_bytes"] == 2
+    else:
+        assert measurement["coverage"] == "uninstrumented"
+        assert measurement["totals"] is None
+    runs, attempts = retained(ds)
+    assert runs[0]["http_accounting"] == attempts[0]["http_accounting"] == measurement
+    summary = stored_http_accounting(ds.store, task="history_rest", mode="import")["summary"]
+    assert summary["coverage"] == measurement["coverage"]
+    assert summary["totals"] == measurement["totals"]
+    assert_private(runs, attempts, root)
+
+
+def test_default_owned_ccxt_transport_remains_fully_observed(tmp_path, monkeypatch):
+    ds = dataset(tmp_path)
+    with transport() as (root, hits):
+        client = LocalKraken(root)
+        # Keep the default no-client constructor path and its real CCXT Requests
+        # transport; only the provider URLs are replaced by local fixture routes.
+        monkeypatch.setattr(ccxt, "kraken", lambda _options: client)
+        adapter = KrakenRESTCapture()
+        try:
+            result = ds.append_rest("BTC", "EUR", adapter, since=0, limit=1)
+        finally:
+            client.close()
+    assert hits == ["/catalogue", "/candles"]
+    assert result["capture_evidence"] == "public_rest_adapter"
+    assert result["http_accounting"]["coverage"] == "observed"
+    assert result["http_accounting"]["totals"]["requests"] == 2
 
 
 def test_history_runs_are_read_by_cli_mcp_and_follow_existing_retention(tmp_path, capsys):

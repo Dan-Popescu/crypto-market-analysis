@@ -140,6 +140,7 @@ class KrakenRESTCapture:
     final OHLC response, not catalogue bytes. Budgets count OHLC fetch calls.
     """
     def __init__(self, client=None):
+        self._injected_client = client is not None
         self.capture_evidence = "public_rest_adapter" if client is None else "injected_client_unqualified"
         if client is None:
             import ccxt
@@ -149,6 +150,10 @@ class KrakenRESTCapture:
 
     def __call__(self, asset: str, quote: str, since: int, limit: int) -> RESTCapture:
         symbol = f"{asset}/{quote}"
+        # An injected client may use other transports alongside its Requests
+        # session. Observe that session without claiming its whole HTTP contract.
+        if self._injected_client:
+            mark_uninstrumented("kraken")
         instrument_exchange(self.client, "kraken")
         try:
             markets = self.client.load_markets()
