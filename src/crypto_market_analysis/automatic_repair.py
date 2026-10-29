@@ -168,15 +168,26 @@ def plan_auto_repairs(database, request: AutoRepairRequest | None = None, *, mod
             turns[market] = turn + 1
             ordered.append((turn, request.markets.index(market), state, hours))
         candidates = [(state, hours) for _, _, state, hours in sorted(ordered, key=lambda item: item[:2])]
-        for state, hours in candidates:
-            if len(base["tasks"]) >= min(request.max_ranges, request.request_budget) or not hours_left:
-                break
+        selected = candidates[:min(request.max_ranges, request.request_budget, request.max_hours)]
+        ranges = []
+        for state, hours in selected:
             start, end = next(_runs(hours))
-            end = min(end, start + hours_left * HOUR, start + min(720, config.max_rows) * HOUR)
-            count = (end - start) // HOUR
-            base["tasks"].append({**state, "request_start": start, "request_end": end,
+            capacity = min((end - start) // HOUR, 720, config.max_rows)
+            ranges.append((state, hours, start, capacity))
+        # Share the finite hour budget across the selected requests. Short gaps
+        # release their unused share to longer gaps in the same cycle.
+        allocations = [0] * len(ranges)
+        active = list(range(len(ranges)))
+        while hours_left and active:
+            share = max(1, hours_left // len(active))
+            for index in active:
+                count = min(share, ranges[index][3] - allocations[index], hours_left)
+                allocations[index] += count
+                hours_left -= count
+            active = [index for index in active if allocations[index] < ranges[index][3]]
+        for (state, hours, start, _), count in zip(ranges, allocations, strict=True):
+            base["tasks"].append({**state, "request_start": start, "request_end": start + count * HOUR,
                                   "remaining_hours": len(hours), "request_hours": count})
-            hours_left -= count
         base["hours_planned"] = request.max_hours - hours_left
         base["requests_planned"] = len(base["tasks"])
     return base

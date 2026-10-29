@@ -336,3 +336,60 @@ def test_kraken_adapter_preserves_retry_after_from_client(catalogue_failure):
         KrakenRESTCapture(Client())("BTC", "EUR", 999 * HOUR, 1)
     assert failure.value.retry_after == "300"
     assert failure.value.retry_after_basis == "ccxt_client_last_response_header_unverified"
+
+
+def test_small_hour_budget_repairs_all_four_long_native_gaps_and_resumes(tmp_path):
+    ds = dataset(tmp_path, start=281, end=1000)
+    bounds = {"max_hours": 24, "request_budget": 4}
+    plan = plan_auto_repairs(ds.store.path, bounds, now=NOW)
+    assert plan["requests_planned"] == 4 and plan["hours_planned"] == 24
+    assert [(t["asset"], t["quote"]) for t in plan["tasks"]] == list(AutoRepairRequest().markets)
+    assert [t["request_hours"] for t in plan["tasks"]] == [6, 6, 6, 6]
+    assert all(t["request_start"] == 281 * HOUR and t["request_end"] == 287 * HOUR for t in plan["tasks"])
+    calls = []
+    result = run_auto_repairs(ds.store.path, bounds, apply=True,
+                              fetch=lambda a, q, s, n: calls.append((a, q, s, n)) or all_rows(a, q, s, n),
+                              clock=lambda: NOW)
+    assert result["requests_attempted"] == 4
+    assert sum(call[3] for call in calls) == 24
+    assert [m["remaining_hours"] for m in result["markets"]] == [713, 713, 713, 713]
+    assert all(t["status"] == "pending" and t["remaining_hours"] == 713
+               for t in automatic_repair_status(ds.store.path)["tasks"])
+    reopened = HistoryDataset(ds.config, clock=lambda: NOW + 60)
+    resumed = run_auto_repairs(reopened.store.path, bounds, apply=True,
+                               fetch=lambda a, q, s, n: calls.append((a, q, s, n)) or all_rows(a, q, s, n),
+                               clock=lambda: NOW + 60)
+    assert resumed["requests_attempted"] == 4
+    assert [m["remaining_hours"] for m in resumed["markets"]] == [707, 707, 707, 707]
+    assert all(call[2] == 287 * HOUR and call[3] == 6 for call in calls[4:])
+    assert all(call[2] >= 281 * HOUR for call in calls)
+
+
+def test_unused_short_gap_share_is_redistributed_without_exceeding_bounds(tmp_path):
+    ds = dataset(tmp_path, start=900, end=1000)
+    ds.append_rest("ETH", "USD", lambda *_: RESTCapture([row(h) for h in range(901, 1000)]),
+                   since=901 * HOUR)
+    plan = plan_auto_repairs(ds.store.path, {"max_hours": 24, "request_budget": 4}, now=NOW)
+    assert [t["request_hours"] for t in plan["tasks"]] == [8, 8, 7, 1]
+    assert plan["requests_planned"] == 4 and plan["hours_planned"] == 24
+
+
+@pytest.mark.parametrize("bounds,expected", [({"max_ranges": 2}, [12, 12]),
+                                            ({"request_budget": 2}, [12, 12]),
+                                            ({"max_hours": 2}, [1, 1])])
+def test_fair_hour_allocation_respects_range_request_and_small_hour_caps(tmp_path, bounds, expected):
+    ds = dataset(tmp_path, start=900, end=1000)
+    plan = plan_auto_repairs(ds.store.path, {"max_hours": 24, **bounds}, now=NOW)
+    assert [t["request_hours"] for t in plan["tasks"]] == expected
+    assert plan["hours_planned"] == sum(expected)
+
+
+def test_hour_shares_exclude_manual_and_retry_blocked_markets(tmp_path):
+    ds = dataset(tmp_path, start=900, end=1000)
+    ds.plan_repair("BTC", "EUR", 900 * HOUR, 1000 * HOUR)
+    run_auto_repairs(ds.store.path, {"markets": [["ETH", "EUR"]]}, apply=True,
+                     fetch=lambda *_: RESTCapture([]), clock=lambda: NOW)
+    plan = plan_auto_repairs(ds.store.path, {"max_hours": 24, "request_budget": 4}, now=NOW)
+    assert [(t["asset"], t["quote"], t["request_hours"]) for t in plan["tasks"]] == [
+        ("BTC", "USD", 12), ("ETH", "USD", 12)]
+    assert plan["hours_planned"] == 24 and plan["requests_planned"] == 2
