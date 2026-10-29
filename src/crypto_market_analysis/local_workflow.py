@@ -17,7 +17,7 @@ _FIELDS = {
     "refresh", "data_mode", "as_of", "sources", "markets", "market_sources",
     "required_history_days", "freshness_seconds", "max_gap_hours", "max_gap_details",
     "max_evidence_rows", "max_query_rows", "max_storage_bytes", "max_pages", "history_days",
-    "max_logical_operations", "capture_tasks", "capture_books", "official_context",
+    "backfill_days", "max_logical_operations", "capture_tasks", "capture_books", "official_context",
     "analyses", "issue_assessments", "idempotency_key",
 }
 
@@ -91,9 +91,10 @@ def _capture(settings, store, request, clients, http_client):
             for market in request["markets"]:
                 asset, quote = market.split("/")
                 scoped = replace(settings, assets=[asset], quote_currencies=[quote],
-                                 venues=request.get("market_sources", {}).get(market, settings.venues))
+                                 venues=request.get("market_sources", {}).get(market, settings.venues),
+                                 history_days=request["history_days"])
                 collected = collect(scoped, store, tasks=tuple(tasks),
-                                    days=request["history_days"], clients=budget)
+                                    days=request.get("backfill_days"), clients=budget)
                 collections.append({"market": market, **collected})
             result["market"] = {
                 "status": "error" if all(row["status"] == "error" for row in collections)
@@ -180,6 +181,10 @@ def _normalize(settings, request):
             if not isinstance(subset, list):
                 raise ValueError("market_sources values must be lists of explicit source IDs.")
             _selection({market: subset}, market, [], sources)
+    if "backfill_days" in request:
+        normalized["backfill_days"] = _integer(request, "backfill_days", 30, 1, 3650)
+        if not normalized["refresh"]:
+            raise ValueError("backfill_days requires explicit refresh=true.")
     normalized["history_days"] = _integer(request, "history_days", settings.history_days, 1, 3650)
     normalized["max_pages"] = _integer(request, "max_pages", settings.max_pages, 1, 100)
     normalized["max_logical_operations"] = _integer(request, "max_logical_operations", 128, 1, 4096)

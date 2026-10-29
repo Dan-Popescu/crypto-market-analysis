@@ -63,6 +63,8 @@ class Store:
                     id INTEGER PRIMARY KEY, source TEXT NOT NULL, task TEXT NOT NULL,
                     observed_at INTEGER NOT NULL, payload TEXT NOT NULL
                 );
+                CREATE INDEX IF NOT EXISTS run_schedule_lookup ON runs
+                    (source,task,observed_at DESC,id DESC);
                 CREATE TABLE IF NOT EXISTS events (
                     id TEXT NOT NULL, observed_at INTEGER NOT NULL, event_time INTEGER NOT NULL,
                     payload TEXT NOT NULL, PRIMARY KEY(id,observed_at)
@@ -452,6 +454,23 @@ class Store:
                 (cutoff, limit),
             ).fetchall()
         return [json.loads(r[0]) for r in rows]
+
+    def scheduler_runs(self) -> list[dict]:
+        """Latest run per source/task, without a global history limit.
+
+        The grouped index scan and indexed last-row lookups keep run history in SQL.
+        Only one payload per source/task crosses the storage boundary.
+        """
+        with self.connection() as con:
+            rows = con.execute("""
+                SELECT (SELECT payload FROM runs latest
+                        WHERE latest.source=groups.source AND latest.task=groups.task
+                        ORDER BY observed_at DESC,id DESC LIMIT 1), groups.last_success
+                FROM (SELECT source,task,MAX(CASE WHEN json_array_length(payload,'$.errors')=0
+                      THEN observed_at ELSE 0 END) last_success
+                      FROM runs GROUP BY source,task) groups
+            """).fetchall()
+        return [{**json.loads(row[0]), "last_success": row[1]} for row in rows]
 
     def counts(self) -> dict:
         with self.connection() as con:

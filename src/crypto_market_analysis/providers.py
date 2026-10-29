@@ -7,11 +7,32 @@ import io
 import math
 import time
 from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
 from .models import CollectionResult, Observation
+
+
+class RetryDeferred(RuntimeError):
+    """A transient failure with a UTC deadline, safe to persist in run errors."""
+
+    def __init__(self, retry_at: float, reason: str):
+        self.retry_at = retry_at
+        super().__init__(f"{reason}; retry_at={retry_at:.3f}")
+
+
+def _retry_delay(value: str | None, now: float) -> float:
+    try:
+        delay = float(value) if value is not None else 0.25
+        return max(0.0, delay) if math.isfinite(delay) else 0.25
+    except ValueError:
+        try:
+            return max(0.0, parsedate_to_datetime(value).timestamp() - now)
+        except (ValueError, TypeError, OverflowError):
+            return 0.25
 
 
 class PublicHTTP:
@@ -24,6 +45,13 @@ class PublicHTTP:
         self.client.close()
 
     def _get(self, url: str, params: dict | None = None):
+        # Keep at most one short retry within a one-second worker sleep budget.
+        # Longer server deadlines are returned to the persistent scheduler.
+        origin = urlsplit(url).netloc
+        deadlines = getattr(self, "_deadlines", {})
+        self._deadlines = deadlines
+        if deadlines.get(origin, 0) > time.time():
+            raise RetryDeferred(deadlines[origin], "Origin cooldown")
         for attempt in range(2):
             try:
                 response = self.client.get(url, params=params)
@@ -31,16 +59,20 @@ class PublicHTTP:
                 return response
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
-                if attempt or not (status == 429 or 500 <= status < 600):
+                if not (status == 429 or 500 <= status < 600):
                     raise
-                try:
-                    delay = float(exc.response.headers.get("retry-after", "0.25"))
-                except ValueError:
-                    delay = 0.25
-                time.sleep(min(max(delay, 0), 1))
-            except httpx.TransportError:
+                now = time.time()
+                delay = _retry_delay(exc.response.headers.get("retry-after"), now)
+                if attempt or delay > 1:
+                    deadline = now + max(delay, 1)
+                    deadlines[origin] = deadline
+                    raise RetryDeferred(deadline, f"HTTP {status}") from exc
+                time.sleep(delay)
+            except httpx.TransportError as exc:
                 if attempt:
-                    raise
+                    deadline = time.time() + 1
+                    deadlines[origin] = deadline
+                    raise RetryDeferred(deadline, type(exc).__name__) from exc
                 time.sleep(0.25)
         raise RuntimeError("unreachable")
 
@@ -212,7 +244,8 @@ def collect_options(assets: list[str], now: int | None = None, *, client: Any = 
     return result
 
 
-def collect_context(now: int | None = None, days: int = 365, *, client: Any = None) -> list[CollectionResult]:
+def collect_context(now: int | None = None, days: int = 365, *, client: Any = None,
+                    sources: tuple[str, ...] = ("coinmetrics", "defillama", "fred")) -> list[CollectionResult]:
     now = int(time.time()) if now is None else int(now)
     days = max(1, min(int(days), 3650))
     start = now - days * 86400
@@ -223,11 +256,11 @@ def collect_context(now: int | None = None, days: int = 365, *, client: Any = No
         except Exception as exc:
             return [
                 CollectionResult(source, errors=[f"HTTP client: {type(exc).__name__}: {exc}"])
-                for source in ("coinmetrics", "defillama", "fred")
+                for source in sources
             ]
     results = []
     network = CollectionResult("coinmetrics")
-    for asset in ("BTC", "ETH"):
+    for asset in (("BTC", "ETH") if "coinmetrics" in sources else ()):
         for metric in ("AdrActCnt", "TxCnt"):
             try:
                 data = client.get_json(
@@ -262,10 +295,11 @@ def collect_context(now: int | None = None, days: int = 365, *, client: Any = No
                     network.warnings.append(f"{asset} {metric}: response truncated; next page not fetched")
             except Exception as exc:
                 network.errors.append(f"{asset} {metric} Coin Metrics: {type(exc).__name__}: {exc}")
-    results.append(network)
+    if "coinmetrics" in sources:
+        results.append(network)
     stable = CollectionResult("defillama")
     try:
-        rows = client.get_json("https://stablecoins.llama.fi/stablecoincharts/all")
+        rows = client.get_json("https://stablecoins.llama.fi/stablecoincharts/all") if "defillama" in sources else []
         for row in rows:
             ts = int(row["date"])
             value = (row.get("totalCirculatingUSD") or {}).get("peggedUSD")
@@ -285,9 +319,10 @@ def collect_context(now: int | None = None, days: int = 365, *, client: Any = No
                 )
     except Exception as exc:
         stable.errors.append(f"DefiLlama stablecoincharts/all: {type(exc).__name__}: {exc}")
-    results.append(stable)
+    if "defillama" in sources:
+        results.append(stable)
     fred = CollectionResult("fred")
-    for series in ("DFII10", "DTWEXBGS", "DGS2", "DGS10", "VIXCLS"):
+    for series in (("DFII10", "DTWEXBGS", "DGS2", "DGS10", "VIXCLS") if "fred" in sources else ()):
         try:
             raw = client.get_text(
                 "https://fred.stlouisfed.org/graph/fredgraph.csv",
@@ -314,7 +349,8 @@ def collect_context(now: int | None = None, days: int = 365, *, client: Any = No
                     )
         except Exception as exc:
             fred.errors.append(f"{series} FRED CSV: {type(exc).__name__}: {exc}")
-    results.append(fred)
+    if "fred" in sources:
+        results.append(fred)
     if own_client:
         client.close()
     return results
