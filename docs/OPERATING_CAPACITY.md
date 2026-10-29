@@ -17,6 +17,10 @@ errors, elapsed time and decoded response body bytes inside retained run payload
 Catalogue traffic and observed retries/redirects count. Adapter calls never become
 invented HTTP counts; unsupported injected clients retain unknown totals. Hidden
 retries in customized transport adapters cause partial coverage.
+An explicitly injected Kraken history client has an unverified transport contract:
+measured Requests work is a partial subset, while an unused instrumented Session
+does not turn other unknown traffic into observed zero. The owned default CCXT
+adapter retains fully observed coverage for its supported public transport.
 
 Endpoint IDs hash the path and omit URL, query, userinfo, headers and body. Each
 run retains at most 32 IDs; overflow preserves totals and reports omitted endpoint

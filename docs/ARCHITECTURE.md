@@ -16,6 +16,9 @@ It carries no domain state. The automatic repair module owns its single durable
 market cursor and checkpoints the turn atomically before capture. HistoryDataset
 owns REST accounting retention and reuses the existing transport meter and run
 schema; the CLI does not reconstruct HTTP counts from logical operations.
+The CLI's resource scope holds that same guard through configured maintenance,
+legacy Engine initialization and explicitly quiescent named-dataset backup.
+Noninitializing inspection and MCP serving remain outside writer ownership.
 
 The architecture follow-up to version 0.3.0 targets four demonstrated areas of
 duplicated domain knowledge. It preserves the existing Python application,
