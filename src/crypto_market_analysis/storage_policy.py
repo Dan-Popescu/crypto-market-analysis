@@ -197,6 +197,15 @@ def _archive_lock(database: Path):
         yield
 
 
+def _sync_path(path: Path) -> None:
+    """Persist a regular file or directory entry before authorizing hot deletion."""
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def archive_rows(store, family: str, rows: list[dict], policy: StoragePolicy | None = None) -> Path | None:
     """Durably publish a checked batch before callers may delete captured row IDs.
 
@@ -215,9 +224,15 @@ def archive_rows(store, family: str, rows: list[dict], policy: StoragePolicy | N
         if directory.is_symlink():
             raise ValueError("Archive directory cannot be a symlink.")
         directory.mkdir(exist_ok=True)
+        # The newly created archive directory itself must survive a crash. A
+        # child-directory fsync alone does not persist its parent's new entry.
+        # Repeat on retries because a preexisting directory may be an unsynced copy.
+        _sync_path(directory.parent)
         target, pending = directory / (digest + ".json"), directory / (digest + ".pending")
         if target.exists():
             verify_archive(target)
+            _sync_path(target)
+            _sync_path(directory)
             return target
         if pending.exists():
             # An interrupted staging write is resumable only while its bytes are
@@ -245,11 +260,7 @@ def archive_rows(store, family: str, rows: list[dict], policy: StoragePolicy | N
                 os.fsync(stream.fileno())
             verify_archive(pending)
         os.rename(pending, target)
-        descriptor = os.open(directory, os.O_RDONLY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        _sync_path(directory)
         verify_archive(target)
         return target
 

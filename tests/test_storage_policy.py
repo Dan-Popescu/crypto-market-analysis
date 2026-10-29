@@ -343,3 +343,62 @@ def test_restored_archive_duplicate_retry_bypasses_exceeded_quota(tmp_path, fami
     assert store.path.read_bytes() == before
     with store.connection() as con:
         assert con.execute(f'SELECT COUNT(*) FROM "{family}"').fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("existing_archive", [False, True])
+def test_archive_parent_and_child_directory_sync_precede_hot_delete(tmp_path, monkeypatch, existing_archive):
+    from contextlib import contextmanager
+
+    import crypto_market_analysis.storage_policy as module
+
+    store = Store(tmp_path / "observer.sqlite")
+    retain_books(store, [book()])
+    with store.connection() as con:
+        rows = [dict(row) for row in con.execute("SELECT * FROM book_snapshots")]
+    previous = archive_rows(store, "book_snapshots", rows) if existing_archive else None
+    events = []
+    sync = module._sync_path
+    connection = store.connection
+
+    def spy_sync(path):
+        sync(path)
+        events.append(("sync", path))
+
+    @contextmanager
+    def trace_deletion():
+        with connection() as con:
+            con.set_trace_callback(lambda sql: events.append(("delete", None))
+                                   if sql.startswith('DELETE FROM "book_snapshots"') else None)
+            yield con
+
+    monkeypatch.setattr(module, "_sync_path", spy_sync)
+    monkeypatch.setattr(store, "connection", trace_deletion)
+    result = maintain_storage(store, apply=True, now=10 * DAY)
+    assert result["families"][0]["deleted_rows"] == 1
+    assert events.index(("sync", store.path.parent)) < events.index(("sync", archive_directory(store.path)))
+    assert events.index(("sync", archive_directory(store.path))) < events.index(("delete", None))
+    if existing_archive:
+        assert events.index(("sync", previous)) < events.index(("sync", archive_directory(store.path)))
+
+
+@pytest.mark.parametrize("existing_archive", [False, True])
+def test_archive_parent_sync_failure_never_authorizes_hot_delete(tmp_path, monkeypatch, existing_archive):
+    import crypto_market_analysis.storage_policy as module
+
+    store = Store(tmp_path / "observer.sqlite")
+    retain_books(store, [book()])
+    if existing_archive:
+        with store.connection() as con:
+            rows = [dict(row) for row in con.execute("SELECT * FROM book_snapshots")]
+        archive_rows(store, "book_snapshots", rows)
+    sync = module._sync_path
+
+    def fail_parent(path):
+        if path == store.path.parent:
+            raise OSError("synthetic parent directory fsync failure")
+        sync(path)
+
+    monkeypatch.setattr(module, "_sync_path", fail_parent)
+    with pytest.raises(OSError, match="parent directory fsync"):
+        maintain_storage(store, apply=True, now=10 * DAY)
+    assert read_books(store, **selectors()) == [book()]
