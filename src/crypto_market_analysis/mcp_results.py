@@ -188,14 +188,29 @@ class MCPResultPresenter:
         while response_bytes(summary) > _RESULT_LIMIT:
             candidates = []
 
-            def visit(value, path="", candidates=candidates):
+            def candidate(parent, key, child, path, candidates=candidates):
+                size = len(canonical_json(child))
+                savings = size - len(canonical_json(_omitted(child, path))) - len(canonical_json(path))
+                if savings <= 0:
+                    return
+                # Detailed sequences (trajectories, ledgers and evidence rows)
+                # yield before the enclosing financial/status/uncertainty maps.
+                # Only after those details are paged may a genuinely oversized
+                # scalar or the deepest remaining map need explicit omission.
+                priority = 2 if isinstance(child, list) else 1 if isinstance(child, str) else 0
+                if history_page and path.startswith("/points/") and key == "metadata":
+                    priority = 3
+                depth = 0 if isinstance(child, list) else path.count("/")
+                candidates.append((priority, depth, savings, parent, key, child, path))
+
+            def visit(value, path=""):
                 if isinstance(value, dict):
                     for key, child in value.items():
                         if key == "_mcp_result" or (isinstance(child, dict) and child.get("_omitted") is True):
                             continue
                         child_path = _pointer(path, key)
                         if not (history_page and key == "points" and path == ""):
-                            candidates.append((len(canonical_json(child)), value, key, child, child_path))
+                            candidate(value, key, child, child_path)
                         visit(child, child_path)
                 elif isinstance(value, list):
                     if history_page and path == "/points":
@@ -207,7 +222,7 @@ class MCPResultPresenter:
                                 child = row["metadata"]
                                 if not (isinstance(child, dict) and child.get("_omitted") is True):
                                     child_path = _pointer(_pointer(path, index), "metadata")
-                                    candidates.append((len(canonical_json(child)), row, "metadata", child, child_path))
+                                    candidate(row, "metadata", child, child_path)
                     return
 
             visit(summary)
@@ -218,7 +233,7 @@ class MCPResultPresenter:
                 summary = {"_mcp_result": {**metadata, "omitted_paths": [""],
                                           "available_paths": [{"path": "", **_shape(result)}]}}
                 break
-            _, parent, key, child, path = max(candidates, key=lambda candidate: candidate[0])
+            _, _, _, parent, key, child, path = max(candidates, key=lambda item: item[:3])
             parent[key] = _omitted(child, path)
             omitted[:] = [old for old in omitted if not old.startswith(path + "/")]
             omitted.append(path)

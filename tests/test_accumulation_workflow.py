@@ -176,3 +176,56 @@ def test_actual_mcp_accumulation_tools_compute_without_persisting(market):
     asyncio.run(check())
     with engine.store.connection() as con:
         assert con.execute("SELECT 1 FROM sqlite_master WHERE name='assessment_journal'").fetchone() is None
+
+
+def test_mcp_plan_financial_summaries_survive_bounded_detail_paging(market):
+    """Large trajectories must not displace plan values, terminals or unknowns."""
+    import asyncio
+    import hashlib
+
+    from mcp.shared.memory import create_connected_server_and_client_session
+
+    from crypto_market_analysis.mcp_results import RESPONSE_BYTE_LIMIT, canonical_json
+    from crypto_market_analysis.server import create_server
+
+    engine, config, end = market
+    expected = engine.compare_plans(config, end)
+    server = create_server(engine.settings, mode="demo")
+
+    def assert_scalar_leaves(actual, original):
+        for key, value in original.items():
+            if isinstance(value, dict):
+                assert_scalar_leaves(actual[key], value)
+            elif not isinstance(value, list):
+                assert actual[key] == value
+
+    async def check():
+        async with create_connected_server_and_client_session(server) as session:
+            result = await session.call_tool("compare_purchase_plans", {"config": config, "as_of": end})
+            assert not result.isError
+            summary = result.structuredContent
+            assert len(result.model_dump_json(by_alias=True, exclude_none=True).encode()) < RESPONSE_BYTE_LIMIT
+            for family, original in expected["plans"].items():
+                # This catches removal of the plan map and any financial/status/
+                # uncertainty submap even when the response is otherwise valid.
+                assert_scalar_leaves(summary["plans"][family], original)
+                assert summary["plans"][family]["trajectory"]["_omitted"] is True
+            metadata = summary["_mcp_result"]
+            assert "/plans" not in metadata["omitted_paths"]
+            assert metadata["content_hash"] == hashlib.sha256(canonical_json(expected)).hexdigest()
+            for family, original in expected["plans"].items():
+                path = f"/plans/{family}/trajectory"
+                assert path in metadata["omitted_paths"]
+                binding = {key: metadata[key] for key in ("handle", "selection_hash", "content_hash")}
+                restored, offset = [], 0
+                while offset is not None:
+                    response = await session.call_tool("get_result_page", {**binding, "path": path,
+                                                                           "offset": offset, "limit": 100})
+                    assert not response.isError
+                    assert len(response.model_dump_json(by_alias=True, exclude_none=True).encode()) < RESPONSE_BYTE_LIMIT
+                    page = response.structuredContent
+                    restored.extend(page["items"])
+                    offset = page["next_offset"]
+                assert restored == original["trajectory"]
+
+    asyncio.run(check())
