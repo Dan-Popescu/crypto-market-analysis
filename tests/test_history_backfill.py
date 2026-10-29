@@ -308,3 +308,44 @@ def test_status_mode_mismatch_is_structured_and_noninitializing(tmp_path):
     database = tmp_path / "absent" / "market.sqlite"
     assert backfill.history_backfill_status(database, mode="demo")["status"] == "selection_mismatch"
     assert not database.parent.exists()
+
+
+@pytest.mark.parametrize("owned", [False, True])
+def test_capture_origin_is_explicit_in_job_checkpoint_and_page_record(tmp_path, monkeypatch, owned):
+    import json
+
+    pool = Pool()
+    if owned:
+        # Exercise the owned-adapter branch without permitting public network.
+        monkeypatch.setattr(pool, "close", lambda: None, raising=False)
+        monkeypatch.setattr(backfill, "ExchangeClients", lambda: pool)
+    database = tmp_path / "market.sqlite"
+    backfill.run_history_backfill(database, request(), apply=True,
+                                  clients=None if owned else pool, clock=lambda: NOW)
+    origin = "public_backfill_adapter" if owned else "injected_clients_unqualified"
+    job = backfill.history_backfill_status(database)["jobs"][0]
+    assert job["capture_evidence"] == origin
+    checkpoint = job["markets"]["BTC/EUR"]
+    assert checkpoint["capture_evidence"] == origin
+    assert checkpoint["captured_at"] == NOW
+    assert checkpoint["validated_rows"] == 4
+    with Store(database).connection() as con:
+        payload = json.loads(con.execute("SELECT payload FROM local_records WHERE kind='history_import'").fetchone()[0])
+    assert payload["capture_evidence"] == origin
+    assert payload["validated_rows"] == payload["rows"] == 4
+    assert payload["captured_at"] == payload["observed_at"] == NOW
+    assert (payload["source"], payload["asset"], payload["quote"], payload["data_mode"]) == (
+        "coinbase", "BTC", "EUR", "import")
+    assert payload["raw_evidence_retained"] is False
+    assert payload["normalized_response_hash_basis"] == "ccxt OHLCV rows"
+
+
+def test_empty_page_provenance_cannot_claim_nonempty_capture(tmp_path):
+    import json
+
+    database = tmp_path / "market.sqlite"
+    apply(database, pool=Pool(Client(lambda symbol, stamp, count: [])))
+    with Store(database).connection() as con:
+        payload = json.loads(con.execute("SELECT payload FROM local_records WHERE kind='history_import'").fetchone()[0])
+    assert payload["validated_rows"] == 0
+    assert payload["capture_evidence"] == "injected_clients_unqualified"

@@ -237,6 +237,9 @@ def _run(path, request, clients, clock):
     attempts = []
     measurements = []
     owned = clients is None
+    # This job-level label describes the latest invocation. Individual page
+    # records and checkpoints retain the origin of their own actual capture.
+    job["capture_evidence"] = "public_backfill_adapter" if owned else "injected_clients_unqualified"
     pool = ExchangeClients() if owned else clients
     try:
         with http_budget_scope(HTTPPolicy(max_requests=request["http_max_requests"],
@@ -335,6 +338,7 @@ def _fetch_turns(store, request, job, client, catalogue, clock, used, attempts, 
                     (coverage["gap_end"] - start) // HOUR)
         end = start + limit * HOUR
         checkpoint = {"status": "inflight", "start": start, "end": end, "updated_at": now,
+                      "capture_evidence": "public_backfill_adapter" if owned else "injected_clients_unqualified",
                       "failures": checkpoint.get("failures", 0),
                       "next_retry": now + request["backoff_seconds"], "symbol": spot["symbol"], "market_id": spot.get("id")}
         job["markets"][key] = checkpoint
@@ -365,10 +369,13 @@ def _fetch_turns(store, request, job, client, catalogue, clock, used, attempts, 
                 store.put_candles(candles)
                 checkpoint["response_sha256"] = hashlib.sha256(_json(rows).encode()).hexdigest()
                 checkpoint["data_version"] = "ccxt-native-ohlcv-v1"
+                checkpoint["captured_at"] = receipt
+                checkpoint["validated_rows"] = len(candles)
                 store.save_local_record("history_import", {
                     "record_id": f"{job['job_id']}:{key}:{start}:{end}:{checkpoint['response_sha256']}",
                     "source": request["source"], "source_url": SOURCES[request["source"]]["documentation"],
-                    "data_mode": "import", "observed_at": receipt,
+                    "data_mode": "import", "observed_at": receipt, "captured_at": receipt,
+                    "capture_evidence": checkpoint["capture_evidence"], "validated_rows": len(candles),
                     "source_format": checkpoint["data_version"], "response_sha256": checkpoint["response_sha256"],
                     "asset": market["asset"], "quote": market["quote"], "symbol": spot["symbol"],
                     "market_id": spot.get("id"),
