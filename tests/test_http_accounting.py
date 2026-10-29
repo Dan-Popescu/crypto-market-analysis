@@ -2,6 +2,7 @@
 
 import gzip
 import json
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -10,7 +11,6 @@ from urllib.parse import urlsplit
 
 import ccxt
 import httpx
-import pytest
 
 from crypto_market_analysis.collectors import ExchangeClients, collect_exchange
 from crypto_market_analysis.http_accounting import (
@@ -308,6 +308,22 @@ def test_restart_reads_stored_modes_sources_and_time_filters_before_cap(tmp_path
 
 def test_stored_read_does_not_create_missing_database(tmp_path):
     path = tmp_path / "missing.sqlite"
-    with pytest.raises(ValueError, match="missing"):
-        stored_http_accounting(path)
+    result = stored_http_accounting(path)
+    assert result["status"] == "missing"
+    assert result["matched_runs"] is result["summary"]["totals"] is None
     assert not path.exists()
+
+
+def test_stored_read_old_or_invalid_database_returns_unknown_without_migration(tmp_path):
+    old = tmp_path / "old.sqlite"
+    with sqlite3.connect(old) as con:
+        con.execute("CREATE TABLE unrelated (value TEXT)")
+    assert stored_http_accounting(old)["status"] == "unavailable"
+    with sqlite3.connect(old) as con:
+        assert [row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")] == ["unrelated"]
+    invalid = tmp_path / "invalid.sqlite"
+    invalid.write_text("synthetic invalid database")
+    result = stored_http_accounting(invalid)
+    assert result["status"] == "unavailable" and result["summary"]["totals"] is None
+    empty = stored_http_accounting(Store(tmp_path / "empty.sqlite"))
+    assert empty["status"] == "empty" and empty["summary"]["totals"] is None

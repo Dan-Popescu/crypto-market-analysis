@@ -343,6 +343,17 @@ def stored_http_accounting(store_or_path, *, source: str | None = None, task: st
     path = store_or_path if isinstance(store_or_path, (Path, str)) else store_or_path.path
     # A writable configured Store must still use an actual read-only connection.
     store = Store(Path(path), initialize=False)
+    selection = {"source": source, "task": task, "mode": mode, "start": start, "end": cutoff,
+                 "limit": limit, "endpoint_limit": endpoint_limit}
+
+    def unavailable(status: str, reason: str) -> dict:
+        return {"status": status, "reason": reason, "selection": selection,
+                "matched_runs": None, "included_runs": 0, "omitted_runs": None, "truncated": False,
+                "summary": merge_measurements([], endpoint_limit=endpoint_limit), "sources": [],
+                "availability": "unknown"}
+
+    if not store.path.is_file():
+        return unavailable("missing", "Configured database is missing; no measurements were read.")
     conditions, params = ["observed_at<=?"], [cutoff]
     if start is not None:
         conditions.append("observed_at>=?")
@@ -357,17 +368,24 @@ def stored_http_accounting(store_or_path, *, source: str | None = None, task: st
         conditions.append("json_extract(payload,'$.data_mode')=?")
         params.append(mode)
     where = " AND ".join(conditions)
-    with store.connection() as con:
-        con.execute("BEGIN")
-        matched = con.execute(f"SELECT COUNT(*) FROM runs WHERE {where}", params).fetchone()[0]
-        rows = con.execute(f"SELECT source,task,observed_at,payload FROM runs WHERE {where} "
-                           "ORDER BY observed_at DESC,id DESC LIMIT ?", [*params, limit]).fetchall()
+    try:
+        with store.connection() as con:
+            con.execute("BEGIN")
+            columns = {row[1] for row in con.execute("PRAGMA table_info(runs)")}
+            if not {"id", "source", "task", "observed_at", "payload"} <= columns:
+                return unavailable("unavailable", "Retained run accounting is unavailable in this database schema.")
+            matched = con.execute(f"SELECT COUNT(*) FROM runs WHERE {where}", params).fetchone()[0]
+            rows = con.execute(f"SELECT source,task,observed_at,payload FROM runs WHERE {where} "
+                               "ORDER BY observed_at DESC,id DESC LIMIT ?", [*params, limit]).fetchall()
+    except ValueError:
+        # The read-only Store wraps database errors. Keep path/error details out
+        # of the public accounting response; unavailable work remains unknown.
+        return unavailable("unavailable", "Configured database could not be read without initialization.")
     measurements = [json.loads(row[3]).get("http_accounting") for row in rows]
     grouped = {}
     for row, measurement in zip(rows, measurements, strict=True):
         grouped.setdefault((row[0], row[1]), []).append(measurement)
-    return {"selection": {"source": source, "task": task, "mode": mode, "start": start, "end": cutoff,
-                          "limit": limit, "endpoint_limit": endpoint_limit},
+    return {"status": "ok" if rows else "empty", "selection": selection,
             "matched_runs": matched, "included_runs": len(rows), "omitted_runs": max(0, matched - len(rows)),
             "truncated": matched > len(rows),
             "summary": merge_measurements(measurements, endpoint_limit=endpoint_limit),
