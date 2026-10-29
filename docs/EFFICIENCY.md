@@ -16,7 +16,9 @@ workflow; an incremental cursor does not certify gap completeness.
 The scheduler keeps durable clocks per source/task, separately tracking attempts,
 successes, failures and next due time. Startup scans indexed grouped run state
 rather than the newest 200 log rows. Successful sources retain their cadence;
-failed sources back off independently. Known `Retry-After` deadlines are respected
+failed sources back off independently. Scheduled market and liquidity tasks have
+separate reports: a failed book request cannot reset a successful candle task.
+Known `Retry-After` deadlines are respected
 without a long blocking worker sleep. Context providers can be scheduled separately.
 The scheduler remains a single local orchestrator, not a distributed job queue.
 
@@ -44,8 +46,9 @@ Read `_mcp_result`: it identifies the frozen handle, content and selection hashe
 expiry and any omitted paths. `get_result_page` retrieves bounded structured
 pages from that same frozen result, without a new database read. Large individual
 values have an explicit Unicode-safe JSON fragment protocol and reconstruction
-metadata. Financial scalars and history point shape are preserved; omissions are
-marked rather than replaced with a successful empty result.
+metadata. Returned financial values retain their exact calculation values;
+omissions are marked rather than replaced with a successful empty result.
+History points remain a list and only emitted points advance the cursor.
 
 The per-server cache stores canonical JSON bytes: at most 64 MiB and 64 entries,
 with a five-minute TTL and LRU eviction. Handles are opaque and hash-bound. Expired
@@ -74,6 +77,11 @@ deleting only the captured, still-matching hot rows. Retries are idempotent;
 concurrent new captures are preserved. Backups now include checked retention
 archives. Original journal records/outcomes, reference candles and required named
 dataset payloads are protected from automatic pruning.
+
+Archive publication syncs the file, archive directory and its parent before hot
+deletion can commit. A sync/verification failure preserves hot evidence. These
+checks exercise publication ordering and failure handling; they are not a
+physical power-loss certification for every storage device.
 
 Defaults: hot SQLite/WAL/SHM admission 2 GiB; archives 4 GiB/4,096 files; raw-book
 payload budget 512 MiB; raw books seven days; operational runs 30 days; at most
@@ -104,6 +112,14 @@ recovers a dataset. Current repair/scheduler state is explicitly unversioned;
 physical byte counts are current, not historical reconstructions. Legacy runs
 without mode evidence are separate from classified live/import/demo runs.
 No arbitrary file path, SQL, collection or mutation input is exposed.
+
+MCP startup, including CLI `serve` on either transport, opens the store without
+initializing or migrating it. Missing-store operational inspection and pure
+request calculations remain available. Analytical database reads require an
+existing store and otherwise return an explicit error. Read-only SQLite
+connections see committed WAL data and cannot change schema or rows; SQLite may
+still manage its WAL/SHM sidecars. Explicit local collection/import or another
+writable CLI operation initializes/upgrades a store separately.
 
 ## Reproduce local efficiency evidence
 

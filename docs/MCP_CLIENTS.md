@@ -85,11 +85,25 @@ All registered tools declare read-only behavior. Chart rendering uses temporary 
 | `get_vigilance` | Read-only 4/8-hour observed fragility with reasons, contradictions, missing coverage and expiry. |
 | `get_source_status` | Collection failures, configured venues, freshness and entity-specific unknowns. |
 | `get_source_catalog` | Documented endpoint capabilities, rights limitations and dated French entity evidence; no live availability claim. |
+| `get_request_schema` | On-demand nested request contracts, limits and synthetic executable examples; use `tool_name: "list"` for discovery. |
+| `get_result_page` | Bounded frozen details by handle, selection/content hashes and JSON pointer; inspect expiry and fragment metadata. |
+| `get_metric_series` | Discover actual source, native quote, unit and dimension identities before requesting history. |
+| `get_dataset_status` | Configured dataset identity, captures, conflicts, attempts and repair state, without recovery or initialization. |
+| `get_collection_history` | Paginated historical runs and current independent source/task scheduler clocks, with explicit mode classification. |
+| `get_storage_status` | Current SQLite/WAL/archive/family usage and conservation/admission settings. |
+| `get_upcoming_calendar` | Known-at upcoming sourced calendar records, retaining unknown publication clocks. |
 | `get_forecast`, `get_evaluation` | Existing experimental 1–60-day historical frequencies and chronological evaluation. |
 | `get_metric_history`, `explain_metric` | Bounded sourced observations and interpretation definitions. |
 | `render_chart` | Native MCP image for existing charts or `context`, `windows` and `plans`. |
 
 Arguments are bounded: up to 16 lookbacks, 16 purchase horizons, 12 decline thresholds and 24 evaluation origins. Plan/policy inputs must be finite JSON objects within documented limits. No arbitrary SQL, code execution or unrestricted file path interface is exposed. The endpoint/rights catalogue is available through CLI `sources` and MCP `get_source_catalog`. Assessment lookups summarize frozen evidence and return at most 20 appended outcomes; full evidence stays in the local journal.
+
+Dictionary replies include `_mcp_result` with frozen selection/content hashes,
+expiry and explicitly omitted paths. Use `get_result_page` for complete details;
+an expired handle requires a fresh calculation. Replies fit 32 KiB including
+the SDK's text and structured copies; chart images remain separate. CLI results
+remain full. See [the operating guide](EFFICIENCY.md) for history cursors, cache
+limits, schema discovery and conservation policy.
 
 For a next-tranche review, call `get_accumulation_brief` with
 `{"asset":"BTC","source":"demo","quote":"EUR","as_of":1793145600}` in the

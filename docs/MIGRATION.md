@@ -7,6 +7,10 @@ read-only `get_result_page` access to full frozen details. Consumers must inspec
 omissions and expiry; history `points` remains a list and its cursor advances from
 the last emitted row. Native tool names and calculation rules stay compatible.
 See [EFFICIENCY.md](EFFICIENCY.md) for conservation defaults and operator commands.
+MCP startup no longer creates or migrates a database. Use an explicit local
+collection/import or writable CLI operation to initialize/upgrade it. Pure
+request tools and operational missing-store inspection work before initialization;
+analytical database reads fail explicitly until a store exists.
 
 The implementation brief adopted on October 28, 2026 makes English canonical
 for first-party repository content and software output. This supersedes earlier
