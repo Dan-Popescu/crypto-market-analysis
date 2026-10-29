@@ -14,6 +14,7 @@ import json
 import math
 import os
 import resource
+import socket
 import statistics
 import subprocess
 import sys
@@ -58,8 +59,11 @@ def block_network():
         raise RuntimeError("Network disabled by the synthetic endurance harness")
 
     with ExitStack() as stack:
-        for target in ("socket.create_connection", "socket.getaddrinfo", "socket.socket.connect",
-                       "socket.socket.connect_ex", "socket.socket.sendto"):
+        targets = ["socket.create_connection", "socket.getaddrinfo", "socket.socket.connect",
+                   "socket.socket.connect_ex", "socket.socket.sendto"]
+        if hasattr(socket.socket, "sendmsg"):
+            targets.append("socket.socket.sendmsg")
+        for target in targets:
             stack.enter_context(patch(target, denied))
         yield attempts
 
@@ -261,6 +265,8 @@ def run_phase(folder, args):
     presenter = MCPResultPresenter(cache)
     samples, sizes, read_batches, collect_samples, storage_samples, states = [], [], [], [], [], []
     lock = Lock()
+    read_failures = []
+    unexpected_collection_errors = []
     adapters = {source: SyntheticExchange(source, clock, args.slow_ms) for source in settings.venues}
     real_collect = pipeline.collect
     restart = {"performed": args.phase == 2}
@@ -310,7 +316,14 @@ def run_phase(folder, args):
         completed = time.perf_counter()
         collect_samples.append((completed - before) * 1000)
         for future in futures:
-            future.result(timeout=15)
+            try:
+                future.result(timeout=15)
+            except Exception as exc:
+                # Scheduler intentionally catches collection exceptions. Preserve
+                # harness verification failures outside that production boundary.
+                read_failures.append(f"{type(exc).__name__}: {exc}")
+        unexpected_collection_errors.extend(error for row in result["reports"] for error in row["errors"]
+                                             if "RequestTimeout: synthetic partial source" not in error)
         collection_windows.append((before, completed))
         statuses.extend(row["status"] for row in result["reports"])
         return result
@@ -330,6 +343,9 @@ def run_phase(folder, args):
                 clock.now = checkpoint["clock"]
                 before_counts, before_states = store.counts(), durable_states(store)
                 pipeline._run_scheduler(settings, store, OneIteration(), clients)
+                require(not read_failures, f"Concurrent reader failed: {read_failures}")
+                require(not unexpected_collection_errors,
+                        f"Unexpected collection errors: {unexpected_collection_errors}")
                 require(store.counts() == before_counts and durable_states(store) == before_states,
                         "Restart at a completed clock changed rows/schedule")
                 require(not any(a.calls for a in adapters.values()), "Restart repeated a not-due source request")
@@ -342,6 +358,9 @@ def run_phase(folder, args):
                 for adapter in adapters.values():
                     adapter.cycle = cycle
                 pipeline._run_scheduler(settings, store, OneIteration(), clients)
+                require(not read_failures, f"Concurrent reader failed: {read_failures}")
+                require(not unexpected_collection_errors,
+                        f"Unexpected collection errors: {unexpected_collection_errors}")
                 inventory = storage_policy.inspect_storage(store.path)
                 storage_samples.append({"cycle": cycle, "virtual_now": clock.now,
                                         "physical": inventory["physical"],
@@ -423,8 +442,8 @@ def lifecycle_checks(store, settings, presenter, server, clock, samples, sizes):
     store.storage_policy = replace(policy, hot_max_bytes=1)
     try:
         store.record_run(CollectionResult("synthetic-quota"), "probe", int(clock.time()), data_mode="demo")
-    except ValueError:
-        pass
+    except ValueError as exc:
+        require("budget" in str(exc), f"Hot quota probe failed for an unrelated reason: {exc}")
     else:
         require(False, "Hot admission quota accepted a write")
     finally:
@@ -436,8 +455,8 @@ def lifecycle_checks(store, settings, presenter, server, clock, samples, sizes):
     logical_before = inspect_storage(store.path, policy)["families"]
     try:
         maintain_storage(store, replace(policy, archive_max_bytes=1), apply=True, now=int(clock.time()))
-    except ValueError:
-        pass
+    except ValueError as exc:
+        require("budget" in str(exc), f"Archive quota probe failed for an unrelated reason: {exc}")
     else:
         require(False, "Archive budget accepted a new archive")
     require(inspect_storage(store.path, policy)["families"] == logical_before,

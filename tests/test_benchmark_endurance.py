@@ -59,6 +59,19 @@ def test_correctness_checks_survive_optimized_python():
     assert "synthetic mismatch" in result.stderr
 
 
+def test_reader_mismatch_survives_scheduler_exception_boundary(tmp_path, monkeypatch):
+    # Production scheduling catches collector exceptions and records a failed
+    # attempt. A harness oracle failure must still stop the experiment itself.
+    async def corrupted_result(*args, **kwargs):
+        raise AssertionError("injected frozen-page mismatch")
+
+    monkeypatch.setattr(HARNESS, "full_result", corrupted_result)
+    arguments = HARNESS.parser().parse_args(["--phase", "1", "--data-dir", str(tmp_path),
+                                            "--virtual-days", "1", "--cycles-per-day", "4", "--readers", "1"])
+    with HARNESS.block_network(), pytest.raises(AssertionError, match="injected frozen-page mismatch"):
+        HARNESS.run_phase(tmp_path, arguments)
+
+
 def test_finite_pipeline_restarts_and_checks_native_values(tmp_path):
     destination = tmp_path / "endurance.json"
     assert HARNESS.main(["--virtual-days", "1", "--cycles-per-day", "4", "--readers", "1",
