@@ -257,3 +257,120 @@ def test_shared_httpx_client_does_not_leak_deadlines_between_threads():
             assert long.result() == 200
         assert raw.timeout.read == 10
     assert hits == ["/slow", "/slow"]
+
+
+def route_to_loopback(monkeypatch, raw, root):
+    """Keep official URL attribution; rewrite only this client's actual destination."""
+    from urllib.parse import urlsplit
+
+    get = raw.get
+
+    def local_get(url, **kwargs):
+        return get(root + urlsplit(url).path, **kwargs)
+
+    monkeypatch.setattr(raw, "get", local_get)
+
+
+@pytest.mark.parametrize("url,source", [
+    ("https://www.bls.gov/schedule/news_release/bls.ics", "bls"),
+    ("https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm", "federalreserve"),
+    ("https://www.ecb.europa.eu/press/calendars/mgcgc/html/index.en.html", "ecb"),
+])
+def test_official_calendar_hosts_have_bounded_public_transport_identity(url, source, monkeypatch):
+    with loopback() as (root, hits), httpx.Client() as raw:
+        route_to_loopback(monkeypatch, raw, root)
+        with http_budget_scope(HTTPPolicy(1, 3)), accounting_scope(source) as meter:
+            client = PublicHTTP(client=raw)
+            client.get_text(url)
+            with pytest.raises(HTTPBudgetExceeded):
+                client.get_text(url)
+            measurement = meter.snapshot(source)
+    assert len(hits) == measurement["totals"]["requests"] == 1
+    assert measurement["http_limits"]["enforcement"] == "supported_transports"
+
+
+def test_engine_calendar_obeys_configured_cap_with_default_public_http(tmp_path, monkeypatch):
+    from crypto_market_analysis.engine import Engine
+
+    with loopback() as (root, hits), httpx.Client() as raw:
+        route_to_loopback(monkeypatch, raw, root)
+        client = PublicHTTP(client=raw)
+        monkeypatch.setattr("crypto_market_analysis.providers.PublicHTTP", lambda: client)
+        result = Engine(Settings(data_dir=tmp_path, http_max_requests=1)).collect_calendar()
+    assert len(hits) == result["http_limits"]["used_requests"] == 1
+    assert result["http_limits"]["max_requests"] == 1
+    assert len(result["errors"]) == 1
+    assert result["errors"][0]["source"] == "federalreserve"
+    assert result["errors"][0]["error"] == "HTTPBudgetExceeded: request_limit"
+
+
+def test_engine_book_capture_obeys_configured_cap_including_catalogue(tmp_path):
+    from test_http_accounting import LocalCCXT, local_server
+
+    from crypto_market_analysis.collectors import ExchangeClients
+    from crypto_market_analysis.engine import Engine
+
+    with local_server() as (root, hits), ExchangeClients() as clients:
+        clients._clients["kraken"] = LocalCCXT(root)
+        result = Engine(Settings(data_dir=tmp_path, http_max_requests=1)).capture_books(
+            sources=["kraken"], assets=["BTC"], quotes=["USD"], clients=clients)
+    assert hits == ["/catalogue"]
+    assert result["http_limits"]["max_requests"] == result["http_limits"]["used_requests"] == 1
+    assert result["inserted_books"] == 0
+
+
+def test_engine_official_context_shares_configured_budget_across_fx_and_calendar(tmp_path, monkeypatch):
+    from crypto_market_analysis.engine import Engine
+    from crypto_market_analysis.official_context import OfficialHTTP
+
+    fx = (b'<gesmes:Envelope xmlns:gesmes="http://www.gesmes.org/xml/2002-08-01" '
+          b'xmlns="http://www.ecb.int/vocabulary/2002-08-01/eurofxref">'
+          b'<Cube><Cube time="2026-10-28"><Cube currency="USD" rate="1.1234"/>'
+          b'</Cube></Cube></gesmes:Envelope>')
+    with loopback() as (root, hits):
+        client = OfficialHTTP()
+        stream = client.client.stream
+
+        def local_stream(method, url, **kwargs):
+            return stream(method, root + "/fx", **kwargs)
+
+        monkeypatch.setattr(client.client, "stream", local_stream)
+        # Retain the actual standard HTTP response; only replace its synthetic body.
+        original = client.get_bytes
+
+        def capture(url):
+            original(url)
+            return fx
+
+        monkeypatch.setattr(client, "get_bytes", capture)
+        try:
+            result = Engine(Settings(data_dir=tmp_path, http_max_requests=1)).collect_official_context(
+                include=("fx", "calendar"), client=client)
+        finally:
+            client.close()
+    assert len(hits) == result["http_limits"]["used_requests"] == 1
+    assert result["inserted"]["fx_reference"] == 1
+    assert result["inserted"]["calendar"] == 0
+    assert len(result["errors"]) == 1
+    assert "HTTPBudgetExceeded" in result["errors"][0]["error"]
+
+
+def test_local_workflow_capture_shares_configured_cap_across_native_markets_and_books(tmp_path):
+    from test_http_accounting import LocalCCXT, local_server
+
+    from crypto_market_analysis.collectors import ExchangeClients
+    from crypto_market_analysis.local_workflow import capture_local_inputs, normalize_local_workflow_request
+    from crypto_market_analysis.storage import Store
+
+    settings = Settings(data_dir=tmp_path, venues=["kraken"], http_max_requests=2, max_pages=1)
+    request = normalize_local_workflow_request(settings, {
+        "refresh": True, "sources": ["kraken"], "markets": ["BTC/USD", "ETH/USD"],
+        "capture_books": True, "capture_tasks": ["market"],
+    })
+    with local_server() as (root, hits), ExchangeClients() as clients:
+        clients._clients["kraken"] = LocalCCXT(root)
+        result = capture_local_inputs(settings, Store(settings.database), request, clients)
+    assert hits == ["/catalogue", "/candles"]
+    assert result["http_limits"]["used_requests"] == result["http_limits"]["max_requests"] == 2
+    assert all(row["http_limits"]["max_requests"] == 2 for row in result["market"]["markets"])
+    assert all(row["http_limits"]["used_requests"] == 2 for row in result["books"]["markets"])

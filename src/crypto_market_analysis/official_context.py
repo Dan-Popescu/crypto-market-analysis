@@ -15,7 +15,13 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from .collectors import ExchangeClients
-from .http_accounting import http_source_scope, instrument_exchange, instrument_httpx, mark_uninstrumented
+from .http_accounting import (
+    _provider_source,
+    http_source_scope,
+    instrument_exchange,
+    instrument_httpx,
+    mark_uninstrumented,
+)
 from .http_limits import HTTPBudgetExceeded, bounded_public_operation, check_http_budget
 from .venues import VENUES
 
@@ -64,8 +70,9 @@ class OfficialHTTP:
         )
 
     def get_bytes(self, url: str) -> bytes:
-        instrument_httpx(self.client, "ecb")
-        with http_source_scope("ecb"), self.client.stream("GET", url, extensions={"observer_stream": True}) as response:
+        source = _provider_source(url) or "ecb"
+        instrument_httpx(self.client, source)
+        with http_source_scope(source), self.client.stream("GET", url, extensions={"observer_stream": True}) as response:
             response.raise_for_status()
             chunks, length = [], 0
             for chunk in response.iter_bytes():

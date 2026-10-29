@@ -13,6 +13,7 @@ from pathlib import Path
 from .config import Settings
 from .evidence import CapturedInputs, metric_identity
 from .freshness import metric_freshness
+from .http_limits import bounded_engine_http
 from .models import Candle, Observation
 from .research import build_analysis, daily_bars, evaluate, forecast
 from .storage import Store
@@ -241,9 +242,11 @@ class Engine:
     def import_calendar(self, path, kind="bls"):
         return self.accumulation.import_calendar(path, kind)
 
+    @bounded_engine_http
     def collect_calendar(self):
         return self.accumulation.collect_calendar()
 
+    @bounded_engine_http
     def capture_books(self, *, sources, assets, quotes, as_of=None, clients=None):
         """Explicit local network capture with the actual capture clock."""
         from .collectors import capture_books
@@ -255,6 +258,7 @@ class Engine:
         status = "partial" if failed and result["inserted_books"] else "error" if failed else "ok"
         return {**result, "status": status}
 
+    @bounded_engine_http
     def collect_official_context(self, *, venues=("kraken",), include=("fx", "calendar"),
                                  max_requests=12, as_of=None, client=None, clients=None):
         """Capture and persist bounded official references and sourced calendars."""

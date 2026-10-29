@@ -12,6 +12,9 @@ from html.parser import HTMLParser
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from .http_accounting import public_error
+from .http_limits import HTTPBudgetExceeded
+
 BLS_URL = "https://www.bls.gov/schedule/news_release/bls.ics"
 FOMC_URL = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
 ECB_URL = "https://www.ecb.europa.eu/press/calendars/mgcgc/html/index.en.html"
@@ -415,9 +418,11 @@ def collect_calendars(
                     # A broken capture clock cannot establish availability.
                     captured = None
             result["errors"].append(
-                {"source": source, "status": "unavailable", "error": f"{type(exc).__name__}: {exc}",
+                {"source": source, "status": "unavailable", "error": public_error(exc),
                  "observed_at": captured, "materialized_at": captured}
             )
+            if isinstance(exc, HTTPBudgetExceeded):
+                break
     return result
 
 

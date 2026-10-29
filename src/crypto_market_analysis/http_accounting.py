@@ -333,7 +333,9 @@ def instrument_exchange(client, source: str) -> bool:
 
 def _provider_source(url: str) -> str | None:
     return {"www.deribit.com": "deribit", "community-api.coinmetrics.io": "coinmetrics",
-            "stablecoins.llama.fi": "defillama", "fred.stlouisfed.org": "fred"}.get(urlsplit(str(url)).hostname)
+            "stablecoins.llama.fi": "defillama", "fred.stlouisfed.org": "fred",
+            "www.bls.gov": "bls", "www.federalreserve.gov": "federalreserve",
+            "www.ecb.europa.eu": "ecb"}.get(urlsplit(str(url)).hostname)
 
 
 def instrument_httpx(client, source: str) -> bool:

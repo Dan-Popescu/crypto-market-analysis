@@ -127,8 +127,11 @@ def http_budget_scope(policy: HTTPPolicy | None = None, *, budget: HTTPBudget | 
 def bounded_http(function):
     @wraps(function)
     def bounded(settings, *args, **kwargs):
-        with http_budget_scope(HTTPPolicy.from_settings(settings)):
-            return function(settings, *args, **kwargs)
+        with http_budget_scope(HTTPPolicy.from_settings(settings)) as budget:
+            result = function(settings, *args, **kwargs)
+            if isinstance(result, dict):
+                result["http_limits"] = budget.snapshot()
+            return result
     return bounded
 
 
@@ -143,6 +146,18 @@ def bounded_public_operation(function):
     def bounded(*args, **kwargs):
         with http_budget_scope() as budget:
             result = function(*args, **kwargs)
+            if isinstance(result, dict):
+                result["http_limits"] = budget.snapshot()
+            return result
+    return bounded
+
+
+def bounded_engine_http(function):
+    """Bound a public Engine operation by its configured shared policy."""
+    @wraps(function)
+    def bounded(engine, *args, **kwargs):
+        with http_budget_scope(HTTPPolicy.from_settings(engine.settings)) as budget:
+            result = function(engine, *args, **kwargs)
             if isinstance(result, dict):
                 result["http_limits"] = budget.snapshot()
             return result

@@ -9,6 +9,7 @@ from hashlib import sha256
 from .collectors import ExchangeClients
 from .config import Settings
 from .engine import Engine
+from .http_limits import bounded_http
 from .pipeline import collect
 from .venues import VENUES
 
@@ -80,6 +81,7 @@ class _BudgetedClient:
         return value
 
 
+@bounded_http
 def capture_local_inputs(settings, store, request, clients, http_client=None):
     """Capture normalized one-shot public inputs using a shared operation budget.
 
