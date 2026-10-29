@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
+from .dataset_lock import DatasetBusy, dataset_writer_lock
 from .evidence import canonical_json as _json
 from .history_dataset import MARKETS, DatasetConfig, HistoryDataset, UnsupportedMarket
 from .storage import database_table_names as _tables
@@ -21,6 +22,17 @@ from .storage import read_database_if_present as _read
 
 HOUR = 3600
 _TABLE = "history_auto_repairs"
+_SCHEDULE = "history_auto_schedule"
+
+
+def _schedule(con, tables):
+    """One bounded cursor, independent of task count and selected market subset."""
+    row = con.execute(f"SELECT next_market FROM {_SCHEDULE} WHERE id=1").fetchone() if _SCHEDULE in tables else None
+    cursor = row[0] if row else 0
+    if type(cursor) is not int or not 0 <= cursor < len(MARKETS):
+        raise ValueError("Invalid automatic repair scheduling cursor.")
+    return {"policy": "durable_native_market_round_robin", "recorded": row is not None,
+            "next_market": list(MARKETS[cursor])}
 
 
 @dataclass(frozen=True)
@@ -119,6 +131,7 @@ def plan_auto_repairs(database, request: AutoRepairRequest | None = None, *, mod
     base.update(closed_before=closed, recoverable_start=retention)
     with _read(database) as con:
         tables = _tables(con)
+        base["scheduling"] = _schedule(con, tables)
         if not {"candles", "history_repairs"} <= tables:
             base["status"] = "database_unavailable"
             return base
@@ -162,11 +175,12 @@ def plan_auto_repairs(database, request: AutoRepairRequest | None = None, *, mod
         # Give each native market a turn before selecting its second range.
         turns = {}
         ordered = []
+        cursor = MARKETS.index(tuple(base["scheduling"]["next_market"]))
         for state, hours in candidates:
             market = (state["asset"], state["quote"])
             turn = turns.get(market, 0)
             turns[market] = turn + 1
-            ordered.append((turn, request.markets.index(market), state, hours))
+            ordered.append((turn, (MARKETS.index(market) - cursor) % len(MARKETS), state, hours))
         candidates = [(state, hours) for _, _, state, hours in sorted(ordered, key=lambda item: item[:2])]
         selected = candidates[:min(request.max_ranges, request.request_budget, request.max_hours)]
         ranges = []
@@ -205,7 +219,9 @@ def automatic_repair_status(database, *, mode="import", limit=20):
         return result
     result["dataset"] = config.name
     with _read(database) as con:
-        if _TABLE not in _tables(con):
+        tables = _tables(con)
+        result["scheduling"] = _schedule(con, tables)
+        if _TABLE not in tables:
             result.update(status="not_recorded", tasks_total=0, tasks_omitted=0)
         else:
             total = con.execute(f"SELECT COUNT(*) FROM {_TABLE}").fetchone()[0]
@@ -249,11 +265,22 @@ def run_auto_repairs(database, request: AutoRepairRequest | None = None, *, appl
         return plan
     if fetch is None:
         raise ValueError("Explicit apply requires an injected REST fetcher.")
+    try:
+        with dataset_writer_lock(database):
+            return _apply_cycle(database, request, fetch, mode, clock)
+    except DatasetBusy:
+        return {**plan, "status": "busy", "reason": "dataset_writer_busy", "applied": False,
+                "requests_attempted": 0, "outcomes": []}
+
+
+def _apply_cycle(database, request, fetch, mode, clock):
+    """Only entered while holding the writer lock, including recovery and replan."""
     _, config, _ = _identity(database, mode)
     dataset = HistoryDataset(config, clock=clock)
     dataset.check_write_budget()
     with dataset.store.connection() as con:
         con.execute(f"CREATE TABLE IF NOT EXISTS {_TABLE} (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
+        con.execute(f"CREATE TABLE IF NOT EXISTS {_SCHEDULE} (id INTEGER PRIMARY KEY CHECK(id=1), next_market INTEGER NOT NULL CHECK(next_market BETWEEN 0 AND 3))")
     _reconcile(dataset, config, request.markets, int(clock()))
     # Replay may have restored candles, so do not request already recovered gaps.
     plan = plan_auto_repairs(database, request, mode=mode, now=int(clock()))
@@ -261,11 +288,9 @@ def run_auto_repairs(database, request: AutoRepairRequest | None = None, *, appl
     for task in plan["tasks"]:
         now = int(clock())
         # Re-evaluate moving retention, closure, coverage and manual ownership.
-        fresh = plan_auto_repairs(database, request, mode=mode, now=now)
-        candidate = next((t for t in fresh["tasks"] if t["id"] == task["id"]), None)
+        candidate = _fresh_candidate(dataset, config, task, now)
         if candidate is None:
             continue
-        candidate["request_end"] = min(candidate["request_end"], task["request_end"])
         if candidate["request_start"] >= candidate["request_end"]:
             continue
         candidate["request_hours"] = (candidate["request_end"] - candidate["request_start"]) // HOUR
@@ -276,7 +301,7 @@ def run_auto_repairs(database, request: AutoRepairRequest | None = None, *, appl
         state.update(status="inflight", requests=state["requests"] + 1, updated_at=now,
                      remaining_hours=sum(h not in present_before for h in range(state["start"], state["end"], HOUR)),
                      retry_at=now + request.retry_seconds)
-        _save(dataset, state)
+        _save(dataset, state, advance_schedule=True)
         try:
             result = dataset.append_rest(state["asset"], state["quote"], fetch,
                                          since=candidate["request_start"], until=candidate["request_end"],
@@ -314,10 +339,33 @@ def run_auto_repairs(database, request: AutoRepairRequest | None = None, *, appl
             "pending_recovery": "replayed_before_cycle"}
 
 
-def _save(dataset, state):
-    dataset.check_write_budget(len(_json(state).encode()) * 2)
+def _fresh_candidate(dataset, config, task, now):
+    """Revalidate a fixed cycle allocation without selecting another market turn."""
+    if task.get("retry_at", 0) > now:
+        return None
+    with dataset.store.connection() as con:
+        manual = con.execute("SELECT payload FROM history_repairs WHERE market=?",
+                             (task["asset"] + task["quote"],)).fetchone()
+        if manual and json.loads(manual[0]).get("status") not in (None, "complete"):
+            return None
+        present = _present(con, config, task["asset"], task["quote"], now)
+    closed = now // HOUR * HOUR
+    recent = max(0, closed - 719 * HOUR)
+    hours = [h for h in range(task["start"], task["end"], HOUR) if recent <= h < closed and h not in present]
+    if not hours:
+        return None
+    start, end = next(_runs(hours))
+    return {**task, "request_start": start, "request_end": min(end, task["request_end"])}
+
+
+def _save(dataset, state, *, advance_schedule=False):
+    # Reserve the bounded cursor write as well as the checkpoint payload.
+    dataset.check_write_budget(len(_json(state).encode()) * 2 + (128 if advance_schedule else 0))
     with dataset.store.connection() as con:
         con.execute(f"INSERT OR REPLACE INTO {_TABLE} VALUES(?,?)", (state["id"], _json(state)))
+        if advance_schedule:
+            cursor = (MARKETS.index((state["asset"], state["quote"])) + 1) % len(MARKETS)
+            con.execute(f"INSERT OR REPLACE INTO {_SCHEDULE} VALUES(1,?)", (cursor,))
 
 
 def _reconcile(dataset, config, markets, now):

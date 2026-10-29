@@ -184,7 +184,7 @@ def test_midcycle_interruption_checkpoint_and_resume(tmp_path):
     result = run_auto_repairs(ds.store.path, apply=True,
                               fetch=lambda a, q, s, n: replayed.append((a, q)) or all_rows(a, q, s, n),
                               clock=lambda: NOW + 60)
-    assert replayed == [("ETH", "EUR"), ("BTC", "USD"), ("ETH", "USD")]
+    assert replayed == [("BTC", "USD"), ("ETH", "USD"), ("ETH", "EUR")]
     assert all(m["remaining_hours"] == 0 for m in result["markets"])
     assert next(t for t in automatic_repair_status(ds.store.path)["tasks"] if t["asset"] == "ETH" and t["quote"] == "EUR")["requests"] == 2
 
