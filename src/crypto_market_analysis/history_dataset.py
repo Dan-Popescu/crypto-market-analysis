@@ -18,10 +18,14 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PurePosixPath
 
 from .history_import import ImportLimits, import_history
+from .http_accounting import accounting_scope, instrument_exchange, mark_uninstrumented, public_error
 from .models import Candle
 from .storage import Store
 
 MARKETS = (("BTC", "EUR"), ("ETH", "EUR"), ("BTC", "USD"), ("ETH", "USD"))
+# Two bounded journal payloads plus SQLite pages, indexes and WAL growth. Held
+# throughout materialization, so captures cannot consume their accounting space.
+_REST_ACCOUNTING_RESERVE = 256 * 1024
 
 
 def _json(value: object) -> str:
@@ -113,6 +117,7 @@ class KrakenRESTCapture:
 
     def __call__(self, asset: str, quote: str, since: int, limit: int) -> RESTCapture:
         symbol = f"{asset}/{quote}"
+        instrument_exchange(self.client, "kraken")
         try:
             markets = self.client.load_markets()
             if symbol not in markets or not markets[symbol].get("spot", False):
@@ -236,7 +241,7 @@ class HistoryDataset:
     def check_write_budget(self, additional=0):
         """Enforce the named dataset's actual file budget before an explicit write."""
         total = sum(p.stat().st_size for p in self.directory.rglob("*") if p.is_file())
-        if total + additional > self.config.max_disk_bytes:
+        if total + additional + getattr(self, "_reserved_bytes", 0) > self.config.max_disk_bytes:
             raise ValueError("Dataset exceeds its configured disk budget.")
 
     def _blob(self, payload: bytes) -> str:
@@ -377,6 +382,12 @@ class HistoryDataset:
 
     def append_rest(self, asset: str, quote: str, fetch: Callable, *, since: int, limit: int = 720,
                     until: int | None = None) -> dict:
+        """Capture once; retain HTTP attempts separately from immutable evidence.
+
+        One logical fetch can include catalogue calls, retries and redirects.
+        Unknown injected fetchers have unknown HTTP totals. Accounting has its
+        own reserved write allowance and cannot change the capture identity.
+        """
         self._market(asset, quote)
         _epoch(since)
         if until is not None:
@@ -385,8 +396,14 @@ class HistoryDataset:
             raise ValueError("Kraken fetch limit must be between 1 and 720 within the row budget.")
         started = time.monotonic()
         attempt = {"attempted_at": self._now(), "since": since, "limit": limit}
+        self.check_write_budget(_REST_ACCOUNTING_RESERVE)
+        self._reserved_bytes = getattr(self, "_reserved_bytes", 0) + _REST_ACCOUNTING_RESERVE
+        result = failure = None
         try:
-            capture = fetch(asset, quote, since, limit)
+            with accounting_scope("kraken") as meter:
+                if not isinstance(fetch, KrakenRESTCapture):
+                    mark_uninstrumented("kraken")
+                capture = fetch(asset, quote, since, limit)
             received = self._now()
             if not isinstance(capture, RESTCapture) or len(capture.rows) > limit:
                 raise ValueError("Fetcher must return a bounded RESTCapture.")
@@ -428,14 +445,56 @@ class HistoryDataset:
                            normalized_response_bytes=len(encoded))
             return result
         except Exception as exc:
+            failure = exc
             attempt.update(status="unsupported" if isinstance(exc, UnsupportedMarket) else "error",
-                           error=f"{type(exc).__name__}: {exc}")
+                           error=public_error(exc, include_message=False))
             raise
         finally:
             attempt["duration_seconds"] = time.monotonic() - started
-            with self.store.connection() as con:
-                con.execute("INSERT INTO history_attempts(asset,quote,payload) VALUES(?,?,?)",
-                            (asset, quote, _json(attempt)))
+            measurement = meter.snapshot("kraken")
+            attempt.update(http_accounting=measurement, logical_fetch_calls=1)
+            self._reserved_bytes -= _REST_ACCOUNTING_RESERVE
+            details = {"http_accounting": measurement, "logical_fetch_calls": 1}
+            try:
+                details["http_accounting_run_id"] = self._retain_rest_attempt(
+                    asset, quote, attempt, until=until, capture_id=result["id"] if result else None)
+                details["http_accounting_retention"] = "retained"
+            except Exception as exc:
+                # A full filesystem or interrupted storage must never replace
+                # the original capture outcome. Surface missing retention.
+                details["http_accounting_retention"] = "error:" + type(exc).__name__
+                details["http_accounting_run_id"] = None
+            if result is not None:
+                result.update(details)
+            if failure is not None:
+                for name, value in details.items():
+                    setattr(failure, name, value)
+
+    def _retain_rest_attempt(self, asset, quote, attempt, *, until, capture_id):
+        """Commit the operation journal and normal run atomically, without raw data."""
+        received = self._now()
+        payload = {"source": "kraken", "task": "history_rest", "data_mode": "import",
+                   "observed_at": received, "dataset": self.config.name,
+                   "asset": asset, "quote": quote, "timeframe": "1h",
+                   "since": attempt["since"], "until": until, "limit": attempt["limit"],
+                   "capture_id": capture_id, "logical_fetch_calls": 1,
+                   "candles": attempt.get("count", 0), "observations": 0, "warnings": [],
+                   "errors": [attempt["error"]] if "error" in attempt else [],
+                   "status": "error" if "error" in attempt else "ok" if attempt.get("count") else "empty",
+                   "capture_status": attempt["status"], "attempted_at": attempt["attempted_at"],
+                   "http_accounting": attempt["http_accounting"]}
+        encoded = _json(payload)
+        # Account for both retained copies and bounded SQLite allocation before
+        # opening the transaction. No provider URL/query/body enters either row.
+        self.check_write_budget(len(encoded.encode()) * 2 + 64 * 1024)
+        with self.store.connection() as con:
+            cursor = con.execute("INSERT INTO runs(source,task,observed_at,payload) VALUES(?,?,?,?)",
+                                 ("kraken", "history_rest", received, encoded))
+            run_id = cursor.lastrowid
+            saved_attempt = {**attempt, "http_accounting_run_id": run_id}
+            con.execute("INSERT INTO history_attempts(asset,quote,payload) VALUES(?,?,?)",
+                        (asset, quote, _json(saved_attempt)))
+        return run_id
 
     def plan_repair(self, asset: str, quote: str, start: int, end: int) -> dict:
         self._market(asset, quote)
@@ -486,7 +545,7 @@ class HistoryDataset:
                 state.pop("error", None)
             except Exception as exc:
                 state["status"] = "unsupported" if isinstance(exc, UnsupportedMarket) else "error"
-                state["error"] = f"{type(exc).__name__}: {exc}"
+                state["error"] = public_error(exc, include_message=False)
             self._save_repair(asset, quote, state)
             if state["status"] != "pending":
                 break

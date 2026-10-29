@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import wraps
@@ -137,6 +138,23 @@ class HTTPAccounting:
         return after
 
 
+@contextmanager
+def accounting_scope(source: str):
+    """Measure one explicit operation, including exceptions, with detached totals.
+
+    The caller owns retention and decides whether its adapter is instrumented.
+    Nested scopes restore both the outer meter and producer identity.
+    """
+    meter = HTTPAccounting()
+    token = _current.set(meter)
+    source_token = _requests_source.set(source)
+    try:
+        yield meter
+    finally:
+        _requests_source.reset(source_token)
+        _current.reset(token)
+
+
 def account_collection(function):
     """Attach a detached per-source scope measurement to CollectionResults."""
     @wraps(function)
@@ -181,9 +199,9 @@ def instrument_exchange(client, source: str) -> bool:
     session = getattr(client, "session", None)
     valid = isinstance(session, requests.Session)
     meter = _current.get()
-    if meter:
-        meter.coverage(source, instrumented=valid)
     if not valid:
+        if meter:
+            meter.coverage(source, instrumented=False)
         return False
     with _install_lock:
         for adapter in session.adapters.values():
@@ -191,6 +209,8 @@ def instrument_exchange(client, source: str) -> bool:
                 if meter:
                     meter.coverage(source, instrumented=False)
                 continue
+            if meter:
+                meter.coverage(source, instrumented=True)
             if getattr(adapter.max_retries, "total", None) not in (0, False):
                 if meter:
                     meter.coverage(source, instrumented=False)
@@ -297,10 +317,11 @@ def mark_uninstrumented(source: str) -> None:
         meter.coverage(source, instrumented=False)
 
 
-def public_error(exc: Exception) -> str:
+def public_error(exc: Exception, *, include_message: bool = True) -> str:
     """Project transport failures without provider URLs, headers or response text.
 
-    Keep local validation errors and RetryDeferred's explicit deadline intact.
+    Keep local validation errors and RetryDeferred's explicit deadline intact
+    by default. Explicit operation journals can suppress arbitrary client text.
     CCXT subclasses retain their scheduler-relevant type without eagerly
     importing the entire CCXT package at application startup.
     """
@@ -313,7 +334,7 @@ def public_error(exc: Exception) -> str:
         return kind
     if any(parent.__module__.startswith("ccxt.") for parent in type(exc).__mro__):
         return kind
-    return f"{kind}: {exc}"
+    return f"{kind}: {exc}" if include_message else kind
 
 
 def merge_measurements(measurements: list[dict | None], *, endpoint_limit: int = 100) -> dict:
