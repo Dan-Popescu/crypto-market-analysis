@@ -34,6 +34,17 @@ def claims(result):
     return {row["claim"]: row for row in result["markets"][0]["claims"]}
 
 
+def test_explicit_missing_calendar_prevents_overall_available_claim(tmp_path):
+    store = Store(tmp_path / "observer.sqlite")
+    store.put_candles(candles(days=100))
+    selection = request()
+    selection["dossier"]["calendar"] = {"source": "calendar", "start": NOW, "end": NOW + 86400}
+    result = build_analysis_readiness(store, selection, NOW)
+    assert result["calendar"]["status"] == "missing"
+    assert result["status"] == "incomplete"
+    assert claims(result)["hourly_anchor"]["status"] == "available"
+
+
 def test_complete_context_does_not_qualify_windows_rights_or_entity(tmp_path):
     store = Store(tmp_path / "db.sqlite")
     rows = candles()

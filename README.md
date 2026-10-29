@@ -2,6 +2,12 @@
 
 A local, read-only BTC/ETH research tool for gradual spot purchases over weeks and months. It provides historical context, experimental purchase windows, hypothetical purchase-plan comparisons, chronological evaluation and optional 4/8-hour vigilance. CLI and MCP share the same calculations. It never executes orders, signs wallet operations or transfers funds. Collection, calculations and charts require no language model or paid data API.
 
+Version 0.8.0 adds [actionable analytical workflows](docs/ANALYSIS_WORKFLOWS.md):
+changes between known-at dossiers, claim-level readiness and next inputs, actual
+HTTP attempt/deadline limits, resumable Coinbase/Bitstamp history and fixed-grid
+plan robustness. The four additional MCP tools are read-only; public captures
+remain explicit finite local operations.
+
 Version 0.7.0 adds [measured operation and coherent workflows](docs/OPERATING_CAPACITY.md):
 observed HTTP consumption, bounded endurance experiments, resumable automatic
 history repair, one-snapshot multi-market dossiers and portable source qualification.

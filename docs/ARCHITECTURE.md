@@ -1,5 +1,19 @@
 # Architecture and invariant ownership
 
+Version 0.8.0 adds `analysis_changes` and `analysis_readiness` as read-only
+compositions of the existing dossier, qualification, market and window owners.
+Nested `Store.read_session` calls on a live read view reuse its exact transaction,
+watermark and lifetime. `robustness` composes validated scenario plans and existing
+simulation rules; it owns descriptive eligibility and stability, not execution.
+Shared dossier/qualification/cost/native-dimension/plan validation seams are public.
+`http_limits` owns invocation admission and deadline state; `http_accounting` owns
+supported transport hooks and measured evidence. Context propagation carries one
+budget across workers. `history_backfill` owns ordinary-store import checkpoints
+and consumes those transport and storage boundaries plus the shared local writer
+lock. `analysis_cli` and `analysis_mcp` dispatch these owners without cross-importing
+transports or adding an Engine workflow facade. MCP presentation owns bounded
+summaries and frozen details; it does not change financial calculations.
+
 Version 0.7.0 adds the [operating workflows](OPERATING_CAPACITY.md).
 `http_accounting` owns bounded transport measurement and retained-run aggregation;
 `automatic_repair` owns finite named-dataset task progression and consumes the

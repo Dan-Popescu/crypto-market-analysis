@@ -327,6 +327,8 @@ def build_analysis_readiness(store: Store, request: dict, as_of: int | None = No
         data_statuses = [claim["status"] for market in markets for claim in market["claims"]
                          if claim["claim"] not in ("data_reuse_permission", "france_purchase_entity_service", "source_runtime_access")
                          and claim["status"] != "not_requested"]
+        if "calendar" in request["dossier"]:
+            data_statuses.append(calendar_claim["status"])
         status = "demo_only" if mode == "demo" else "available" if all(s == "available" for s in data_statuses) else "incomplete"
         result = {**base, "status": status, "watermark": deepcopy(session.watermark_at_start),
                   "snapshot_basis": dossier["snapshot_basis"], "dossier": dossier, "qualification": qualification,

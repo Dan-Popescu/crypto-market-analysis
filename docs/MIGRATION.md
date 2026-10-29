@@ -1,5 +1,16 @@
 # English repository and output migration
 
+Version 0.8.0 adds four finite commands and four read-only MCP tools, bringing the
+tool count to 46. Existing analytical rules and tool names remain compatible.
+New `http_max_requests`/`http_deadline_seconds` settings default to 10000/300 and
+bound supported public transport work per invocation across workers. Request and
+time exhaustion now produce explicit partial/error results. Budgets remain
+distinct from logical operations and bytes. New backfill jobs use ordinary import
+stores and explicit apply; existing named Kraken identities remain unchanged.
+Nested analytical read sessions reuse their original physical snapshot and work
+limits. Public shared validation/selection functions keep their original rules.
+See [ANALYSIS_WORKFLOWS.md](ANALYSIS_WORKFLOWS.md) for requests and limitations.
+
 Version 0.7.1 retains the 42 read-only MCP tools. Named-dataset REST attempts now
 record import-mode `history_rest` runs; their returned transport measurements and
 retention status are additive and do not change immutable capture identities.

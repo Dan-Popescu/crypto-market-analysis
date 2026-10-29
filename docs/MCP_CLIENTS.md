@@ -90,6 +90,10 @@ All registered tools declare read-only behavior. Chart rendering uses temporary 
 | `get_auto_repair_status` | Current configured-dataset repair checkpoints without planning, applying or recovery. |
 | `get_analysis_dossier` | Explicit native market contexts and requested stored sections/calendar in one read transaction, with shared cutoff and watermark. |
 | `get_installation_qualification` | Portable local native-market qualification report; this MCP surface forbids refresh. |
+| `get_analysis_changes` | Compare one native selection at two known-at cutoffs; distinguish market events, analytical metric changes, revisions and collection issues. |
+| `get_analysis_readiness` | Claim-level support, missing inputs and nonexecuting next actions from one snapshot; rights and entity verification remain independent. |
+| `get_plan_robustness` | Fixed origins, declared costs and missing-hour stresses against regular purchases, with qualified/excluded denominators and descriptive stability. |
+| `get_history_backfill_status` | Current bounded Coinbase/Bitstamp import job checkpoints; no planning, capture, retry or recovery. |
 | `get_result_page` | Bounded frozen details by handle, selection/content hashes and JSON pointer; inspect expiry and fragment metadata. |
 | `get_metric_series` | Discover actual source, native quote, unit and dimension identities before requesting history. |
 | `get_dataset_status` | Configured dataset identity, captures, conflicts, attempts and repair state, without recovery or initialization. |
