@@ -1006,6 +1006,12 @@ class _StoreReadSession(Store):
         self.watermark_at_start = watermark
 
     @contextmanager
+    def read_session(self):
+        """Compose readers inside this same bounded physical snapshot."""
+        with self.connection():
+            yield self
+
+    @contextmanager
     def connection(self):
         if not self._active:
             raise ValueError("SQLite read session has expired; open a new read_session context.")
