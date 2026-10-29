@@ -1,5 +1,9 @@
 # Version 0.6.0 delivery and measured efficiency
 
+The subsequent [version 0.7.0 operating-capacity record](OPERATING_CAPACITY_STATUS.md)
+covers HTTP measurement, endurance, automatic repair, coherent dossiers and
+portable qualification. This page preserves the original version 0.6.0 evidence.
+
 All six priority projects in [EFFICIENCY_PLAN.md](EFFICIENCY_PLAN.md) are
 implemented and verified locally. [EFFICIENCY.md](EFFICIENCY.md) documents
 operation, limits and migration. No deployment is required for these changes.
