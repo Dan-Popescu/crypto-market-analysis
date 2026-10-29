@@ -2,15 +2,19 @@
 import asyncio
 import json
 from dataclasses import asdict
+from types import SimpleNamespace
 
 import jsonschema
 import pytest
+from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from crypto_market_analysis.config import Settings
 from crypto_market_analysis.history_dataset import DatasetConfig, HistoryDataset
 from crypto_market_analysis.operational_reads import (
     collection_history,
     dataset_status,
+    register_operational_tools,
     storage_status,
     upcoming_calendar,
 )
@@ -148,3 +152,37 @@ def test_contract_discovery_is_bounded_independent_and_explicit_about_fees():
     assert get_request_schema("preview_purchase_funding")["examples"]
     with pytest.raises(ValueError, match="Unknown"):
         get_request_schema("../../arbitrary")
+
+
+def test_operational_registration_actual_tool_calls_remain_read_only(tmp_path):
+    from crypto_market_analysis.storage_policy import StoragePolicy
+
+    server = FastMCP("operational test")
+    settings = SimpleNamespace(database=tmp_path / "missing" / "observer.sqlite",
+                               **{f"storage_{k}": v for k, v in asdict(StoragePolicy()).items()})
+    engine = SimpleNamespace(settings=settings, mode="live")
+    readonly = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
+    register_operational_tools(server, engine, readonly)
+
+    async def run():
+        tools = {tool.name: tool for tool in await server.list_tools()}
+        expected = {"get_request_schema", "get_dataset_status", "get_collection_history", "get_storage_status", "get_upcoming_calendar"}
+        assert set(tools) == expected
+        assert all(tool.annotations.readOnlyHint for tool in tools.values())
+        assert "database" not in str([tool.inputSchema for tool in tools.values()])
+        for name in expected:
+            await server.call_tool(name, {"tool_name": "list"} if name == "get_request_schema" else {})
+    asyncio.run(run())
+    assert not settings.database.parent.exists()
+
+
+def test_documented_plan_defaults_follow_actual_normalization():
+    from crypto_market_analysis.plans import validate_config
+    from crypto_market_analysis.request_schemas import PLAN_EXAMPLE
+
+    example = {k: v for k, v in PLAN_EXAMPLE.items() if k not in ("fees", "execution")}
+    normalized = validate_config(example)
+    schema = get_request_schema("compare_purchase_plans")["input_schema"]["properties"]["config"]["properties"]
+    for group in ("fees", "execution"):
+        for field, definition in schema[group]["properties"].items():
+            assert normalized[group][field] == definition["default"]
