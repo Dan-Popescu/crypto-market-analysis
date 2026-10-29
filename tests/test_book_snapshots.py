@@ -5,7 +5,6 @@ from copy import deepcopy
 import pytest
 
 from crypto_market_analysis.book_snapshots import (
-    capture_books,
     disagreement_request,
     purchase_cost_request,
     read_book_snapshot,
@@ -13,7 +12,7 @@ from crypto_market_analysis.book_snapshots import (
     retain_books,
     retained_book,
 )
-from crypto_market_analysis.collectors import ExchangeClients, collect_exchange
+from crypto_market_analysis.collectors import ExchangeClients, capture_books, collect_exchange
 from crypto_market_analysis.models import CollectionResult
 from crypto_market_analysis.storage import Store
 from crypto_market_analysis.venue_analysis import analyze_purchase_costs, analyze_venue_disagreement

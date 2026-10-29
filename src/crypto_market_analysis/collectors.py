@@ -7,10 +7,13 @@ import math
 import re
 import time
 from threading import RLock
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .models import Candle, CollectionResult, Observation
 from .venues import VENUES
+
+if TYPE_CHECKING:
+    from .storage import Store
 
 QUOTES = ("USD", "USDT", "USDC", "EUR")
 log = logging.getLogger(__name__)
@@ -509,3 +512,53 @@ def _collect_exchange(
                 )
     result.candles = list({(c.asset, c.quote, c.open_time): c for c in result.candles}.values())
     return result
+
+
+def capture_books(
+    store: Store, *, sources: list[str], assets: list[str], quotes: tuple[str, ...],
+    now: int | None = None, clients: ExchangeClients | None = None,
+) -> dict:
+    """One-shot bounded public capture; caller-owned reusable clients stay open.
+
+    Derived liquidity observations from the same response are also persisted.
+    This does not qualify source access or reuse permission. No keys or private
+    API calls are loaded. Each venue failure is isolated from all other captures.
+    """
+    from .book_snapshots import retain_books
+
+    if (not isinstance(assets, list) or not assets or len(assets) > 2
+            or len(set(assets)) != len(assets) or any(a not in ("BTC", "ETH") for a in assets)):
+        raise ValueError("assets requires unique BTC/ETH selectors.")
+    if not isinstance(quotes, tuple) or not quotes or len(set(quotes)) != len(quotes):
+        raise ValueError("quotes requires explicit unique native quote selectors.")
+    if (not isinstance(sources, list) or not 1 <= len(sources) <= 32
+            or any(not isinstance(source, str) or not 1 <= len(source) <= 256
+                   or not source.isprintable() for source in sources)
+            or len(set(sources)) != len(sources)):
+        raise ValueError("sources requires 1 to 32 unique source identifiers.")
+    if any(quote not in QUOTES for quote in quotes):
+        raise ValueError("quotes requires explicit native EUR/USD/USDT/USDC selectors.")
+    if now is not None and (type(now) is not int or not 0 <= now <= 253402300799):
+        raise ValueError("now requires nonnegative integer UTC epoch seconds.")
+    if clients is None:
+        with ExchangeClients() as owned:
+            return capture_books(store, sources=sources, assets=assets, quotes=quotes, now=now, clients=owned)
+    reports, inserted, observations = [], 0, 0
+    for source in sources:
+        try:
+            result = collect_exchange(source, assets, now=now, include=("liquidity",), quotes=quotes,
+                                      clients=clients, retain_books=True)
+            written = retain_books(store, result.books) if result.books else 0
+            inserted += written
+            receipt = (max(row["captured_at"] for row in result.books) if result.books
+                       else now if now is not None else int(time.time()))
+            saved = store.save_result(result, "book_capture", receipt)
+            observations += saved["inserted_observations"]
+            reports.append({"source": source, "captured_books": len(result.books), "inserted_books": written,
+                            "inserted_observations": saved["inserted_observations"],
+                            "warnings": result.warnings, "errors": result.errors})
+        except Exception as exc:
+            reports.append({"source": source, "captured_books": 0, "inserted_books": 0, "inserted_observations": 0,
+                            "warnings": [], "errors": [f"{type(exc).__name__}: {exc}"]})
+    return {"inserted_books": inserted, "inserted_observations": observations, "reports": reports, "data_mode": "live",
+            "whole_book_completeness": "unknown", "source_access_qualified": False}
