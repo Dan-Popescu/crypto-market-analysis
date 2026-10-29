@@ -45,3 +45,4 @@ class CollectionResult:
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     books: list[dict[str, Any]] = field(default_factory=list)
+    http_accounting: dict[str, Any] | None = None

@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from .http_accounting import account_collection, httpx_get, prepare_httpx
 from .models import CollectionResult, Observation
 
 
@@ -36,8 +37,8 @@ def _retry_delay(value: str | None, now: float) -> float:
 
 
 class PublicHTTP:
-    def __init__(self, timeout: float = 10):
-        self.client = httpx.Client(
+    def __init__(self, timeout: float = 10, *, client: httpx.Client | None = None):
+        self.client = client if client is not None else httpx.Client(
             timeout=timeout, follow_redirects=True, headers={"User-Agent": "crypto-market-analysis/0.2"}
         )
 
@@ -45,6 +46,7 @@ class PublicHTTP:
         self.client.close()
 
     def _get(self, url: str, params: dict | None = None):
+        prepare_httpx(self.client, url)
         # Keep at most one short retry within a one-second worker sleep budget.
         # Longer server deadlines are returned to the persistent scheduler.
         origin = urlsplit(url).netloc
@@ -54,7 +56,7 @@ class PublicHTTP:
             raise RetryDeferred(deadlines[origin], "Origin cooldown")
         for attempt in range(2):
             try:
-                response = self.client.get(url, params=params)
+                response = httpx_get(self.client, url, params=params)
                 response.raise_for_status()
                 return response
             except httpx.HTTPStatusError as exc:
@@ -212,6 +214,7 @@ def parse_options(instruments: list[dict], summaries: list[dict], asset: str, no
     return out
 
 
+@account_collection
 def collect_options(assets: list[str], now: int | None = None, *, client: Any = None) -> CollectionResult:
     now = int(time.time()) if now is None else int(now)
     own_client = client is None
@@ -244,6 +247,7 @@ def collect_options(assets: list[str], now: int | None = None, *, client: Any = 
     return result
 
 
+@account_collection
 def collect_context(now: int | None = None, days: int = 365, *, client: Any = None,
                     sources: tuple[str, ...] = ("coinmetrics", "defillama", "fred")) -> list[CollectionResult]:
     now = int(time.time()) if now is None else int(now)

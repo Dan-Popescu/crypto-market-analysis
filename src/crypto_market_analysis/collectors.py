@@ -9,6 +9,7 @@ import time
 from threading import RLock
 from typing import TYPE_CHECKING, Any
 
+from .http_accounting import account_collection, instrument_exchange
 from .models import Candle, CollectionResult, Observation
 from .venues import VENUES
 
@@ -215,6 +216,7 @@ class ExchangeClients:
         self.close()
 
 
+@account_collection
 def collect_exchange(
     venue: str,
     assets: list[str],
@@ -241,6 +243,7 @@ def collect_exchange(
     if quotes is not None and (not quotes or any(q not in QUOTES for q in quotes)):
         raise ValueError("quotes must contain native EUR, USD, USDT or USDC quotes")
     if client is not None:
+        instrument_exchange(client, venue)
         return _collect_exchange(
             venue, assets, since, now, include, max_pages, client, quotes, since_by_market,
             retain_books=retain_books,
@@ -263,6 +266,7 @@ def collect_exchange(
     with clients._venue_locks[venue]:
         try:
             client = clients.client(venue)
+            instrument_exchange(client, venue)
             markets = clients.markets(venue, client)
         except Exception as exc:
             return CollectionResult(venue, errors=[f"{venue} client/catalogue: {type(exc).__name__}: {exc}"])

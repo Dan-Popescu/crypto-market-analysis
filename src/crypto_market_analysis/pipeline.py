@@ -10,6 +10,7 @@ from threading import Event
 
 from .collectors import ExchangeClients, collect_exchange
 from .config import Settings
+from .http_accounting import merge_measurements
 from .models import CollectionResult
 from .providers import collect_context, collect_options
 from .storage import Store
@@ -37,6 +38,7 @@ def _combined_exchange_reports(reports: list[dict]) -> list[dict]:
             report[key] = sum(row[key] for row in rows)
         for key in ("errors", "warnings"):
             report[key] = [value for row in rows for value in row[key]]
+        report["http_accounting"] = merge_measurements([row.get("http_accounting") for row in rows])
         has_data = report["candles"] or report["observations"]
         report["status"] = ("partial" if has_data else "error") if report["errors"] else (
             "ok" if has_data else "empty")

@@ -238,6 +238,7 @@ class Store:
             "observations": len(result.observations),
             "warnings": result.warnings,
             "errors": result.errors,
+            "http_accounting": result.http_accounting,
             "status": "partial"
             if result.errors and (result.candles or result.observations)
             else "error"
