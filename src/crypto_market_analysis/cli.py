@@ -653,13 +653,15 @@ def main(argv: list[str] | None = None) -> int:
             request.setdefault("data_mode", args.mode)
             _write_result(engine.qualify_sources(request, args.as_of), args)
         elif args.command == "local-workflow":
+            from .local_workflow import run_local_workflow
+
             request = dict(_json_file(args.request))
             request.setdefault("data_mode", args.mode)
             if args.as_of is not None:
                 if "as_of" in request and request["as_of"] != args.as_of:
                     raise ValueError("--as-of conflicts with the workflow JSON request.")
                 request["as_of"] = args.as_of
-            _write_result(engine.local_workflow(request), args)
+            _write_result(run_local_workflow(settings, bounded_object(request)), args)
         elif args.command == "context":
             lookbacks = bounded_integers(_csv_numbers(args.lookbacks, int), "lookbacks", 3650, 16)
             _write_result(engine.context(args.asset, args.source, args.quote, args.as_of, lookbacks), args)

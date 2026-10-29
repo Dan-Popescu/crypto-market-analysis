@@ -324,12 +324,6 @@ class Engine:
 
         return qualify_sources(self.store, bounded_object(request), bounded_as_of(as_of))
 
-    def local_workflow(self, request):
-        from .local_workflow import run_local_workflow
-        from .reporting import bounded_object
-
-        return run_local_workflow(self.settings, bounded_object(request))
-
     def predictions(
         self,
         asset: str,
