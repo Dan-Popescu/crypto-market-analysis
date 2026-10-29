@@ -244,18 +244,143 @@ def parse_fomc_calendar(html: str, observed_at: int) -> list[dict[str, Any]]:
     return output
 
 
-def collect_calendars(observed_at: int, *, client: Any) -> dict[str, Any]:
+_ECB_HEADING = (
+    "Schedules for the meetings of the Governing Council and General Council of the ECB "
+    "and related press conferences"
+)
+
+
+class _ECBText(HTMLParser):
+    """Read rendered calendar text under its exact official heading.
+
+    The source's rendered date/title sequence was inspected on 2026-10-29 via
+    the official page. No unpublished class names or machine feed are assumed.
+    Script/style text and content beyond the next heading are excluded.
+    """
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.skip = 0
+        self.heading: list[str] | None = None
+        self.started = False
+        self.finished = False
+        self.parts: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"script", "style"}:
+            self.skip += 1
+        if self.skip:
+            return
+        if tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+            if self.started:
+                self.finished = True
+            self.heading = []
+        if self.started and tag in {"br", "dt", "dd", "td", "th", "p", "div", "li", "time"}:
+            self.parts.append("\n")
+
+    def handle_data(self, data):
+        if self.skip:
+            return
+        if self.heading is not None:
+            self.heading.append(data)
+        elif self.started and not self.finished:
+            self.parts.append(data)
+
+    def handle_endtag(self, tag):
+        if tag in {"script", "style"}:
+            self.skip = max(0, self.skip - 1)
+        if self.skip:
+            return
+        if tag in {"h1", "h2", "h3", "h4", "h5", "h6"} and self.heading is not None:
+            heading = " ".join("".join(self.heading).split())
+            if heading == _ECB_HEADING and not self.started:
+                self.started = True
+            self.heading = None
+        if self.started and tag in {"dt", "dd", "td", "th", "p", "div", "li", "time"}:
+            self.parts.append("\n")
+
+
+def parse_ecb_calendar(html: str, observed_at: int) -> list[dict[str, Any]]:
+    """Parse only the official English calendar's heading-gated date/title list.
+
+    Source dates use DD/MM/YYYY. The observed calendar has no clock times;
+    dates stay date-only, with Europe/Berlin retained as the source civil zone.
+    Non-policy and General Council entries are recognized but excluded. Unknown
+    entry wording, malformed dates and markup drift fail closed. Fixtures are
+    synthetic: raw live markup/transport has not been qualified in this environment.
+    """
+    _bounded(html, observed_at)
+    parser = _ECBText()
+    parser.feed(html)
+    if not parser.started:
+        raise ValueError("Official ECB calendar heading missing or changed.")
+    lines = [" ".join(line.split()) for line in "".join(parser.parts).splitlines() if line.strip()]
+    if not lines or len(lines) % 2:
+        raise ValueError("Official ECB calendar date/title layout missing or changed.")
+    if len(lines) // 2 > _MAX_EVENTS:
+        raise ValueError("Calendar exceeds the event-count limit.")
+    output, identities = [], set()
+    for raw_date, title in zip(lines[::2], lines[1::2], strict=True):
+        if not re.fullmatch(r"\d{2}/\d{2}/\d{4}", raw_date):
+            raise ValueError("Unsupported official ECB calendar date layout.")
+        local_date = datetime.strptime(raw_date, "%d/%m/%Y").date().isoformat()
+        if re.fullmatch(r"Governing Council of the ECB: monetary policy meeting(?: .+)?", title):
+            kind = "policy_meeting"
+        elif re.fullmatch(r"Press conference following the Governing Council meeting of the ECB(?: .+)?", title):
+            kind = "press_conference"
+        elif re.fullmatch(r"Governing Council of the ECB: non-monetary policy meeting(?: .+)?|General Council meeting of the ECB(?: .+)?", title):
+            continue
+        else:
+            raise ValueError("Unknown official ECB calendar entry wording.")
+        identity = local_date, title
+        if identity in identities:
+            raise ValueError("Duplicate official ECB calendar entry.")
+        identities.add(identity)
+        event = _event("ecb", html, observed_at)
+        event.update(
+            source_event_id="ecb:" + hashlib.sha256((local_date + ":" + title).encode()).hexdigest(),
+            title=title, event_kind=kind, local_date=local_date, original_date=raw_date,
+            original_timezone="Europe/Berlin", time_status="date_only", sequence=0,
+            source_format="ecb-official-english-calendar-html",
+            parser_qualification="rendered_source_observed_raw_markup_unverified",
+        )
+        output.append(event)
+    if not output:
+        raise ValueError("Official ECB calendar contains no recognized policy/conference entries.")
+    return output
+
+
+def collect_calendars(observed_at: int, *, client: Any, include_ecb: bool = False) -> dict[str, Any]:
     """Use an injected PublicHTTP-compatible client; failures are per-source.
 
     No default network client is created. Callers choose whether to fetch.
     """
     result: dict[str, Any] = {"events": [], "errors": [], "observed_at": observed_at}
-    for source, url, parser in (
+    if type(include_ecb) is not bool:
+        raise ValueError("include_ecb must be a boolean.")
+    sources = [
         ("bls", BLS_URL, parse_bls_ics),
         ("federalreserve", FOMC_URL, parse_fomc_calendar),
-    ):
+    ]
+    if include_ecb:
+        sources.append(("ecb", ECB_URL, parse_ecb_calendar))
+    for source, url, parser in sources:
         try:
-            result["events"].extend(parser(client.get_text(url), observed_at))
+            if source == "ecb" and callable(getattr(client, "get_bytes", None)):
+                raw = client.get_bytes(url)
+                if not isinstance(raw, bytes) or len(raw) > _MAX_BYTES:
+                    raise ValueError("Calendar exceeds the byte response limit.")
+                events = parser(raw.decode("utf-8-sig"), observed_at)
+                digest, scope = hashlib.sha256(raw).hexdigest(), "response_bytes"
+            else:
+                text = client.get_text(url)
+                events = parser(text, observed_at)
+                digest, scope = hashlib.sha256(text.encode()).hexdigest(), "decoded_text_utf8"
+            for event in events:
+                event.update(raw_sha256=digest, hash_scope=scope, materialized_at=observed_at)
+                if scope == "response_bytes":
+                    event["data_version"] = "sha256:" + digest
+            result["events"].extend(events)
         except Exception as exc:
             result["errors"].append(
                 {"source": source, "status": "unavailable", "error": f"{type(exc).__name__}: {exc}"}
