@@ -224,12 +224,14 @@ def collect_exchange(
     quotes: tuple[str, ...] | None = None,
     since_by_market: dict[tuple[str, str], int | None] | None = None,
     clients: ExchangeClients | None = None,
+    retain_books: bool = False,
 ) -> CollectionResult:
     """Collect explicit native quotes, or one preferred quote for legacy callers.
 
     Pagination is bounded by max_pages per asset/quote, including retries on a later
     run. Missing requested pairs remain missing; no FX or stablecoin parity applies.
-    Injected clients remain owned by the caller.
+    Injected clients remain owned by the caller. retain_books explicitly opts
+    into bounded raw-level evidence; its single fetch also supplies liquidity.
     """
     if venue not in VENUES:
         return CollectionResult(venue, errors=[f"Unknown venue: {venue}"])
@@ -237,7 +239,8 @@ def collect_exchange(
         raise ValueError("quotes must contain native EUR, USD, USDT or USDC quotes")
     if client is not None:
         return _collect_exchange(
-            venue, assets, since, now, include, max_pages, client, quotes, since_by_market
+            venue, assets, since, now, include, max_pages, client, quotes, since_by_market,
+            retain_books=retain_books,
         )
     if clients is None:
         with ExchangeClients() as owned:
@@ -251,6 +254,7 @@ def collect_exchange(
                 quotes=quotes,
                 since_by_market=since_by_market,
                 clients=owned,
+                retain_books=retain_books,
             )
     # Serialise uses of the same instance so its own CCXT rate limiter stays coherent.
     with clients._venue_locks[venue]:
@@ -260,7 +264,8 @@ def collect_exchange(
         except Exception as exc:
             return CollectionResult(venue, errors=[f"{venue} client/catalogue: {type(exc).__name__}: {exc}"])
         return _collect_exchange(
-            venue, assets, since, now, include, max_pages, client, quotes, since_by_market, markets
+            venue, assets, since, now, include, max_pages, client, quotes, since_by_market, markets,
+            retain_books=retain_books,
         )
 
 
@@ -275,6 +280,8 @@ def _collect_exchange(
     quotes: tuple[str, ...] | None,
     since_by_market: dict[tuple[str, str], int | None] | None,
     markets: dict | None = None,
+    *,
+    retain_books: bool = False,
 ) -> CollectionResult:
     live_clock = now is None
     now = int(time.time()) if live_clock else int(now)
@@ -298,7 +305,7 @@ def _collect_exchange(
         label = f"{asset}/{requested_quote}" if requested_quote else asset
         spot = select_market(markets, asset, quotes=preferred)
         swap = select_market(markets, asset, "swap", quotes=preferred)
-        if not spot and any(task in include for task in ("candles", "liquidity")):
+        if not spot and (retain_books or any(task in include for task in ("candles", "liquidity"))):
             result.warnings.append(f"{label}: no active supported spot market")
         if spot and "candles" in include:
             if not _cap(client, "fetchOHLCV"):
@@ -354,7 +361,7 @@ def _collect_exchange(
                         result.warnings.append(f"{label}: no closed candles returned for requested history")
                 except Exception as exc:
                     result.errors.append(f"{label} fetchOHLCV: {type(exc).__name__}: {exc}")
-        if spot and "liquidity" in include:
+        if spot and ("liquidity" in include or retain_books):
             if not _cap(client, "fetchOrderBook"):
                 result.warnings.append(
                     f"{label}: fetchOrderBook adapter unsupported; provider availability unknown"
@@ -364,10 +371,21 @@ def _collect_exchange(
                     book = client.fetch_order_book(spot["symbol"], limit=VENUES[venue].book_limit)
                     if live_clock:
                         now = int(time.time())
-                    obs = summarize_book(book, venue, asset, spot["quote"], now)
-                    result.observations.extend(obs)
-                    if not obs:
-                        result.warnings.append(f"{label}: empty, crossed or future-dated order book")
+                    if "liquidity" in include:
+                        obs = summarize_book(book, venue, asset, spot["quote"], now)
+                        result.observations.extend(obs)
+                        if not obs:
+                            result.warnings.append(f"{label}: empty, crossed or future-dated order book")
+                    if retain_books:
+                        from .book_snapshots import retained_book
+
+                        result.books.append(retained_book(
+                            book, source=venue, asset=asset, quote=spot["quote"],
+                            symbol=spot["symbol"], captured_at=now,
+                            requested_limit=VENUES[venue].book_limit,
+                            provenance={"adapter": "ccxt", "capability": client.has.get("fetchOrderBook"),
+                                        "market_id": spot.get("id")},
+                        ))
                 except Exception as exc:
                     result.errors.append(f"{label} fetchOrderBook: {type(exc).__name__}: {exc}")
         if "derivatives" in include:
