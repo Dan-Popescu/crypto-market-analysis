@@ -14,7 +14,7 @@ def register_capacity_tools(server, engine, readonly, present=None) -> None:
     def get_http_accounting(source: str | None = None, task: str | None = None,
                             start: StrictInt | None = None, end: StrictInt | None = None,
                             limit: StrictInt = 1000, endpoint_limit: StrictInt = 100) -> dict:
-        """Read bounded observed HTTP attempts, body bytes, failures and latency from retained runs in the configured mode. Adapter calls and unknown instrumentation are not HTTP counts. Endpoint IDs omit URLs, queries and credentials; wire/TLS overhead is unknown. No capture or initialization."""
+        """Read bounded observed HTTP attempts, body bytes, failures and latency from retained runs in the configured mode, including history_rest attempts for named import datasets. Adapter calls and unknown instrumentation are not HTTP counts. Endpoint IDs omit URLs, queries and credentials; wire/TLS overhead is unknown. No capture or initialization."""
         from .http_accounting import stored_http_accounting
 
         return stored_http_accounting(engine.settings.database, source=source, task=task, mode=engine.mode,
@@ -22,7 +22,7 @@ def register_capacity_tools(server, engine, readonly, present=None) -> None:
 
     @register
     def get_auto_repair_status(limit: StrictInt = 20) -> dict:
-        """Read current bounded automatic-repair task state for the configured import dataset. State is mutable, not a historical reconstruction. Missing datasets stay missing; this never plans, captures, retries, recovers or repairs data."""
+        """Read current bounded automatic-repair task state, durable market rotation and last HTTP run references for the configured import dataset. State is mutable, not a historical reconstruction. Missing datasets stay missing; this never plans, captures, retries, recovers or repairs data."""
         from .automatic_repair import automatic_repair_status
 
         return automatic_repair_status(engine.settings.database, mode=engine.mode, limit=limit)

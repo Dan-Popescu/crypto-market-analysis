@@ -60,7 +60,10 @@ repeat. No daemon is started.
 Automatic apply acquires a fail-fast cooperative OS writer lock before recovery
 and authoritative planning. Existing-dataset `history-dataset` CLI actions share
 that guard, including manual repair, staging and legacy status (whose constructor
-can recover pending journals). A competing invocation returns `status: busy`,
+can recover pending journals). Configured maintenance, archive restoration and
+legacy CLI commands that can initialize a store also acquire it; named-dataset
+backup additionally requires the existing explicit quiescent declaration. A
+competing invocation returns `status: busy`,
 `applied: false` and CLI exit 1, without capture or recovery. Read-only automatic
 inspection and MCP status never acquire the lock or create its file. Lock release
 on normal exit or process death permits the next writer; never delete the stable
@@ -92,6 +95,7 @@ recovering or reconstructing past state.
 
 Dataset reports must be outside the dataset and must not overwrite their
 configuration, archive manifest or source parts. Validation precedes recovery.
+Hardlinked report destinations are rejected before opening them for writing.
 
 Payloads and pending journals are staged, flushed and atomically renamed before
 materialization. Existing content-addressed files are checked before reuse.

@@ -1,6 +1,7 @@
 """Dataset CLI reports must never replace the inputs or retained evidence."""
 
 import json
+import os
 from dataclasses import asdict
 
 import pytest
@@ -101,3 +102,66 @@ def test_archive_part_cannot_be_overwritten_before_pending_recovery(tmp_path, mo
                  "--member", "XBTEUR_60.csv", "--captured-at", "0", "--output", str(archive)]) == 2
     assert "must not overwrite" in capsys.readouterr().err
     assert archive.read_bytes() == b"unqualified synthetic archive part"
+
+
+@pytest.mark.parametrize("target", ["payload", "configuration", "database"])
+def test_external_hardlink_report_cannot_truncate_protected_inode(tmp_path, capsys, target):
+    config, path = _config(tmp_path)
+    dataset = HistoryDataset(config, clock=lambda: 7200)
+    capture = dataset.append_rest("BTC", "EUR", lambda *_: RESTCapture([[0, 10, 10, 10, 10, 1]], b"raw"), since=0)
+    inputs = {"payload": dataset.directory / (capture["raw_sha256"] + ".payload"),
+              "configuration": path, "database": dataset.store.path}
+    source = inputs[target]
+    report = tmp_path / "external-report.json"
+    try:
+        os.link(source, report)
+    except (NotImplementedError, OSError):
+        pytest.skip("Hardlinks unavailable")
+    original = source.read_bytes()
+    assert main(["history-dataset", "status", "--dataset-config", str(path), "--output", str(report)]) == 2
+    assert "must not overwrite" in capsys.readouterr().err
+    assert source.read_bytes() == report.read_bytes() == original
+
+
+@pytest.mark.parametrize("command,extra", [
+    ("maintain", ["--apply"]),
+    ("restore-archive", ["--apply", "--archive", "unused.json"]),
+    ("collect", []),
+    ("demo", []),
+    ("import-history", ["--file", "unused.csv", "--source", "kraken", "--quote", "EUR"]),
+    ("import-calendar", ["--file", "unused.json"]),
+    ("local-workflow", ["--request", "unused.json"]),
+])
+def test_configured_cli_writers_refuse_busy_dataset_before_engine_or_storage(tmp_path, monkeypatch, capsys, command, extra):
+    config, _ = _config(tmp_path)
+    dataset = HistoryDataset(config, clock=lambda: 7200)
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Busy configured operation must not initialize the Engine or modify storage")
+
+    with dataset_writer_lock(dataset.store.path):
+        monkeypatch.setattr("crypto_market_analysis.cli.Engine", forbidden)
+        monkeypatch.setattr("crypto_market_analysis.storage_policy.maintain_storage", forbidden)
+        monkeypatch.setattr("crypto_market_analysis.storage_policy.restore_archive", forbidden)
+        before = {p.name: p.read_bytes() for p in dataset.directory.iterdir() if p.is_file()}
+        assert main([command, "--mode", "import", "--data-dir", str(dataset.directory), *extra]) == 1
+        result = json.loads(capsys.readouterr().out)
+        assert result["reason"] == "dataset_writer_busy" and result["applied"] is False
+        assert result["action"] == command
+        assert {p.name: p.read_bytes() for p in dataset.directory.iterdir() if p.is_file()} == before
+
+
+def test_named_backup_uses_writer_lock_without_creating_destination(tmp_path, monkeypatch, capsys):
+    config, _ = _config(tmp_path)
+    dataset = HistoryDataset(config, clock=lambda: 7200)
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Busy backup must not inspect or publish a cross-file backup")
+
+    monkeypatch.setattr("crypto_market_analysis.recovery.create_backup", forbidden)
+    destination = tmp_path / "bundle"
+    with dataset_writer_lock(dataset.store.path):
+        assert main(["backup", "--database", str(dataset.store.path), "--destination", str(destination),
+                     "--quiescent-dataset"]) == 1
+    assert json.loads(capsys.readouterr().out)["reason"] == "dataset_writer_busy"
+    assert not destination.exists()

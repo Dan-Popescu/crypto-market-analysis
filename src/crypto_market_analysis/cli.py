@@ -7,7 +7,7 @@ import csv
 import json
 import logging
 import sys
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -133,9 +133,10 @@ def _protect_report_output(args, settings) -> None:
     recovery_bundle = any((parent / "manifest.json").is_file() for parent in output.parents)
     if (output in protected or (request_path and output == request_path.resolve())
             or (dataset.is_file() and output.is_relative_to(settings.data_dir.resolve()))
+            or (output.is_file() and output.stat().st_nlink > 1)
             or recovery_bundle
             or (output.exists() and output.suffix.lower() in (".payload", ".sqlite", ".sqlite3", ".db", ".parquet"))):
-        raise ValueError("Report output must not overwrite the database, its sidecars, dataset identity or request.")
+        raise ValueError("Report output must not overwrite the database, its sidecars, dataset identity, request or a hard-linked file.")
 
 
 def _history_operation(args) -> dict:
@@ -594,6 +595,35 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    with ExitStack() as resources:
+        return _run_cli(argv, resources)
+
+
+def _guard_configured_dataset(args, settings, resources):
+    """Cover all configured CLI stores that can write or initialize a schema.
+
+    Capacity reads and MCP startup have their separate noninitializing lifecycle;
+    automatic repair already holds this same lock around its authoritative cycle.
+    Legacy Engine commands can initialize schema even for an analytical request.
+    """
+    if not (settings.data_dir / "dataset.json").is_file():
+        return
+    from .capacity_cli import COMMANDS
+    from .dataset_lock import DatasetBusy, dataset_writer_lock
+
+    if getattr(args, "output", None):
+        _protect_report_output(args, settings)
+    if (args.command in COMMANDS or args.command in ("serve", "storage-policy", "verify-archive")
+            or (args.command in ("maintain", "restore-archive") and not args.apply)):
+        return
+    try:
+        resources.enter_context(dataset_writer_lock(settings.database))
+    except DatasetBusy:
+        return {"status": "busy", "reason": "dataset_writer_busy", "applied": False,
+                "data_mode": args.mode, "action": args.command}
+
+
+def _run_cli(argv, resources) -> int:
     args = parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(levelname)s %(message)s")
     try:
@@ -638,6 +668,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.as_of is not None:
                 raise ValueError("Recovery operations preserve actual evidence; --as-of is for analysis commands.")
             if args.output:
+                if args.command == "backup":
+                    _protect_report_output(args, Settings(data_dir=args.database.parent))
                 output = Path(args.output).resolve()
                 protected = [Path(value).resolve() for value in
                              (getattr(args, "bundle", None), getattr(args, "destination", None)) if value is not None]
@@ -650,6 +682,15 @@ def main(argv: list[str] | None = None) -> int:
                 if any(output == path or output.is_relative_to(path) for path in protected):
                     raise ValueError("Recovery report output must be outside source and destination bundles or datasets.")
             if args.command == "backup":
+                if args.quiescent_dataset and (args.database.parent / "dataset.json").is_file():
+                    from .dataset_lock import DatasetBusy, dataset_writer_lock
+
+                    try:
+                        resources.enter_context(dataset_writer_lock(args.database))
+                    except DatasetBusy:
+                        write_json({"status": "busy", "reason": "dataset_writer_busy", "applied": False,
+                                    "action": "backup"}, args.output)
+                        return 1
                 result = create_backup(args.database, args.destination, quiescent_dataset=args.quiescent_dataset)
             elif args.command == "verify-backup":
                 result = verify_backup(args.bundle)
@@ -684,6 +725,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         config_path = args.config or (Path("observer.toml") if Path("observer.toml").exists() else None)
         settings = load_settings(config_path, args.data_dir)
+        busy = _guard_configured_dataset(args, settings, resources)
+        if busy:
+            write_json(busy, getattr(args, "output", None))
+            return 1
         from .capacity_cli import COMMANDS, capacity_exit_code, render_capacity_report, run_capacity_command
 
         if args.command in COMMANDS:

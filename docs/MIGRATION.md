@@ -7,6 +7,9 @@ Automatic repair adds one durable round-robin cursor on explicit apply, exposed
 in status as `scheduling`. Existing-dataset CLI actions use a cooperative writer
 lock; contention returns a structured busy report and exit 1. Reports must be
 outside dataset evidence and cannot replace configuration or archive inputs.
+Hardlinked destinations are refused. Configured named-dataset maintenance and
+other legacy CLI store initialization share the lock; MCP and noninitializing
+inspection do not. Named-dataset backup retains its explicit quiescent requirement.
 Direct dataset API writers must use the same lock. No configuration or analytical
 rule migration is required. See [OPERATING_CAPACITY.md](OPERATING_CAPACITY.md).
 
