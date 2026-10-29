@@ -26,7 +26,10 @@ five delivered operating-capacity projects. It needs no deployment or paid API.
    and archive publication boundaries. Inspect before recovery, then check original
    receipt times, hashes, exact candle coverage and idempotency on explicit reopen.
    Also verify uncommitted SQLite work rolls back. Bound every child process and
-   clean it up even after failures. These checks do not simulate power loss.
+   clean it up even after failures. Publish payloads and pending journals atomically,
+   check existing content-addressed files, and validate raw as well as normalized
+   hashes before recovery can materialize rows. These checks do not simulate
+   power loss.
 5. Integrate useful cycle summaries and CLI errors, protect dataset report outputs
    from overwriting evidence or request inputs, and preserve all existing read-only
    MCP behavior, native EUR/USD identities and live/import/demo separation.

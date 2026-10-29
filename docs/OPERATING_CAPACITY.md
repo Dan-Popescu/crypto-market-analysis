@@ -93,6 +93,14 @@ recovering or reconstructing past state.
 Dataset reports must be outside the dataset and must not overwrite their
 configuration, archive manifest or source parts. Validation precedes recovery.
 
+Payloads and pending journals are staged, flushed and atomically renamed before
+materialization. Existing content-addressed files are checked before reuse.
+Recovery validates raw and normalized hashes, regular-file identity and byte/row
+bounds before writing candles; raw archive verification uses bounded hash reads.
+Corruption is an explicit failure and never causes silent evidence replacement.
+Temporary files orphaned by a kill are not published evidence and still count
+toward the configured disk budget; no automatic cleanup deletes unknown files.
+
 ## Process-death recovery verification
 
 ```bash

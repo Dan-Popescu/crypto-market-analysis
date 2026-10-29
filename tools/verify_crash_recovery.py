@@ -111,7 +111,8 @@ def main(argv=None):
     root = Path(__file__).resolve().parents[1]
     files = ["tests/test_process_crash_recovery.py", "tools/verify_crash_recovery.py",
              *[f"src/crypto_market_analysis/{name}.py" for name in
-               ("history_dataset", "automatic_repair", "retention", "storage_policy", "storage")]]
+               ("history_dataset", "automatic_repair", "dataset_lock", "http_accounting",
+                "retention", "storage_policy", "storage")]]
     evidence = {
         "schema_version": 1, "experiment": "offline synthetic process-crash recovery",
         "started_at": datetime.now(UTC).isoformat(), "source_revision": _git(root, "rev-parse", "HEAD"),

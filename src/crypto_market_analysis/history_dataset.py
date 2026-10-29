@@ -40,6 +40,10 @@ def _hash(payload: bytes) -> str:
 
 
 def _sync_directory(directory: Path) -> None:
+    # Windows does not expose POSIX directory fsync through os.open. Payload
+    # files are still flushed before atomic replacement on that platform.
+    if os.name == "nt":
+        return
     descriptor = os.open(directory, os.O_RDONLY)
     try:
         os.fsync(descriptor)
@@ -310,7 +314,8 @@ class HistoryDataset:
         path = self.directory / (digest + ".payload")
         if path.exists() or path.is_symlink():
             with self._open_blob(digest, len(payload)) as stream:
-                os.fsync(stream.fileno())
+                if os.name != "nt":
+                    os.fsync(stream.fileno())
             _sync_directory(self.directory)
         else:
             self.check_write_budget(len(payload))
