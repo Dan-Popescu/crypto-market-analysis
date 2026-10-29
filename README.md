@@ -2,6 +2,11 @@
 
 A local, read-only BTC/ETH research tool for gradual spot purchases over weeks and months. It provides historical context, experimental purchase windows, hypothetical purchase-plan comparisons, chronological evaluation and optional 4/8-hour vigilance. CLI and MCP share the same calculations. It never executes orders, signs wallet operations or transfers funds. Collection, calculations and charts require no language model or paid data API.
 
+Version 0.5.0 adds [automatic local data connections](docs/DATA_CONNECTIONS.md):
+retained books, official context capture, stored calculations, four-market source
+qualification and an explicit local refresh/report workflow. Network captures
+and assessment issuance are opt-in. No deployment is needed.
+
 Version 0.4.0 adds verified local backup/restore and original replay, bounded
 prospective scorecards, shared BTC/ETH cash envelopes, explicit snapshot venue
 cost/dispersion calculations, native derivatives comparisons, sourced manual ECB
