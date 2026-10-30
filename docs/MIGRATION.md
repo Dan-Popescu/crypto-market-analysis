@@ -1,5 +1,15 @@
 # English repository and output migration
 
+Version 0.10.0 adds 16 `market-*` commands and 11 read-only MCP tools (64 total).
+There is no implicit conversion of legacy crypto rows or archived evidence.
+Explicit imports add append-only `cross_asset_*` tables to the same SQLite
+authority; reads never initialize them. New snapshots use independent market-v1
+manifests and do not change legacy v1/v2 readers. Native-only stores have their
+own verified backup profile; mixed stores retain legacy schema version 2.
+`exchange-calendars` and its locked dependencies supply versioned schedule rules.
+Existing `OBSERVER_*`, `observer.toml`, defaults and legacy command names remain.
+See [cross-asset runtime](CROSS_ASSET_RUNTIME.md) for experiments and limitations.
+
 Version 0.8.0 adds four finite commands and four read-only MCP tools, bringing the
 tool count to 46. Existing analytical rules and tool names remain compatible.
 New `http_max_requests`/`http_deadline_seconds` settings default to 10000/300 and

@@ -1,0 +1,901 @@
+{
+  "schema": "market-bundle.v1",
+  "registry": {
+    "schema": "market-registry.v1",
+    "instruments": [
+      {
+        "id": "synthetic:instrument:0",
+        "name": "Synthetic share 0",
+        "asset_class": "equity",
+        "form": "share"
+      },
+      {
+        "id": "synthetic:instrument:1",
+        "name": "Synthetic spot 1",
+        "asset_class": "crypto",
+        "form": "spot"
+      },
+      {
+        "id": "synthetic:instrument:2",
+        "name": "Synthetic reference 2",
+        "asset_class": "commodity",
+        "form": "reference"
+      },
+      {
+        "id": "synthetic:instrument:3",
+        "name": "Synthetic fund 3",
+        "asset_class": "commodity",
+        "form": "fund"
+      },
+      {
+        "id": "synthetic:instrument:4",
+        "name": "Synthetic future 4",
+        "asset_class": "commodity",
+        "form": "future",
+        "contract": {
+          "expiry": 1707609600,
+          "unit": "barrel",
+          "multiplier": 1000,
+          "settlement": "cash"
+        }
+      }
+    ],
+    "listings": [
+      {
+        "id": "synthetic:listing:0",
+        "instrument_id": "synthetic:instrument:0",
+        "venue_id": "synthetic",
+        "native_currency": "USD",
+        "calendar_id": "synthetic:exchange",
+        "active_from": 1704153600,
+        "active_until": null,
+        "known_at": 1704153599
+      },
+      {
+        "id": "synthetic:listing:1",
+        "instrument_id": "synthetic:instrument:1",
+        "venue_id": "synthetic",
+        "native_currency": "EUR",
+        "calendar_id": "synthetic:continuous",
+        "active_from": 1704153600,
+        "active_until": null,
+        "known_at": 1704153599
+      },
+      {
+        "id": "synthetic:listing:3",
+        "instrument_id": "synthetic:instrument:3",
+        "venue_id": "synthetic",
+        "native_currency": "EUR",
+        "calendar_id": "synthetic:exchange",
+        "active_from": 1704153600,
+        "active_until": null,
+        "known_at": 1704153599
+      },
+      {
+        "id": "synthetic:listing:4",
+        "instrument_id": "synthetic:instrument:4",
+        "venue_id": "synthetic",
+        "native_currency": "USD",
+        "calendar_id": "synthetic:exchange",
+        "active_from": 1704153600,
+        "active_until": null,
+        "known_at": 1704153599
+      }
+    ],
+    "aliases": [
+      {
+        "provider": "synthetic",
+        "symbol": "EXAMPLE0",
+        "instrument_id": "synthetic:instrument:0",
+        "listing_id": "synthetic:listing:0",
+        "effective_from": 1704153600,
+        "effective_until": null,
+        "known_at": 1704153599
+      },
+      {
+        "provider": "synthetic",
+        "symbol": "EXAMPLE1",
+        "instrument_id": "synthetic:instrument:1",
+        "listing_id": "synthetic:listing:1",
+        "effective_from": 1704153600,
+        "effective_until": null,
+        "known_at": 1704153599
+      },
+      {
+        "provider": "synthetic",
+        "symbol": "EXAMPLE2",
+        "instrument_id": "synthetic:instrument:2",
+        "listing_id": null,
+        "effective_from": 1704153600,
+        "effective_until": null,
+        "known_at": 1704153599
+      },
+      {
+        "provider": "synthetic",
+        "symbol": "EXAMPLE3",
+        "instrument_id": "synthetic:instrument:3",
+        "listing_id": "synthetic:listing:3",
+        "effective_from": 1704153600,
+        "effective_until": null,
+        "known_at": 1704153599
+      },
+      {
+        "provider": "synthetic",
+        "symbol": "EXAMPLE4",
+        "instrument_id": "synthetic:instrument:4",
+        "listing_id": "synthetic:listing:4",
+        "effective_from": 1704153600,
+        "effective_until": null,
+        "known_at": 1704153599
+      }
+    ],
+    "memberships": [
+      {
+        "universe": "synthetic",
+        "instrument_id": "synthetic:instrument:0",
+        "valid_from": 1704153600,
+        "valid_until": null,
+        "known_at": 1704153599
+      },
+      {
+        "universe": "synthetic",
+        "instrument_id": "synthetic:instrument:1",
+        "valid_from": 1704153600,
+        "valid_until": null,
+        "known_at": 1704153599
+      },
+      {
+        "universe": "synthetic",
+        "instrument_id": "synthetic:instrument:2",
+        "valid_from": 1704153600,
+        "valid_until": null,
+        "known_at": 1704153599
+      },
+      {
+        "universe": "synthetic",
+        "instrument_id": "synthetic:instrument:3",
+        "valid_from": 1704153600,
+        "valid_until": null,
+        "known_at": 1704153599
+      },
+      {
+        "universe": "synthetic",
+        "instrument_id": "synthetic:instrument:4",
+        "valid_from": 1704153600,
+        "valid_until": null,
+        "known_at": 1704153599
+      }
+    ]
+  },
+  "calendars": [
+    {
+      "schema": "market-calendar.v1",
+      "version": "synthetic-v1",
+      "timezone": "UTC",
+      "source_url": "https://example.invalid/synthetic-schedule",
+      "known_at": 1704153599,
+      "supported_start": 1704153600,
+      "supported_end": 1705017600,
+      "id": "synthetic:exchange",
+      "profile": "explicit",
+      "sessions": [
+        {
+          "date": "2024-01-02",
+          "segments": [
+            {
+              "start": 1704186000,
+              "end": 1704211200
+            }
+          ]
+        },
+        {
+          "date": "2024-01-03",
+          "segments": [
+            {
+              "start": 1704272400,
+              "end": 1704297600
+            }
+          ]
+        },
+        {
+          "date": "2024-01-04",
+          "segments": [
+            {
+              "start": 1704358800,
+              "end": 1704384000
+            }
+          ]
+        },
+        {
+          "date": "2024-01-05",
+          "segments": [
+            {
+              "start": 1704445200,
+              "end": 1704470400
+            }
+          ]
+        },
+        {
+          "date": "2024-01-08",
+          "segments": [
+            {
+              "start": 1704704400,
+              "end": 1704729600
+            }
+          ]
+        },
+        {
+          "date": "2024-01-09",
+          "segments": [
+            {
+              "start": 1704790800,
+              "end": 1704816000
+            }
+          ]
+        },
+        {
+          "date": "2024-01-10",
+          "segments": [
+            {
+              "start": 1704877200,
+              "end": 1704902400
+            }
+          ]
+        },
+        {
+          "date": "2024-01-11",
+          "segments": [
+            {
+              "start": 1704963600,
+              "end": 1704988800
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "schema": "market-calendar.v1",
+      "version": "synthetic-v1",
+      "timezone": "UTC",
+      "source_url": "https://example.invalid/synthetic-schedule",
+      "known_at": 1704153599,
+      "supported_start": 1704153600,
+      "supported_end": 1705017600,
+      "id": "synthetic:continuous",
+      "profile": "continuous",
+      "sessions": []
+    },
+    {
+      "schema": "market-calendar.v1",
+      "version": "synthetic-v1",
+      "timezone": "UTC",
+      "source_url": "https://example.invalid/synthetic-schedule",
+      "known_at": 1704153599,
+      "supported_start": 1704153600,
+      "supported_end": 1705017600,
+      "id": "synthetic:publication",
+      "profile": "explicit",
+      "sessions": [
+        {
+          "date": "2024-01-02",
+          "segments": [],
+          "publication_at": 1704218400
+        },
+        {
+          "date": "2024-01-03",
+          "segments": [],
+          "publication_at": 1704304800
+        },
+        {
+          "date": "2024-01-04",
+          "segments": [],
+          "publication_at": 1704391200
+        },
+        {
+          "date": "2024-01-05",
+          "segments": [],
+          "publication_at": 1704477600
+        },
+        {
+          "date": "2024-01-08",
+          "segments": [],
+          "publication_at": 1704736800
+        },
+        {
+          "date": "2024-01-09",
+          "segments": [],
+          "publication_at": 1704823200
+        },
+        {
+          "date": "2024-01-10",
+          "segments": [],
+          "publication_at": 1704909600
+        },
+        {
+          "date": "2024-01-11",
+          "segments": [],
+          "publication_at": 1704996000
+        }
+      ]
+    }
+  ],
+  "series": [
+    {
+      "schema": "market-series.v1",
+      "descriptor": {
+        "id": "synthetic:series:0",
+        "instrument_id": "synthetic:instrument:0",
+        "listing_id": "synthetic:listing:0",
+        "provider": "synthetic",
+        "provider_symbol": "EXAMPLE0",
+        "native_currency": "USD",
+        "unit": "share",
+        "price_basis": "raw",
+        "data_mode": "demo",
+        "calendar_id": "synthetic:exchange",
+        "calendar_version": "synthetic-v1",
+        "interval": "session",
+        "revision_semantics": "point_in_time",
+        "source_url": "https://example.invalid/synthetic-prices",
+        "rights": "Invented demonstration data; not observed market prices."
+      },
+      "bars": [
+        {
+          "start": 1704186000,
+          "end": 1704211200,
+          "open": 100.0,
+          "high": 100.0,
+          "low": 100.0,
+          "close": 100.0,
+          "volume": 1,
+          "observed_at": 1704211200,
+          "session_date": "2024-01-02"
+        },
+        {
+          "start": 1704272400,
+          "end": 1704297600,
+          "open": 101.0,
+          "high": 101.0,
+          "low": 101.0,
+          "close": 101.0,
+          "volume": 1,
+          "observed_at": 1704297600,
+          "session_date": "2024-01-03"
+        },
+        {
+          "start": 1704358800,
+          "end": 1704384000,
+          "open": 102.0,
+          "high": 102.0,
+          "low": 102.0,
+          "close": 102.0,
+          "volume": 1,
+          "observed_at": 1704384000,
+          "session_date": "2024-01-04"
+        },
+        {
+          "start": 1704445200,
+          "end": 1704470400,
+          "open": 103.0,
+          "high": 103.0,
+          "low": 103.0,
+          "close": 103.0,
+          "volume": 1,
+          "observed_at": 1704470400,
+          "session_date": "2024-01-05"
+        },
+        {
+          "start": 1704704400,
+          "end": 1704729600,
+          "open": 106.0,
+          "high": 106.0,
+          "low": 106.0,
+          "close": 106.0,
+          "volume": 1,
+          "observed_at": 1704729600,
+          "session_date": "2024-01-08"
+        },
+        {
+          "start": 1704790800,
+          "end": 1704816000,
+          "open": 107.0,
+          "high": 107.0,
+          "low": 107.0,
+          "close": 107.0,
+          "volume": 1,
+          "observed_at": 1704816000,
+          "session_date": "2024-01-09"
+        },
+        {
+          "start": 1704877200,
+          "end": 1704902400,
+          "open": 108.0,
+          "high": 108.0,
+          "low": 108.0,
+          "close": 108.0,
+          "volume": 1,
+          "observed_at": 1704902400,
+          "session_date": "2024-01-10"
+        },
+        {
+          "start": 1704963600,
+          "end": 1704988800,
+          "open": 109.0,
+          "high": 109.0,
+          "low": 109.0,
+          "close": 109.0,
+          "volume": 1,
+          "observed_at": 1704988800,
+          "session_date": "2024-01-11"
+        }
+      ],
+      "actions": []
+    },
+    {
+      "schema": "market-series.v1",
+      "descriptor": {
+        "id": "synthetic:series:1",
+        "instrument_id": "synthetic:instrument:1",
+        "listing_id": "synthetic:listing:1",
+        "provider": "synthetic",
+        "provider_symbol": "EXAMPLE1",
+        "native_currency": "EUR",
+        "unit": "coin",
+        "price_basis": "raw",
+        "data_mode": "demo",
+        "calendar_id": "synthetic:continuous",
+        "calendar_version": "synthetic-v1",
+        "interval": "session",
+        "revision_semantics": "point_in_time",
+        "source_url": "https://example.invalid/synthetic-prices",
+        "rights": "Invented demonstration data; not observed market prices."
+      },
+      "bars": [
+        {
+          "start": 1704153600,
+          "end": 1704240000,
+          "open": 101.0,
+          "high": 101.0,
+          "low": 101.0,
+          "close": 101.0,
+          "volume": 1,
+          "observed_at": 1704240000,
+          "session_date": "2024-01-02"
+        },
+        {
+          "start": 1704240000,
+          "end": 1704326400,
+          "open": 102.0,
+          "high": 102.0,
+          "low": 102.0,
+          "close": 102.0,
+          "volume": 1,
+          "observed_at": 1704326400,
+          "session_date": "2024-01-03"
+        },
+        {
+          "start": 1704326400,
+          "end": 1704412800,
+          "open": 103.0,
+          "high": 103.0,
+          "low": 103.0,
+          "close": 103.0,
+          "volume": 1,
+          "observed_at": 1704412800,
+          "session_date": "2024-01-04"
+        },
+        {
+          "start": 1704412800,
+          "end": 1704499200,
+          "open": 104.0,
+          "high": 104.0,
+          "low": 104.0,
+          "close": 104.0,
+          "volume": 1,
+          "observed_at": 1704499200,
+          "session_date": "2024-01-05"
+        },
+        {
+          "start": 1704499200,
+          "end": 1704585600,
+          "open": 105.0,
+          "high": 105.0,
+          "low": 105.0,
+          "close": 105.0,
+          "volume": 1,
+          "observed_at": 1704585600,
+          "session_date": "2024-01-06"
+        },
+        {
+          "start": 1704585600,
+          "end": 1704672000,
+          "open": 106.0,
+          "high": 106.0,
+          "low": 106.0,
+          "close": 106.0,
+          "volume": 1,
+          "observed_at": 1704672000,
+          "session_date": "2024-01-07"
+        },
+        {
+          "start": 1704672000,
+          "end": 1704758400,
+          "open": 107.0,
+          "high": 107.0,
+          "low": 107.0,
+          "close": 107.0,
+          "volume": 1,
+          "observed_at": 1704758400,
+          "session_date": "2024-01-08"
+        },
+        {
+          "start": 1704758400,
+          "end": 1704844800,
+          "open": 108.0,
+          "high": 108.0,
+          "low": 108.0,
+          "close": 108.0,
+          "volume": 1,
+          "observed_at": 1704844800,
+          "session_date": "2024-01-09"
+        },
+        {
+          "start": 1704844800,
+          "end": 1704931200,
+          "open": 109.0,
+          "high": 109.0,
+          "low": 109.0,
+          "close": 109.0,
+          "volume": 1,
+          "observed_at": 1704931200,
+          "session_date": "2024-01-10"
+        },
+        {
+          "start": 1704931200,
+          "end": 1705017600,
+          "open": 110.0,
+          "high": 110.0,
+          "low": 110.0,
+          "close": 110.0,
+          "volume": 1,
+          "observed_at": 1705017600,
+          "session_date": "2024-01-11"
+        }
+      ],
+      "actions": []
+    },
+    {
+      "schema": "market-series.v1",
+      "descriptor": {
+        "id": "synthetic:series:2",
+        "instrument_id": "synthetic:instrument:2",
+        "listing_id": null,
+        "provider": "synthetic",
+        "provider_symbol": "EXAMPLE2",
+        "native_currency": "USD",
+        "unit": "barrel",
+        "price_basis": "raw",
+        "data_mode": "demo",
+        "calendar_id": "synthetic:publication",
+        "calendar_version": "synthetic-v1",
+        "interval": "reference",
+        "revision_semantics": "point_in_time",
+        "source_url": "https://example.invalid/synthetic-prices",
+        "rights": "Invented demonstration data; not observed market prices."
+      },
+      "bars": [
+        {
+          "start": 1704218400,
+          "end": 1704218400,
+          "open": -20.0,
+          "high": -20.0,
+          "low": -20.0,
+          "close": -20.0,
+          "volume": 1,
+          "observed_at": 1704218400,
+          "session_date": "2024-01-02"
+        },
+        {
+          "start": 1704304800,
+          "end": 1704304800,
+          "open": -19.0,
+          "high": -19.0,
+          "low": -19.0,
+          "close": -19.0,
+          "volume": 1,
+          "observed_at": 1704304800,
+          "session_date": "2024-01-03"
+        },
+        {
+          "start": 1704391200,
+          "end": 1704391200,
+          "open": -18.0,
+          "high": -18.0,
+          "low": -18.0,
+          "close": -18.0,
+          "volume": 1,
+          "observed_at": 1704391200,
+          "session_date": "2024-01-04"
+        },
+        {
+          "start": 1704477600,
+          "end": 1704477600,
+          "open": -17.0,
+          "high": -17.0,
+          "low": -17.0,
+          "close": -17.0,
+          "volume": 1,
+          "observed_at": 1704477600,
+          "session_date": "2024-01-05"
+        },
+        {
+          "start": 1704736800,
+          "end": 1704736800,
+          "open": -14.0,
+          "high": -14.0,
+          "low": -14.0,
+          "close": -14.0,
+          "volume": 1,
+          "observed_at": 1704736800,
+          "session_date": "2024-01-08"
+        },
+        {
+          "start": 1704823200,
+          "end": 1704823200,
+          "open": -13.0,
+          "high": -13.0,
+          "low": -13.0,
+          "close": -13.0,
+          "volume": 1,
+          "observed_at": 1704823200,
+          "session_date": "2024-01-09"
+        },
+        {
+          "start": 1704909600,
+          "end": 1704909600,
+          "open": -12.0,
+          "high": -12.0,
+          "low": -12.0,
+          "close": -12.0,
+          "volume": 1,
+          "observed_at": 1704909600,
+          "session_date": "2024-01-10"
+        },
+        {
+          "start": 1704996000,
+          "end": 1704996000,
+          "open": -11.0,
+          "high": -11.0,
+          "low": -11.0,
+          "close": -11.0,
+          "volume": 1,
+          "observed_at": 1704996000,
+          "session_date": "2024-01-11"
+        }
+      ],
+      "actions": []
+    },
+    {
+      "schema": "market-series.v1",
+      "descriptor": {
+        "id": "synthetic:series:3",
+        "instrument_id": "synthetic:instrument:3",
+        "listing_id": "synthetic:listing:3",
+        "provider": "synthetic",
+        "provider_symbol": "EXAMPLE3",
+        "native_currency": "EUR",
+        "unit": "share",
+        "price_basis": "raw",
+        "data_mode": "demo",
+        "calendar_id": "synthetic:exchange",
+        "calendar_version": "synthetic-v1",
+        "interval": "session",
+        "revision_semantics": "point_in_time",
+        "source_url": "https://example.invalid/synthetic-prices",
+        "rights": "Invented demonstration data; not observed market prices."
+      },
+      "bars": [
+        {
+          "start": 1704186000,
+          "end": 1704211200,
+          "open": 103.0,
+          "high": 103.0,
+          "low": 103.0,
+          "close": 103.0,
+          "volume": 1,
+          "observed_at": 1704211200,
+          "session_date": "2024-01-02"
+        },
+        {
+          "start": 1704272400,
+          "end": 1704297600,
+          "open": 104.0,
+          "high": 104.0,
+          "low": 104.0,
+          "close": 104.0,
+          "volume": 1,
+          "observed_at": 1704297600,
+          "session_date": "2024-01-03"
+        },
+        {
+          "start": 1704358800,
+          "end": 1704384000,
+          "open": 105.0,
+          "high": 105.0,
+          "low": 105.0,
+          "close": 105.0,
+          "volume": 1,
+          "observed_at": 1704384000,
+          "session_date": "2024-01-04"
+        },
+        {
+          "start": 1704445200,
+          "end": 1704470400,
+          "open": 106.0,
+          "high": 106.0,
+          "low": 106.0,
+          "close": 106.0,
+          "volume": 1,
+          "observed_at": 1704470400,
+          "session_date": "2024-01-05"
+        },
+        {
+          "start": 1704704400,
+          "end": 1704729600,
+          "open": 109.0,
+          "high": 109.0,
+          "low": 109.0,
+          "close": 109.0,
+          "volume": 1,
+          "observed_at": 1704729600,
+          "session_date": "2024-01-08"
+        },
+        {
+          "start": 1704790800,
+          "end": 1704816000,
+          "open": 110.0,
+          "high": 110.0,
+          "low": 110.0,
+          "close": 110.0,
+          "volume": 1,
+          "observed_at": 1704816000,
+          "session_date": "2024-01-09"
+        },
+        {
+          "start": 1704877200,
+          "end": 1704902400,
+          "open": 111.0,
+          "high": 111.0,
+          "low": 111.0,
+          "close": 111.0,
+          "volume": 1,
+          "observed_at": 1704902400,
+          "session_date": "2024-01-10"
+        },
+        {
+          "start": 1704963600,
+          "end": 1704988800,
+          "open": 112.0,
+          "high": 112.0,
+          "low": 112.0,
+          "close": 112.0,
+          "volume": 1,
+          "observed_at": 1704988800,
+          "session_date": "2024-01-11"
+        }
+      ],
+      "actions": []
+    },
+    {
+      "schema": "market-series.v1",
+      "descriptor": {
+        "id": "synthetic:series:4",
+        "instrument_id": "synthetic:instrument:4",
+        "listing_id": "synthetic:listing:4",
+        "provider": "synthetic",
+        "provider_symbol": "EXAMPLE4",
+        "native_currency": "USD",
+        "unit": "barrel",
+        "price_basis": "raw",
+        "data_mode": "demo",
+        "calendar_id": "synthetic:exchange",
+        "calendar_version": "synthetic-v1",
+        "interval": "session",
+        "revision_semantics": "point_in_time",
+        "source_url": "https://example.invalid/synthetic-prices",
+        "rights": "Invented demonstration data; not observed market prices."
+      },
+      "bars": [
+        {
+          "start": 1704186000,
+          "end": 1704211200,
+          "open": -20.0,
+          "high": -20.0,
+          "low": -20.0,
+          "close": -20.0,
+          "volume": 1,
+          "observed_at": 1704211200,
+          "session_date": "2024-01-02"
+        },
+        {
+          "start": 1704272400,
+          "end": 1704297600,
+          "open": -19.0,
+          "high": -19.0,
+          "low": -19.0,
+          "close": -19.0,
+          "volume": 1,
+          "observed_at": 1704297600,
+          "session_date": "2024-01-03"
+        },
+        {
+          "start": 1704358800,
+          "end": 1704384000,
+          "open": -18.0,
+          "high": -18.0,
+          "low": -18.0,
+          "close": -18.0,
+          "volume": 1,
+          "observed_at": 1704384000,
+          "session_date": "2024-01-04"
+        },
+        {
+          "start": 1704445200,
+          "end": 1704470400,
+          "open": -17.0,
+          "high": -17.0,
+          "low": -17.0,
+          "close": -17.0,
+          "volume": 1,
+          "observed_at": 1704470400,
+          "session_date": "2024-01-05"
+        },
+        {
+          "start": 1704704400,
+          "end": 1704729600,
+          "open": -14.0,
+          "high": -14.0,
+          "low": -14.0,
+          "close": -14.0,
+          "volume": 1,
+          "observed_at": 1704729600,
+          "session_date": "2024-01-08"
+        },
+        {
+          "start": 1704790800,
+          "end": 1704816000,
+          "open": -13.0,
+          "high": -13.0,
+          "low": -13.0,
+          "close": -13.0,
+          "volume": 1,
+          "observed_at": 1704816000,
+          "session_date": "2024-01-09"
+        },
+        {
+          "start": 1704877200,
+          "end": 1704902400,
+          "open": -12.0,
+          "high": -12.0,
+          "low": -12.0,
+          "close": -12.0,
+          "volume": 1,
+          "observed_at": 1704902400,
+          "session_date": "2024-01-10"
+        },
+        {
+          "start": 1704963600,
+          "end": 1704988800,
+          "open": -11.0,
+          "high": -11.0,
+          "low": -11.0,
+          "close": -11.0,
+          "volume": 1,
+          "observed_at": 1704988800,
+          "session_date": "2024-01-11"
+        }
+      ],
+      "actions": []
+    }
+  ]
+}

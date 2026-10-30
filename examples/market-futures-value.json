@@ -1,0 +1,22 @@
+{
+  "contract": {
+    "expiry": 100,
+    "multiplier": 1000,
+    "unit": "barrel",
+    "settlement": "cash"
+  },
+  "position": {
+    "currency": "USD",
+    "quantity": 1,
+    "entry_price": 10,
+    "entry_at": 1,
+    "mark_price": -37.63,
+    "mark_at": 20,
+    "mark_observed_at": 21,
+    "collateral": 10000,
+    "initial_margin_per_contract": 10000,
+    "maintenance_margin_per_contract": 5000,
+    "fees": 0
+  },
+  "native_currency": "USD"
+}

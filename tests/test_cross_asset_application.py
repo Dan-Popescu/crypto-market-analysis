@@ -46,7 +46,7 @@ class MemoryStore:
         return copy.deepcopy(next((row for row in self.document["calendars"] if
                                    row["id"] == calendar_id and row["version"] == version and row["known_at"] <= as_of), None))
 
-    def read_series(self, series_id, *, as_of, data_mode, start, end, max_rows):
+    def read_series(self, series_id, *, as_of, data_mode, start, end, max_rows, all_vintages=False):
         self.requests.append((series_id, data_mode, as_of, start, end, max_rows))
         result = next((row for row in self.document["series"] if
                        row["descriptor"]["id"] == series_id and row["descriptor"]["data_mode"] == data_mode), None)

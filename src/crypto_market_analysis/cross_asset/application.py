@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 from collections import defaultdict
+from contextlib import nullcontext
 from pathlib import Path
 
 from . import identity, prices, research, sessions
@@ -243,6 +244,12 @@ def market_calendar(database, request: dict, *, as_of: int) -> dict:
 
 
 def _series_inputs(database, request, as_of, extra):
+    store = _store(database)
+    with store.read_session() if hasattr(store, "read_session") else nullcontext(store) as reader:
+        return _series_inputs_from_store(reader, request, as_of, extra)
+
+
+def _series_inputs_from_store(store, request, as_of, extra):
     _fields(request, {"series_id", "data_mode", "currency", "start", "end"} | extra)
     _clock(as_of, "as_of")
     for key in ("series_id", "currency"):
@@ -250,9 +257,9 @@ def _series_inputs(database, request, as_of, extra):
     if request["data_mode"] not in ("live", "import", "demo"):
         raise ValueError("data_mode must be live, import or demo.")
     start, end = _window(request)
-    store = _store(database)
     document = store.read_series(request["series_id"], as_of=as_of, data_mode=request["data_mode"],
-                                 start=start, end=end, max_rows=MAX_ROWS)
+                                 start=start, end=end, max_rows=MAX_ROWS,
+                                 all_vintages=extra == {"plan"})
     if document is None:
         return None
     document = copy.deepcopy(document)

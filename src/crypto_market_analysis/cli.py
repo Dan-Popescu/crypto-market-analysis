@@ -269,6 +269,10 @@ def parser() -> argparse.ArgumentParser:
 
     register_scalability_commands(command)
 
+    from .market_cli import register_market_commands
+
+    register_market_commands(command)
+
     init = command(
         "init", "Create an editable configuration.", "crypto-market-analysis init --file observer.toml"
     )
@@ -628,11 +632,12 @@ def _guard_configured_dataset(args, settings, resources):
     from .analysis_cli import COMMANDS as ANALYSIS_COMMANDS
     from .capacity_cli import COMMANDS
     from .dataset_lock import DatasetBusy, dataset_writer_lock
+    from .market_cli import COMMANDS as MARKET_COMMANDS
     from .scalability_cli import COMMANDS as SCALABILITY_COMMANDS
 
     if getattr(args, "output", None):
         _protect_report_output(args, settings)
-    if (args.command in COMMANDS | ANALYSIS_COMMANDS | SCALABILITY_COMMANDS or args.command in ("serve", "storage-policy", "verify-archive")
+    if (args.command in COMMANDS | ANALYSIS_COMMANDS | SCALABILITY_COMMANDS | MARKET_COMMANDS or args.command in ("serve", "storage-policy", "verify-archive")
             or (args.command in ("maintain", "restore-archive") and not args.apply)):
         return
     try:
@@ -752,8 +757,22 @@ def _run_cli(argv, resources) -> int:
         from .analysis_cli import COMMANDS as ANALYSIS_COMMANDS
         from .analysis_cli import analysis_exit_code, render_analysis_report, run_analysis_command
         from .capacity_cli import COMMANDS, capacity_exit_code, render_capacity_report, run_capacity_command
+        from .market_cli import COMMANDS as MARKET_COMMANDS
+        from .market_cli import run_market_command
         from .scalability_cli import COMMANDS as SCALABILITY_COMMANDS
         from .scalability_cli import run_scalability_command, scalability_exit_code
+
+        if args.command in MARKET_COMMANDS:
+            _protect_report_output(args, settings)
+            request = _json_file(args.request) if args.request else None
+            result = run_market_command(args, settings, request)
+            if args.command == "market-freeze" and args.output:
+                from .scalability_cli import publish_protocol
+
+                publish_protocol(result, Path(args.output))
+            else:
+                write_json(result, args.output)
+            return 1 if result.get("status") in {"unsupported", "invalid_request", "error", "busy"} else 0
 
         if args.command in SCALABILITY_COMMANDS:
             _protect_report_output(args, settings)

@@ -112,7 +112,7 @@ def _snapshot_fingerprint(root, files=None):
 
 
 @contextmanager
-def _query_connection():
+def analytical_query_connection():
     """Bound SQL memory and time without creating spill files in a read path."""
     import duckdb
 
@@ -143,6 +143,11 @@ def _query_connection():
         raise ValueError(f"Analytical query exceeded its {reason} or failed: {exc}. Narrow the assets/time interval or export a smaller slice.") from exc
     finally:
         _QUERY_SLOTS.release()
+
+
+# Compatibility for callers of the original internal name. New analytical
+# owners share this public resource boundary and its process-wide budgets.
+_query_connection = analytical_query_connection
 
 
 @lru_cache(maxsize=4)

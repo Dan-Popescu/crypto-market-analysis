@@ -227,8 +227,6 @@ def _database_check(path: Path, *, named_dataset: bool = False) -> dict:
         if con.execute("PRAGMA foreign_key_check").fetchone():
             raise ValueError("SQLite foreign key check failed.")
         version = con.execute("PRAGMA user_version").fetchone()[0]
-        if version != 2:
-            raise ValueError(f"Unsupported SQLite store schema version: {version}.")
         schema = con.execute("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE sql IS NOT NULL "
                              "ORDER BY type,name").fetchall()
         tables = {row[1] for row in schema if row[0] == "table"}
@@ -236,8 +234,18 @@ def _database_check(path: Path, *, named_dataset: bool = False) -> dict:
             raise ValueError("Named history dataset requires its dataset.json identity and payload lineage.")
         if named_dataset and not {"history_captures", "history_repairs", "history_attempts"} <= tables:
             raise ValueError("Incomplete named history dataset schema.")
-        if set(_BASE_COLUMNS) - {"assessment_journal", "assessment_outcomes"} - tables:
+        legacy_tables = set(_BASE_COLUMNS) - {"assessment_journal", "assessment_outcomes"}
+        native = any(name.startswith("cross_asset_") for name in tables)
+        cross_asset_only = native and not legacy_tables.intersection(tables)
+        if version != (0 if cross_asset_only else 2):
+            raise ValueError(f"Unsupported SQLite store schema version: {version}.")
+        if not cross_asset_only and legacy_tables - tables:
             raise ValueError("SQLite database is missing required market store tables.")
+        market_check = None
+        if native:
+            from .cross_asset.recovery import verify_market_database
+
+            market_check = verify_market_database(con)
         if bool("assessment_journal" in tables) != bool("assessment_outcomes" in tables):
             raise ValueError("Incomplete assessment journal schema.")
         for table, names in _BASE_COLUMNS.items():
@@ -271,7 +279,8 @@ def _database_check(path: Path, *, named_dataset: bool = False) -> dict:
                     raise ValueError("Assessment outcome content or identity mismatch.")
                 outcomes += 1
         return {"user_version": version, "schema_hash": content_hash(schema),
-                "integrity": "ok", "originals_verified": len(originals), "outcomes_verified": outcomes}
+                "integrity": "ok", "originals_verified": len(originals), "outcomes_verified": outcomes,
+                **({"market_verification": market_check} if market_check else {})}
 
 
 def _dataset_identity(path: Path) -> dict:
