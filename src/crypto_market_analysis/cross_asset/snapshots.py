@@ -15,7 +15,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from ..analytical_store import _query_connection
+from ..analytical_store import analytical_query_connection
 from ..evidence import canonical_json, content_hash
 from .storage import MAX_READ_ROWS, _bounded, _epoch, _limit, _mode, _registry_components
 
@@ -223,14 +223,25 @@ class MarketSnapshot:
             files = [str(self.path / part["file"]) for part in self.manifest["files"] if part["table"] == table]
             con.read_parquet(files).create_view(table)
 
+    def _assert_unchanged(self):
+        if self._identities() != self._fingerprint:
+            raise ValueError("Immutable market snapshot changed during query.")
+
     def registry(self, as_of: int) -> dict | None:
         _epoch(as_of, "as_of")
-        with _query_connection() as con:
+        with analytical_query_connection() as con:
             self._views(con)
             if not con.execute("SELECT 1 FROM registries WHERE known_at<=? LIMIT 1", [as_of]).fetchone():
                 return None
-            rows = con.execute("SELECT kind,payload FROM registry_components WHERE known_at<=? AND kind<>'listing_identity' ORDER BY kind,identity LIMIT 150001", [as_of]).fetchall()
-            return _registry_components(rows)
+            cursor = con.execute("SELECT kind,payload FROM registry_components WHERE known_at<=? AND kind<>'listing_identity' ORDER BY kind,identity LIMIT 150001", [as_of])
+
+            def components():
+                while rows := cursor.fetchmany(1000):
+                    yield from rows
+
+            result = _registry_components(components())
+            self._assert_unchanged()
+            return result
 
     def list_series(self, *, as_of: int, data_mode: str, limit: int = 100, cursor: str | None = None) -> dict:
         _epoch(as_of, "as_of")
@@ -238,12 +249,14 @@ class MarketSnapshot:
         _limit(limit, 1000, "limit")
         if cursor is not None and (not isinstance(cursor, str) or len(cursor) > 256):
             raise ValueError("cursor must be a bounded series ID.")
-        with _query_connection() as con:
+        with analytical_query_connection() as con:
             self._views(con)
             rows = con.execute("SELECT id,payload FROM series s WHERE data_mode=? AND EXISTS "
                                "(SELECT 1 FROM series_imports i WHERE i.series_id=s.id AND i.known_at<=?) AND id>? ORDER BY id LIMIT ?", [data_mode, as_of, cursor or "", limit + 1]).fetchall()
-            return _bounded({"schema": "market-series-list.v1", "series": [json.loads(row[1]) for row in rows[:limit]],
-                             "next_cursor": rows[limit - 1][0] if len(rows) > limit else None})
+            result = _bounded({"schema": "market-series-list.v1", "series": [json.loads(row[1]) for row in rows[:limit]],
+                               "next_cursor": rows[limit - 1][0] if len(rows) > limit else None})
+            self._assert_unchanged()
+            return result
 
     def calendar(self, calendar_id: str, version: str | None = None, *, as_of: int) -> dict | None:
         _epoch(as_of, "as_of")
@@ -251,14 +264,69 @@ class MarketSnapshot:
             raise ValueError("calendar_id must be a bounded nonempty string.")
         if version is not None and (not isinstance(version, str) or not version or len(version) > 256):
             raise ValueError("version must be a bounded nonempty string.")
-        with _query_connection() as con:
+        with analytical_query_connection() as con:
             self._views(con)
             conditions, values = ["id=?", "known_at<=?"], [calendar_id, as_of]
             if version is not None:
                 conditions.append("version=?")
                 values.append(version)
             row = con.execute("SELECT payload FROM calendars WHERE " + " AND ".join(conditions) + " ORDER BY known_at DESC,version DESC LIMIT 1", values).fetchone()
+            self._assert_unchanged()
             return _bounded(json.loads(row[0])) if row else None
+
+    def fleet_summary(self, series_ids: list[str], *, as_of: int, data_mode: str, start: int,
+                      end: int, max_rows: int = 1_000_000) -> dict:
+        """Summarize native series in one bounded SQL query, with no coverage claim.
+
+        Each immutable descriptor pins its class-independent native dimensions.
+        No currencies, bases, calendars, listings or instruments are combined.
+        Negative/zero prices retain absolute changes and disable simple returns.
+        """
+        _epoch(as_of, "as_of")
+        _epoch(start, "start")
+        _epoch(end, "end")
+        _mode(data_mode)
+        _limit(max_rows, MAX_SNAPSHOT_ROWS, "max_rows")
+        if start >= end:
+            raise ValueError("Fleet start must precede end.")
+        if (not isinstance(series_ids, list) or not 1 <= len(series_ids) <= 1000
+                or any(not isinstance(sid, str) or not sid or len(sid) > 256 for sid in series_ids)):
+            raise ValueError("Fleet requires 1..1000 bounded native series IDs.")
+        identifiers = sorted(set(series_ids))
+        query = """WITH eligible AS (
+          SELECT s.* FROM series s WHERE s.id IN (""" + ",".join("?" for _ in identifiers) + """)
+          AND s.data_mode=? AND EXISTS (SELECT 1 FROM series_imports i WHERE i.series_id=s.id AND i.known_at<=?)
+        ), latest AS (
+          SELECT b.series_id,b.start,b."end",CAST(json_extract(b.payload,'$.close') AS DOUBLE) AS close
+          FROM bars b INNER JOIN eligible s ON b.series_id=s.id
+          WHERE b.known_at<=? AND b.start>=? AND b."end"<=?
+          QUALIFY ROW_NUMBER() OVER (PARTITION BY b.series_id,b.start,b."end" ORDER BY b.known_at DESC,b.observed_at DESC)=1
+        ), summary AS (
+          SELECT series_id,COUNT(*) AS rows,MIN(start) AS first_start,MAX("end") AS last_end,
+                 arg_min(close,start) AS first_close,arg_max(close,start) AS last_close,MIN(close) AS minimum_close
+          FROM latest GROUP BY series_id
+        ) SELECT e.id,e.payload,COALESCE(m.rows,0),m.first_start,m.last_end,m.first_close,m.last_close,m.minimum_close
+          FROM eligible e LEFT JOIN summary m ON e.id=m.series_id ORDER BY e.id"""
+        with analytical_query_connection() as con:
+            self._views(con)
+            rows = con.execute(query, [*identifiers, data_mode, as_of, as_of, start, end]).fetchall()
+            total = sum(row[2] for row in rows)
+            if total > max_rows:
+                raise ValueError("Fleet exceeds selected native row budget; narrow the interval.")
+            series = []
+            for sid, payload, count, first_start, last_end, first_close, last_close, minimum in rows:
+                positive = count > 0 and minimum > 0
+                series.append({"series_id": sid, "descriptor": json.loads(payload), "rows": count,
+                               "first_start": first_start, "last_end": last_end,
+                               "first_close": first_close, "last_close": last_close,
+                               "absolute_change": last_close - first_close if count else None,
+                               "simple_return": last_close / first_close - 1 if positive else None,
+                               "simple_return_reason": None if positive else "no_observations" if count == 0 else "nonpositive_native_prices"})
+            self._assert_unchanged()
+            return _bounded({"schema": "market-fleet-summary.v1", "as_of": as_of, "data_mode": data_mode,
+                             "start": start, "end": end, "total_rows": total, "series": series,
+                             "missing_series_ids": sorted(set(identifiers) - {row[0] for row in rows}),
+                             "coverage_note": "Observed native intervals only; calendar coverage and live acceptance are separate evidence."})
 
     def read_series(self, series_id: str, *, as_of: int, data_mode: str, start: int | None = None,
                     end: int | None = None, max_rows: int = 10_000) -> dict | None:
@@ -272,7 +340,7 @@ class MarketSnapshot:
                 _epoch(value, name)
         if start is not None and end is not None and start >= end:
             raise ValueError("start must precede end.")
-        with _query_connection() as con:
+        with analytical_query_connection() as con:
             self._views(con)
             row = con.execute("SELECT payload,hash,registry_hash FROM series s WHERE id=? AND data_mode=? AND EXISTS "
                               "(SELECT 1 FROM series_imports i WHERE i.series_id=s.id AND i.known_at<=?)", [series_id, data_mode, as_of]).fetchone()
@@ -298,6 +366,5 @@ class MarketSnapshot:
                       "storage_provenance": {"descriptor_hash": row[1], "registry_hash": row[2],
                                              "receipt_evidence": "locally_witnessed" if data_mode == "live" else "self_declared_history",
                                              "bars": [receipt(item) for item in rows], "actions": [receipt(item) for item in actions]}}
-            if self._identities() != self._fingerprint:
-                raise ValueError("Immutable market snapshot changed during query.")
+            self._assert_unchanged()
             return _bounded(result)

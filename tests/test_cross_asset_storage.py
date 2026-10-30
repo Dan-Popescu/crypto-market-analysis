@@ -246,3 +246,27 @@ def test_actions_share_combined_row_budget_and_are_cutoff_aware(tmp_path):
     assert snapshot.read_series("reference-raw", as_of=200, data_mode="import") == store.read_series("reference-raw", as_of=200, data_mode="import")
     with pytest.raises(ValueError, match="row budget"):
         snapshot.read_series("reference-raw", as_of=200, data_mode="import", max_rows=1)
+
+
+def test_fleet_summary_preserves_native_dimensions_and_negative_admissibility(tmp_path):
+    store = writer(tmp_path)
+    negative = bundle(sid="negative")
+    store.import_bundle(negative, received_at=200)
+    positive = bundle(sid="positive")
+    positive["series"][0]["descriptor"]["native_currency"] = "EUR"
+    positive["series"][0]["descriptor"]["unit"] = "EUR/barrel"
+    positive["series"][0]["bars"][0].update(open=20, high=30, low=10, close=25)
+    store.import_bundle(positive, received_at=200)
+    export_market_snapshot(store, tmp_path / "fleet")
+    snapshot = MarketSnapshot(tmp_path / "fleet")
+    result = snapshot.fleet_summary(["positive", "negative", "absent"], as_of=200, data_mode="import", start=100, end=130)
+    assert result["total_rows"] == 2 and result["missing_series_ids"] == ["absent"]
+    by_id = {row["series_id"]: row for row in result["series"]}
+    assert by_id["negative"]["descriptor"]["native_currency"] == "USD"
+    assert by_id["negative"]["first_close"] == -15
+    assert by_id["negative"]["simple_return"] is None
+    assert by_id["negative"]["simple_return_reason"] == "nonpositive_native_prices"
+    assert by_id["positive"]["descriptor"]["native_currency"] == "EUR"
+    assert by_id["positive"]["simple_return"] == 0
+    with pytest.raises(ValueError, match="row budget"):
+        snapshot.fleet_summary(["positive", "negative"], as_of=200, data_mode="import", start=100, end=130, max_rows=1)
