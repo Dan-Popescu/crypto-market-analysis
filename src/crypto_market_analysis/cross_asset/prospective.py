@@ -291,12 +291,14 @@ def _persist_assessment(database, key, request_hash, payload):
 def evaluate_market_assessment(database, request, *, as_of):
     """Read one fixed target, excluding late receipts, splits and unmatched lineage."""
     object_fields(request, {"assessment_id"}, set(), "evaluation request")
-    if not isinstance(request["assessment_id"], str) or len(request["assessment_id"]) != 64:
+    if (not isinstance(request["assessment_id"], str) or len(request["assessment_id"]) != 64
+            or any(character not in "0123456789abcdef" for character in request["assessment_id"])):
         raise ValueError("assessment_id must be a SHA256 identifier")
     _clock(as_of, "as_of")
     assessment = _stored(database, assessment_id=request["assessment_id"])
     if assessment is None:
-        raise ValueError("Assessment does not exist")
+        return {"schema": "market-outcome.v1", "status": "missing", "assessment_id": request["assessment_id"],
+                "as_of": as_of, "read_only": True, "reason": "Assessment does not exist at this store."}
     if as_of < assessment["issued_at"]:
         raise ValueError("Evaluation cutoff precedes issuance")
     declaration = _protocol(assessment["protocol"])["declaration"]

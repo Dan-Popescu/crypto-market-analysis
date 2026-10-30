@@ -98,10 +98,13 @@ class _SeriesIdentity:
         self.instruments = {row["id"]: row for row in self.registry["instruments"]}
 
     def resolve(self, descriptor, at, cutoff):
-        resolved = self.resolver.resolve_alias(
-            provider=descriptor["provider"], symbol=descriptor["provider_symbol"],
-            effective_at=at, as_of=cutoff, listing_id=descriptor["listing_id"],
-        )
+        try:
+            resolved = self.resolver.resolve_alias(
+                provider=descriptor["provider"], symbol=descriptor["provider_symbol"],
+                effective_at=at, as_of=cutoff, listing_id=descriptor["listing_id"],
+            )
+        except identity.IdentityError as exc:
+            raise ValueError("Series provider alias is unknown or ambiguous at the observation cutoff.") from exc
         alias, listing = resolved["alias"], resolved["listing"]
         if (alias["instrument_id"], alias["listing_id"]) != (descriptor["instrument_id"], descriptor["listing_id"]):
             raise ValueError("Series descriptor does not match its resolved provider alias.")
