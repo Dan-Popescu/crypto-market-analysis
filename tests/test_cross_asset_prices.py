@@ -162,6 +162,7 @@ def test_split_invariance_for_raw_cash_funded_holdings():
 
 def test_dividend_entitlement_payment_and_source_declared_completeness():
     document = series((100, 50, 49))
+    document["bars"][-1].update(end=26, observed_at=26)
     document["actions"] = [split(), dividend()]
     document["descriptor"]["action_coverage"] = {
         "start": 0, "end": 40, "kinds": ["split", "cash_dividend"], "status": "declared_complete",
@@ -265,3 +266,40 @@ def test_futures_and_negative_spot_fills_cannot_use_cashplan():
         simulate(series((-1, 1, 1)))
     with pytest.raises(ValueError, match="positive valuation"):
         simulate(series((100, 1, 0)))
+
+
+def test_reference_publication_points_are_admissible_but_not_traded_intervals():
+    document = series((1, 2), form_interval="reference")
+    for row in document["bars"]:
+        row["start"] = row["end"]
+    assert analyze_series(document, as_of=20)["simple_return"] == 1
+    document["descriptor"]["interval"] = "session"
+    with pytest.raises(ValueError, match="end must follow"):
+        validate_series(document)
+
+
+@pytest.mark.parametrize("split_id,dividend_id", [("a", "z"), ("z", "a")])
+def test_same_time_split_and_dividend_cannot_choose_entitlement_from_action_id(split_id, dividend_id):
+    document = series((100, 50, 49))
+    document["actions"] = [{**split(at=15), "id": split_id},
+                           {**dividend(at=15, observed=14), "id": dividend_id}]
+    with pytest.raises(ValueError, match="explicit dividend amount basis"):
+        simulate(document)
+
+
+@pytest.mark.parametrize("action", [split(), dividend(at=15, observed=14)])
+def test_stale_pre_action_price_cannot_double_cash_wealth(action):
+    document = series((100,))
+    document["actions"] = [action]
+    with pytest.raises(ValueError, match="post-action price mark"):
+        simulate(document, as_of=20)
+
+
+def test_native_vintages_and_plan_events_are_bounded_before_expensive_work():
+    document = series((1,))
+    with pytest.raises(ValueError, match="100000 vintage limit"):
+        validate_series({**document, "bars": document["bars"] * 100_001})
+    with pytest.raises(ValueError, match="1000 vintage limit"):
+        validate_series({**document, "actions": [split()] * 1_001})
+    with pytest.raises(ValueError, match="2000 entry limit"):
+        simulate(document, plan(purchases=[{"at": 10, "cash_amount": 0}] * 2_001))

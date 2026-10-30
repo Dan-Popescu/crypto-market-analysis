@@ -12,12 +12,13 @@ import statistics
 from typing import Any
 
 from .prices import (
-    actions_as_of,
-    bars_as_of,
+    _actions_as_of_validated,
+    _bars_as_of_validated,
     currency,
     effective_known_at,
     number,
     object_fields,
+    receipt_clocks,
     text_field,
     timestamp,
     validate_series,
@@ -74,7 +75,7 @@ def analyze_series(
     """
     series = validate_series(series)
     annualization = _annualization(annualization)
-    bars = bars_as_of(series, as_of, start=start, end=end)
+    bars = _bars_as_of_validated(series, as_of, start=start, end=end)
     descriptor = series["descriptor"]
     evidence, limitations = _evidence(descriptor, series.get("storage_provenance"))
     closes = [bar["close"] for bar in bars]
@@ -144,6 +145,8 @@ def _plan_request(request: Any) -> dict:
     for field, amount_key in (("deposits", "amount"), ("purchases", "cash_amount")):
         if not isinstance(request[field], list):
             raise ValueError(f"cash plan.{field} must be an array")
+        if len(request[field]) > 2_000:
+            raise ValueError(f"cash plan.{field} exceeds the bounded 2000 entry limit")
         seen: set[int] = set()
         for row in request[field]:
             object_fields(row, {"at", amount_key}, set(), f"cash plan.{field} entry")
@@ -197,7 +200,7 @@ def simulate_cash_plan(series: Any, request: Any, *, as_of: int, instrument: dic
     _cash_instrument(instrument, descriptor)
     if request["currency"] != descriptor["native_currency"]:
         raise ValueError("cash plan currency must match native currency; no implicit FX conversion")
-    bars = bars_as_of(series, as_of)
+    bars = _bars_as_of_validated(series, as_of)
     if not bars:
         raise ValueError("cash plan has no closed price known at as_of")
     first = min([bars[0]["start"], *(p["at"] for p in request["purchases"]), *(d["at"] for d in request["deposits"])])
@@ -217,15 +220,26 @@ def simulate_cash_plan(series: Any, request: Any, *, as_of: int, instrument: dic
     receivables: dict[str, float] = {}
     fills: list[dict] = []
     events: list[tuple[int, int, str, dict]] = []
+    action_kinds: dict[int, set[str]] = {}
+    applied_action_times: list[int] = []
+    bar_clocks = receipt_clocks(series, "bars")
+    action_clocks = receipt_clocks(series, "actions")
+    fill_bars: dict[int, dict] = {}
+    # Each exact close has its own purchase cutoff. Index once: historical fills
+    # cannot use corrections received after that close, even at a later valuation.
+    for candidate in series["bars"]:
+        if effective_known_at(series, candidate, "bars", receipt_index=bar_clocks) <= candidate["end"]:
+            fill_bars[candidate["end"]] = candidate
     for deposit in request["deposits"]:
         if deposit["at"] <= as_of:
             events.append((deposit["at"], 0, "deposit", deposit))
     for purchase in request["purchases"]:
         if purchase["at"] <= as_of:
             events.append((purchase["at"], 3, "purchase", purchase))
-    for action in actions_as_of(series, as_of):
+    for action in _actions_as_of_validated(series, as_of):
         if action["effective_at"] <= as_of:
             events.append((action["effective_at"], 1, "action", action))
+            action_kinds.setdefault(action["effective_at"], set()).add(action["kind"])
             if action["kind"] == "cash_dividend" and "pay_at" in action and action["pay_at"] <= as_of:
                 events.append((action["pay_at"], 2, "payment", action))
     # Stable order by explicit identity avoids input order affecting same-time actions.
@@ -235,10 +249,10 @@ def simulate_cash_plan(series: Any, request: Any, *, as_of: int, instrument: dic
             cash += event["amount"]
             contributed += event["amount"]
         elif kind == "purchase":
-            eligible = [b for b in bars_as_of(series, at) if b["end"] == at]
-            if len(eligible) != 1:
+            eligible = fill_bars.get(at)
+            if eligible is None:
                 raise ValueError("purchase must match a closed bar end with a vintage already received at that instant")
-            price = eligible[0]["close"]
+            price = eligible["close"]
             if price <= 0:
                 raise ValueError("cash plan requires strictly positive purchase prices")
             amount = event["cash_amount"]
@@ -251,12 +265,15 @@ def simulate_cash_plan(series: Any, request: Any, *, as_of: int, instrument: dic
             units += acquired
             cash -= cost
             fees += fee
-            fills.append({"at": at, "price": price, "units": acquired, "cash_amount": amount, "fee": fee if fees_known else None, "bar_observed_at": eligible[0]["observed_at"]})
+            fills.append({"at": at, "price": price, "units": acquired, "cash_amount": amount, "fee": fee if fees_known else None, "bar_observed_at": eligible["observed_at"]})
         elif kind == "action":
             if units == 0:
                 continue
-            if effective_known_at(series, event, "actions") > at:
+            if action_kinds[at] == {"split", "cash_dividend"}:
+                raise ValueError("simultaneous split and cash dividend require an explicit dividend amount basis; unsupported ambiguous entitlement")
+            if effective_known_at(series, event, "actions", receipt_index=action_clocks) > at:
                 raise ValueError("late-known corporate action affects held units; historical execution cannot be reconstructed point in time")
+            applied_action_times.append(at)
             if event["kind"] == "split":
                 units *= event["ratio"]
             else:
@@ -272,6 +289,8 @@ def simulate_cash_plan(series: Any, request: Any, *, as_of: int, instrument: dic
         for name, value in (("cash", cash), ("units", units), ("contributions", contributed), ("fees", fees), ("dividends", dividends)):
             _finite(value, name)
     mark = bars[-1]
+    if applied_action_times and mark["end"] <= max(applied_action_times):
+        raise ValueError("cash wealth requires a post-action price mark; a stale pre-action close cannot value transformed holdings or dividend entitlement")
     if mark["close"] <= 0:
         raise ValueError("cash plan requires a strictly positive valuation price")
     position = _finite(units * mark["close"], "marked position")

@@ -18,6 +18,8 @@ from ..evidence import content_hash
 SCHEMA = "market-series.v1"
 BASES = {"raw", "split_adjusted", "total_return", "continuous"}
 ACTION_KINDS = {"split", "cash_dividend"}
+MAX_BAR_VINTAGES = 100_000
+MAX_ACTION_VINTAGES = 1_000
 
 
 def object_fields(value: Any, required: set[str], optional: set[str], name: str) -> dict:
@@ -123,12 +125,12 @@ def _descriptor(value: Any) -> dict:
     return result
 
 
-def _bar(value: Any) -> dict:
+def _bar(value: Any, *, allow_reference_point: bool = False) -> dict:
     value = object_fields(value, {"start", "end", "open", "high", "low", "close", "observed_at"}, {"volume", "session_date"}, "bar")
     result = dict(value)
     for key in ("start", "end", "observed_at"):
         timestamp(value[key], f"bar.{key}")
-    if value["end"] <= value["start"]:
+    if value["end"] < value["start"] or (value["end"] == value["start"] and not allow_reference_point):
         raise ValueError("bar.end must follow start")
     if value["observed_at"] < value["end"]:
         raise ValueError("closed bar cannot be observed before its end")
@@ -244,7 +246,13 @@ def validate_series(document: Any) -> dict:
     if document["schema"] != SCHEMA:
         raise ValueError(f"series.schema must be {SCHEMA}")
     descriptor = _descriptor(document["descriptor"])
-    bars = _vintages(document["bars"], _bar, ("start", "end", "observed_at"), "bars")
+    for field, limit in (("bars", MAX_BAR_VINTAGES), ("actions", MAX_ACTION_VINTAGES)):
+        if isinstance(document.get(field), list) and len(document[field]) > limit:
+            raise ValueError(f"series.{field} exceeds the bounded {limit} vintage limit")
+    bars = _vintages(
+        document["bars"], lambda row: _bar(row, allow_reference_point=descriptor["interval"] == "reference"),
+        ("start", "end", "observed_at"), "bars",
+    )
     intervals = sorted({(b["start"], b["end"]) for b in bars})
     if any(left[1] > right[0] for left, right in zip(intervals, intervals[1:], strict=False)):
         raise ValueError("distinct native bar intervals overlap")
@@ -276,20 +284,26 @@ def validate_series(document: Any) -> dict:
     return result
 
 
-def effective_known_at(series: dict, row: dict, field: str) -> int:
+def receipt_clocks(series: dict, field: str) -> dict[str, int]:
+    return {entry["hash"]: entry["effective_known_at"] for entry in series.get("storage_provenance", {}).get(field, [])}
+
+
+def effective_known_at(series: dict, row: dict, field: str, *, receipt_index: dict | None = None) -> int:
     provenance = series.get("storage_provenance")
     if provenance is None:
         return row["observed_at"]
-    row_hash = content_hash(row)
-    for entry in provenance[field]:
-        if entry["hash"] == row_hash:
-            return max(row["observed_at"], entry["effective_known_at"])
-    raise ValueError("row lacks storage receipt provenance")
+    receipt_index = receipt_clocks(series, field) if receipt_index is None else receipt_index
+    if (known_at := receipt_index.get(content_hash(row))) is None:
+        raise ValueError("row lacks storage receipt provenance")
+    return max(row["observed_at"], known_at)
 
 
 def bars_as_of(series: Any, as_of: int, *, start: int | None = None, end: int | None = None) -> list[dict]:
     """Latest receipt per closed native interval entirely within [start, end]."""
-    series = validate_series(series)
+    return _bars_as_of_validated(validate_series(series), as_of, start=start, end=end)
+
+
+def _bars_as_of_validated(series: dict, as_of: int, *, start: int | None = None, end: int | None = None) -> list[dict]:
     timestamp(as_of, "as_of")
     if start is not None:
         timestamp(start, "start")
@@ -298,9 +312,9 @@ def bars_as_of(series: Any, as_of: int, *, start: int | None = None, end: int | 
     if start is not None and end is not None and start >= end:
         raise ValueError("end must follow start")
     selected: dict[tuple, dict] = {}
-    clocks = {entry["hash"]: entry["effective_known_at"] for entry in series.get("storage_provenance", {}).get("bars", [])}
+    clocks = receipt_clocks(series, "bars")
     for bar in series["bars"]:
-        known_at = max(bar["observed_at"], clocks.get(content_hash(bar), bar["observed_at"]))
+        known_at = effective_known_at(series, bar, "bars", receipt_index=clocks)
         if known_at > as_of or bar["end"] > as_of:
             continue
         if start is not None and bar["start"] < start:
@@ -313,12 +327,15 @@ def bars_as_of(series: Any, as_of: int, *, start: int | None = None, end: int | 
 
 def actions_as_of(series: Any, as_of: int) -> list[dict]:
     """Latest known revision per action; future-effective actions remain explicit."""
-    series = validate_series(series)
+    return _actions_as_of_validated(validate_series(series), as_of)
+
+
+def _actions_as_of_validated(series: dict, as_of: int) -> list[dict]:
     timestamp(as_of, "as_of")
     selected: dict[str, dict] = {}
-    clocks = {entry["hash"]: entry["effective_known_at"] for entry in series.get("storage_provenance", {}).get("actions", [])}
+    clocks = receipt_clocks(series, "actions")
     for action in series["actions"]:
-        known_at = max(action["observed_at"], clocks.get(content_hash(action), action["observed_at"]))
+        known_at = effective_known_at(series, action, "actions", receipt_index=clocks)
         if known_at <= as_of:
             selected[action["id"]] = action
     return sorted(selected.values(), key=lambda a: (a["effective_at"], a["id"]))
