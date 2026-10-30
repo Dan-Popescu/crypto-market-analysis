@@ -18,7 +18,7 @@ import time
 from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
-from threading import Event, Timer
+from threading import BoundedSemaphore, Event, Timer
 
 from .evidence import canonical_json
 from .models import Candle
@@ -35,7 +35,10 @@ MAX_PARTITIONS = 4096
 MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_QUERY_ROWS = 100_000
 _QUERY_SECONDS = 30
+_VERIFICATION_SECONDS = 30
 _QUERY_MEMORY = "256MB"
+_QUERY_SLOTS = BoundedSemaphore(2)
+_VERIFICATION_SLOTS = BoundedSemaphore(1)
 
 
 def _canonical(value):
@@ -113,6 +116,8 @@ def _query_connection():
     """Bound SQL memory and time without creating spill files in a read path."""
     import duckdb
 
+    if not _QUERY_SLOTS.acquire(blocking=False):
+        raise ValueError("Analytical read capacity is busy; retry after another fleet query finishes.")
     expired = Event()
     try:
         with duckdb.connect(config={"threads": "2", "memory_limit": _QUERY_MEMORY, "temp_directory": ""}) as con:
@@ -136,14 +141,21 @@ def _query_connection():
     except duckdb.Error as exc:
         reason = f"{_QUERY_SECONDS}-second deadline" if expired.is_set() else "read-only SQL budget"
         raise ValueError(f"Analytical query exceeded its {reason} or failed: {exc}. Narrow the assets/time interval or export a smaller slice.") from exc
+    finally:
+        _QUERY_SLOTS.release()
 
 
 @lru_cache(maxsize=4)
 def _verified_snapshot(path, fingerprint):
-    store = AnalyticalCandleStore(path)
-    if store._fingerprint != fingerprint:
-        raise ValueError("Candle snapshot changed while it was being opened.")
-    return store
+    if not _VERIFICATION_SLOTS.acquire(blocking=False):
+        raise ValueError("Snapshot verification is busy; retry after the current verification finishes.")
+    try:
+        store = AnalyticalCandleStore(path)
+        if store._fingerprint != fingerprint:
+            raise ValueError("Candle snapshot changed while it was being opened.")
+        return store
+    finally:
+        _VERIFICATION_SLOTS.release()
 
 
 def open_analytical_snapshot(snapshot_directory: Path | str) -> AnalyticalCandleStore:
@@ -337,7 +349,14 @@ class AnalyticalCandleStore:
     def __init__(self, snapshot_directory: Path | str):
         import pyarrow.parquet as pq
 
+        deadline = time.monotonic() + _VERIFICATION_SECONDS
+
+        def check_verification():
+            if time.monotonic() >= deadline:
+                raise ValueError("Candle snapshot exceeds its verification deadline; export a narrower slice.")
+
         root = Path(snapshot_directory).expanduser().absolute()
+        check_verification()
         manifest, files = _read_manifest(root)
         fingerprint = _snapshot_fingerprint(root, files)
         self.paths = [root / part["file"] for part in files]
@@ -345,18 +364,20 @@ class AnalyticalCandleStore:
         try:
             content_hash = hashlib.sha256()
             for part, path in zip(files, self.paths, strict=True):
-                if path.stat().st_size != part.get("file_bytes") or _file_hash(path) != part.get("file_sha256"):
+                if path.stat().st_size != part.get("file_bytes") or _file_hash(path, check_verification) != part.get("file_sha256"):
                     raise ValueError("Candle snapshot file checksum mismatch.")
                 parquet = pq.ParquetFile(path)
                 if parquet.schema_arrow != _schema() or parquet.metadata.num_rows != part["rows"]:
                     raise ValueError("Candle snapshot schema or row count mismatch.")
                 for batch in parquet.iter_batches(batch_size=64):
+                    check_verification()
                     for row in batch.to_pylist():
                         content_hash.update((_canonical(row) + "\n").encode())
             if content_hash.hexdigest() != manifest.get("content_sha256"):
                 raise ValueError("Candle snapshot source-content checksum mismatch.")
         except (OSError, json.JSONDecodeError) as exc:
             raise ValueError(f"Candle snapshot is missing or unreadable: {exc}") from exc
+        check_verification()
         self.manifest = manifest
         self._files = files
         if _snapshot_fingerprint(root, files) != fingerprint:
@@ -451,6 +472,8 @@ class AnalyticalCandleStore:
                 "snapshot": {**{key: self.manifest[key] for key in ("format", "created_at", "rows", "sqlite_max_id", "file_sha256", "content_sha256")},
                              "selection": self.manifest.get("selection"), "partition_count": len(self.paths)},
                 "expires_at": None,
+                "resource_limits": {"query_seconds": _QUERY_SECONDS, "query_memory": _QUERY_MEMORY,
+                                    "concurrent_queries_per_process": 2, "cold_verification_seconds": _VERIFICATION_SECONDS},
                 "coverage_note": "Missing hours refer to this artifact within the requested interval; consult snapshot.selection for export scope. Absent assets remain unknown. Immutable candle export, not live or full-dossier coverage."}
 
 def snapshot_path(settings, name):

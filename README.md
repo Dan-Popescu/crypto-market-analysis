@@ -1,6 +1,13 @@
 # Crypto Market Analysis
 
-A local, read-only BTC/ETH research tool for gradual spot purchases over weeks and months. It provides historical context, experimental purchase windows, hypothetical purchase-plan comparisons, chronological evaluation and optional 4/8-hour vigilance. CLI and MCP share the same calculations. It never executes orders, signs wallet operations or transfers funds. Collection, calculations and charts require no language model or paid data API.
+A local, read-only multi-asset research tool with BTC/ETH defaults for gradual spot purchases over weeks and months. It provides historical context, experimental purchase windows, hypothetical purchase-plan comparisons, chronological evaluation and optional 4/8-hour vigilance. CLI and MCP share the same calculations. It never executes orders, signs wallet operations or transfers funds. Collection, calculations and charts require no language model or paid data API.
+
+Version 0.9.0 adds [bounded multi-asset operation](docs/SCALABILITY.md) for an explicit
+100-asset universe, extensible to 1,000: fair collection continuation, per-source
+cost/health evidence, frozen prospective validation, compact evidence and verified
+partitioned Parquet/DuckDB fleet research. BTC/ETH remain defaults. The server now
+exposes 53 read-only MCP tools. [Measured storage trade-offs](docs/adr/0001-storage-for-scaled-research.md)
+retain SQLite for the local write/journal role after an actual Docker PostgreSQL comparison.
 
 Version 0.8.0 adds [actionable analytical workflows](docs/ANALYSIS_WORKFLOWS.md):
 changes between known-at dossiers, claim-level readiness and next inputs, actual

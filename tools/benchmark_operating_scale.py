@@ -7,6 +7,7 @@ this fixture and machine; they establish neither provider support nor uptime.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import resource
@@ -85,7 +86,11 @@ def main():
                                  "--runs", str(args.runs)], capture_output=True, text=True,
                                 timeout=300, check=True, env={**os.environ, "PYTHONHASHSEED": "0"})
         rows.append(json.loads(result.stdout))
-    body = json.dumps({"schema_version": 1, "cases": rows,
+    checkout = Path(__file__).resolve().parents[1]
+    revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=checkout,
+                              capture_output=True, text=True, check=False).stdout.strip() or None
+    script_hash = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    body = json.dumps({"source_revision": revision, "harness_sha256": script_hash, "schema_version": 1, "cases": rows,
         "scope": "isolated synthetic fixture on this machine; no production latency or multiweek uptime claim"}, indent=2)+"\n"
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

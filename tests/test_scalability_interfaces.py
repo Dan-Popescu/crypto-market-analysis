@@ -123,3 +123,24 @@ def test_registered_scalability_examples_and_thousand_asset_fleet_are_read_only(
 
     asyncio.run(check())
     assert (tmp_path / "observer.sqlite").read_bytes() == before
+
+
+def test_operating_session_preserves_unrelated_staging_files_and_rejects_symlinks(tmp_path, monkeypatch):
+    from crypto_market_analysis import operating_acceptance
+
+    settings = Settings(data_dir=tmp_path / "data", venues=["kraken"], assets=["BTC"], quote_currencies=["EUR"])
+    directory = settings.data_dir / "operating_acceptance" / "bounded"
+    directory.mkdir(parents=True)
+    unrelated = directory / "manifest.tmp"
+    unrelated.write_text("unrelated existing content")
+    monkeypatch.setattr(operating_acceptance, "collect", lambda *a, **k: {"status": "empty", "reports": []})
+    result = operating_acceptance.run_operating_acceptance(settings,
+        {"session_id": "bounded", "refresh": True, "max_cycles": 1, "max_duration_seconds": 2}, clients=object())
+    assert result["completed_this_invocation"] == 1
+    assert unrelated.read_text() == "unrelated existing content"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (directory.parent / "linked").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="symbolic"):
+        operating_acceptance.run_operating_acceptance(settings, {"session_id": "linked", "refresh": True}, clients=object())
+    assert list(outside.iterdir()) == []

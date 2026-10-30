@@ -144,3 +144,15 @@ Version 0.5.0 stored tools take a bounded `request` and optional integer `as_of`
 Explicit sources, native quote and data mode determine each read. They do not
 fetch data, repair gaps, issue assessments or expose paths. Capture and the local
 workflow remain explicit CLI operations; see [local data connections](DATA_CONNECTIONS.md).
+
+
+Version 0.9.0 adds seven read-only tools: get_collection_capacity,
+get_operating_health, get_operating_costs, get_operating_acceptance,
+get_prospective_validation, get_analytical_snapshot_status and get_analytical_fleet.
+Use get_request_schema for their nested requests and executable examples.
+Configured asset universes can contain 1–1000 canonical codes; actual source support
+and semantic instrument identity remain separate. Large dossier/readiness requests
+can use evidence_mode references. Those raw-record omissions are deliberate and
+are not claimed to be retrievable through frozen result paging. Operating capture,
+protocol freezing and analytical export remain explicit local CLI writes. Fleet
+snapshots are immutable candle evidence, not current live/full-dossier freshness.

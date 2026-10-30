@@ -124,6 +124,25 @@ def test_symlinked_snapshot_rejected(tmp_path):
         AnalyticalCandleStore(alias)
 
 
+def test_cold_verification_has_its_own_deadline_before_any_sql(tmp_path, monkeypatch):
+    from crypto_market_analysis import analytical_store
+
+    store, _ = fixture_store(tmp_path)
+    target = tmp_path / "snapshot"
+    export_candle_snapshot(store, target)
+    clock = [0]
+    monkeypatch.setattr(analytical_store.time, "monotonic", lambda: clock[0])
+
+    def slow_file_hash(path, check_budget):
+        clock[0] = 31
+        check_budget()
+        pytest.fail("An expired cold verification must stop before a query.")
+
+    monkeypatch.setattr(analytical_store, "_file_hash", slow_file_hash)
+    with pytest.raises(ValueError, match="verification deadline"):
+        AnalyticalCandleStore(target)
+
+
 def test_cached_verification_reuses_only_unchanged_artifacts(tmp_path):
     store, _ = fixture_store(tmp_path)
     target = tmp_path / "snapshot"
@@ -342,3 +361,13 @@ def test_read_memory_budget_fails_without_creating_temp_files(tmp_path, monkeypa
             assert con.execute("SELECT current_setting('temp_directory')").fetchone()[0] == ""
             con.execute("SELECT i FROM range(1000000) t(i) ORDER BY hash(i)").fetchall()
     assert list(tmp_path.iterdir()) == []
+
+
+def test_heavy_read_admission_fails_fast_and_recovers_without_an_unbounded_queue():
+    with analytical_store._query_connection():
+        with analytical_store._query_connection():
+            with pytest.raises(ValueError, match="capacity is busy"):
+                with analytical_store._query_connection():
+                    pytest.fail("A third heavy reader must be refused.")
+    with analytical_store._query_connection() as con:
+        assert con.execute("SELECT 1").fetchone() == (1,)

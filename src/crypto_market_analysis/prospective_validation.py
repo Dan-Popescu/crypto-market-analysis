@@ -10,7 +10,8 @@ import math
 from copy import deepcopy
 
 from .journal import AssessmentJournal
-from .prospective import DAY, _clock, assessment_chronology, select_outcomes
+from .prospective import DAY, assessment_chronology, select_outcomes
+from .prospective import observation_clock as _clock
 from .scorecards import build_scorecard
 from .validation_protocol import (
     EVENT_FIELDS,

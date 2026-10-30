@@ -263,7 +263,11 @@ def main():
                     "reason": "PostgreSQL requires a separately provisioned database and comparable fixture; no service was created." if probe.returncode == 0 else probe.stderr.strip()[:1000]}
     except (OSError, subprocess.TimeoutExpired) as exc:
         postgres = {"status": "unavailable", "reason": str(exc)}
-    report = {"schema": "observer-storage-scaling-v1", "synthetic": True,
+    checkout = Path(__file__).resolve().parents[1]
+    revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=checkout,
+                              capture_output=True, text=True, check=False).stdout.strip() or None
+    script_hash = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    report = {"source_revision": revision, "harness_sha256": script_hash, "schema": "observer-storage-scaling-v1", "synthetic": True,
               "scope": "Real local engines; synthetic storage capacity with collectors and market admission bypassed. No venue-support, HTTP, concurrency, cold-cache or production throughput claim.",
               "measurement": "Fresh subprocess per scale; engine order SQLite then DuckDB; timings include decoding; peak RSS covers both engines and export.",
               "postgresql": {"status": "measured", "container": args.postgres_container} if args.postgres_container else postgres,
