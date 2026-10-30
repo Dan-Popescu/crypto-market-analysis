@@ -1,6 +1,8 @@
 # Crypto Market Analysis
 
-Explain work to Dan in simple, concise French. Write code in English.
+Use English for all first-party repository content and software output, including
+documentation, instructions, comments, CLI/MCP text, reports, charts and fixtures.
+Preserve raw external evidence, official names, symbols and URLs without translation.
 
 ## Scope
 
@@ -13,6 +15,12 @@ and the separation of live, imported and synthetic observations. Missing data
 remains unknown. Keep experimental forecasts explicitly labelled as experimental.
 Preserve the OBSERVER_* environment variables and observer.toml configuration
 names until a deliberate compatibility migration is requested.
+
+For the accumulation roadmap, read docs/IMPLEMENTATION_PLAN.md and
+docs/CLOUD_IMPLEMENTATION_BRIEF.md. France is the purchase jurisdiction; EUR and
+USD analyses stay separate. Purchase eligibility is verified per legal entity
+and service. Global market analysis includes material venues regardless of MiCA
+status; data access, reuse permission and regulatory eligibility are independent.
 
 ## Verification and pull requests
 

@@ -1,0 +1,36 @@
+{
+  "asset": "ETH",
+  "quote": "USD",
+  "data_mode": "demo",
+  "price_basis": "mid",
+  "outlier_threshold_bps": "100",
+  "max_age_seconds": 60,
+  "max_skew_seconds": 5,
+  "sources": ["synthetic_a", "synthetic_b", "synthetic_outlier", "synthetic_stale", "missing_example"],
+  "snapshots": [
+    {
+      "source": "synthetic_a", "asset": "ETH", "quote": "USD", "data_mode": "demo",
+      "event_time": 1793145590, "captured_at": 1793145591,
+      "input_reference": "synthetic-price-a-v1-not-real-market-data",
+      "price": "100", "best_bid": "99", "best_ask": "101"
+    },
+    {
+      "source": "synthetic_b", "asset": "ETH", "quote": "USD", "data_mode": "demo",
+      "event_time": 1793145592, "captured_at": 1793145593,
+      "input_reference": "synthetic-price-b-v1-not-real-market-data",
+      "price": "101", "best_bid": "100", "best_ask": "102"
+    },
+    {
+      "source": "synthetic_outlier", "asset": "ETH", "quote": "USD", "data_mode": "demo",
+      "event_time": 1793145591, "captured_at": 1793145593,
+      "input_reference": "synthetic-outlier-v1-not-real-market-data",
+      "price": "120", "best_bid": "119", "best_ask": "121"
+    },
+    {
+      "source": "synthetic_stale", "asset": "ETH", "quote": "USD", "data_mode": "demo",
+      "event_time": 1793145400, "captured_at": 1793145591,
+      "input_reference": "synthetic-stale-v1-not-real-market-data",
+      "price": "80"
+    }
+  ]
+}

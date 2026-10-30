@@ -1,6 +1,11 @@
-# Scope and acceptance criteria
+# Imported prototype scope and acceptance criteria
 
-User-approved requirements: BTC and ETH research at 1, 7, 21, 30, 60 calendar-day horizons; weekly context; no paid collection API; uv; CLI and local/remote MCP; concise French explanations and reproducible charts; no trade execution. Whales postponed. Options lightweight and free. No tick archive.
+This records the imported prototype scope as of October 28, 2026, with the
+English-only policy applied. It does not claim implementation of the later
+accumulation roadmap. See [MIGRATION.md](MIGRATION.md) for the language and
+compatibility contract.
+
+User-approved requirements: BTC and ETH research at 1, 7, 21, 30, 60 calendar-day horizons; weekly context; no paid collection API; uv; CLI and local/remote MCP; concise English explanations and reproducible charts; no trade execution. Whales postponed. Options lightweight and free. No tick archive.
 
 Collect large venues through a capability-aware exchange registry (Binance, Coinbase, Kraken, OKX, Bybit, Bitstamp, Bitfinex, KuCoin, Gate, Crypto.com, Gemini, Bitget, MEXC, HTX). Do not infer MiCA compliance from a brand; jurisdiction and legal entity must have a dated official source to be labelled verified. Report region/access failures without bypassing them. Do not merge native USD, EUR or stablecoin books without a measured conversion rate.
 

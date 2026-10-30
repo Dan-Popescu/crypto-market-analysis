@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "quote": "EUR",
+  "data_mode": "demo",
+  "contributions": [
+    {
+      "time": 1767225600,
+      "amount": "100"
+    },
+    {
+      "time": 1767830400,
+      "amount": "100"
+    }
+  ],
+  "plans": [
+    {
+      "id": "btc-target",
+      "family": "deferred",
+      "config": {
+        "schema_version": 1,
+        "asset": "BTC",
+        "quote": "EUR",
+        "source": "synthetic-btc-eur",
+        "data_mode": "demo",
+        "start_time": 1767225600,
+        "contributions": [
+          {
+            "time": 1767225600,
+            "amount": "100"
+          }
+        ],
+        "schedule": [
+          {
+            "time": 1767225600,
+            "amount": "100"
+          }
+        ],
+        "plans": {
+          "deferred": {
+            "fraction": "1",
+            "max_wait_days": 7,
+            "fallback": "reserve",
+            "max_deferred_reserve_quote": "75"
+          }
+        }
+      }
+    },
+    {
+      "id": "eth-regular",
+      "family": "regular",
+      "config": {
+        "schema_version": 1,
+        "asset": "ETH",
+        "quote": "EUR",
+        "source": "synthetic-eth-eur",
+        "data_mode": "demo",
+        "start_time": 1767225600,
+        "contributions": [
+          {
+            "time": 1767225600,
+            "amount": "100"
+          }
+        ],
+        "schedule": [
+          {
+            "time": 1767225600,
+            "amount": "100"
+          },
+          {
+            "time": 1767830400,
+            "amount": "100"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,64 +1,96 @@
 # Crypto Market Analysis
 
-Outil local d'analyse du marché BTC/ETH à partir de données publiques : collecte, analyses descriptives, scénarios historiques expérimentaux, graphiques et accès MCP en lecture seule. Aucune exécution de transactions. La collecte, les calculs et les graphiques n'appellent aucun modèle de langage.
+A local, read-only BTC/ETH research tool for gradual spot purchases over weeks and months. It provides historical context, experimental purchase windows, hypothetical purchase-plan comparisons, chronological evaluation and optional 4/8-hour vigilance. CLI and MCP share the same calculations. It never executes orders, signs wallet operations or transfers funds. Collection, calculations and charts require no language model or paid data API.
 
-## Démarrage
+Version 0.8.0 adds [actionable analytical workflows](docs/ANALYSIS_WORKFLOWS.md):
+changes between known-at dossiers, claim-level readiness and next inputs, actual
+HTTP attempt/deadline limits, resumable Coinbase/Bitstamp history and fixed-grid
+plan robustness. The four additional MCP tools are read-only; public captures
+remain explicit finite local operations.
+See [verified delivery, efficiency gains and remaining limits](docs/ANALYSIS_WORKFLOWS_STATUS.md).
 
-Dans le répertoire du projet, avec Python et `uv` installés :
+Version 0.7.0 adds [measured operation and coherent workflows](docs/OPERATING_CAPACITY.md):
+observed HTTP consumption, bounded endurance experiments, resumable automatic
+history repair, one-snapshot multi-market dossiers and portable source qualification.
+Inspection stays read-only; capture and repairs require explicit local opt-in.
+See [verified delivery, endurance measurements and remaining execution limits](docs/OPERATING_CAPACITY_STATUS.md).
+
+Version 0.7.1 strengthens repair fairness, writer exclusion, transport accounting
+and atomic evidence recovery. See the [verified reliability follow-up](docs/REPAIR_RELIABILITY_STATUS.md).
+
+Version 0.6.0 fixes [history, pipeline and MCP operating costs](docs/EFFICIENCY.md):
+SQL-filtered history pages, incremental refresh, durable source scheduling,
+compact evidence-aware MCP replies and checked archive/admission policies.
+No deployment or new paid dependency is required.
+See [verified delivery and measured gains](docs/EFFICIENCY_STATUS.md), including
+the remaining single-host and real-source qualification limits.
+
+Version 0.5.0 adds [automatic local data connections](docs/DATA_CONNECTIONS.md):
+retained books, official context capture, stored calculations, four-market source
+qualification and an explicit local refresh/report workflow. Network captures
+and assessment issuance are opt-in. No deployment is needed.
+See [verified delivery and remaining live checks](docs/DATA_CONNECTION_STATUS.md).
+
+Version 0.4.0 adds verified local backup/restore and original replay, bounded
+prospective scorecards, shared BTC/ETH cash envelopes, explicit snapshot venue
+cost/dispersion calculations, native derivatives comparisons, sourced manual ECB
+schedules and informational FX/stablecoin context. See the [offline workflows](docs/OFFLINE_WORKFLOWS.md)
+and [verified completion status](docs/OFFLINE_STATUS.md). Real-source acceptance
+and prospective investment results remain separate from software completion.
+
+## Offline demonstration
+
+With Python and `uv` installed, run from the repository root:
 
 ```bash
 uv sync --frozen
-uv run crypto-market-analysis demo
-uv run crypto-market-analysis brief --mode demo --asset BTC
-uv run crypto-market-analysis chart --mode demo --asset BTC --kind weekly --output output/btc-weekly.svg
+uv run crypto-market-analysis demo --data-dir data/demo-docs --days 800 --quotes EUR,USD --as-of 2026-10-28T00:00:00Z
+uv run crypto-market-analysis context --data-dir data/demo-docs --mode demo --asset BTC --source demo --quote EUR --as-of 2026-10-28T00:00:00Z
+uv run crypto-market-analysis windows --data-dir data/demo-docs --mode demo --asset BTC --source demo --quote EUR --as-of 2026-10-28T00:00:00Z --horizons 1,3,7,14 --thresholds 0.02,0.05,0.10
+uv run crypto-market-analysis compare-plans --data-dir data/demo-docs --mode demo --plan-config examples/accumulation-plan.json --as-of 2026-10-28T00:00:00Z
 ```
 
-La démonstration est **synthétique** et stockée en mode `demo` séparé du mode `live` : elle ne décrit pas le marché réel. Aucun échec de collecte ne déclenche de données synthétiques. Pour collecter des données réelles et examiner la couverture :
+These are **synthetic** scenarios, with independent EUR and USD prices, not a measured FX conversion or real-market evidence. All modes (`live`, `import`, `demo`) remain separate. Failed collection never triggers synthetic replacement data. The fixed demo includes two years of context and complete 90/180-day outcomes for the example plan starting January 1, 2026. Smaller fixtures or later starts can legitimately produce missing context or pending outcomes.
+
+See [the accumulation guide](docs/ACCUMULATION.md) for reproducible evaluation, journal, vigilance, chart and import examples; [MCP clients](docs/MCP_CLIENTS.md) includes a local protocol example. [Implementation status](docs/IMPLEMENTATION_STATUS.md) separates implemented code, verification evidence and blocked live checks. No predictive advantage over regular purchases has been established.
+
+The [follow-up improvement review](docs/IMPROVEMENT_REVIEW.md) records the selection and its evidence. Version 0.3.0 implements the focused fixes, explicit research datasets, next-tranche brief, offline cost sensitivity and bounded journal overview. See the [new reproducible workflows](docs/IMPROVEMENTS.md) and [verified delivery status](docs/IMPROVEMENT_STATUS.md); real-source acceptance remains unverified in this cloud.
 
 ```bash
-uv run crypto-market-analysis collect --venues kraken,coinbase --days 7
+uv run crypto-market-analysis accumulation-brief --mode demo --data-dir data/demo-docs --source demo --quote EUR --as-of 2026-10-28T00:00:00Z
+uv run crypto-market-analysis plan-init --request examples/plan-request.json --output data/personal-plan.json
+uv run crypto-market-analysis plan-preview --plan-config data/personal-plan.json --format markdown
+```
+
+## Sources and configuration
+
+```bash
+uv run crypto-market-analysis sources
+uv run crypto-market-analysis venues
+uv run crypto-market-analysis collect --venues kraken,coinbase,bitvavo --quotes EUR,USD --tasks market --days 7
 uv run crypto-market-analysis status
-uv run crypto-market-analysis brief --asset BTC
 ```
 
-Le registre contient 14 plateformes par défaut ; disponibilité, actifs, historiques et accès varient selon la plateforme et la région. Une collecte initiale plus longue peut être demandée, sans garantie d'obtenir tout l'historique :
+Network commands require source access and can fail by region or environment. The current cloud's new public-source availability checks were blocked by its proxy allowlist; they establish no successful new collection. The registry contains 15 analytical venues, including Bitvavo. Global analysis includes material venues independently of purchase eligibility. France is the purchase jurisdiction; Kraken, Coinbase and Bitvavo are configured candidates, with dated evidence attached to particular legal entities and services. This is not brand-wide approval, execution-quality evidence or a reason to bypass access restrictions.
 
-```bash
-uv run crypto-market-analysis collect --venues kraken,coinbase --tasks market --days 1825 --max-pages 100
-```
+Copy [examples/observer.toml](examples/observer.toml) to `observer.toml`. Native EUR, USD, USDT and USDC markets stay separate. The example bounds order-book requests to three venues while retaining all 15 for market collection. Omitting `liquidity_venues` retains the runtime default of all configured analytical venues. Inspect coverage, ages, errors and licensing limits in the [data catalogue](docs/DATA_CATALOG.md) and [operations guide](docs/OPERATIONS.md).
 
-La pagination est bornée à 100 pages, jusqu'à 500 bougies par page, avec des limites parfois plus strictes côté plateforme. Contrôlez le résultat et `status` : données partielles, erreurs et absence de source restent visibles. Les collectes ultérieures peuvent être automatisées avec `uv run crypto-market-analysis run`.
+The `OBSERVER_*` environment variables, `observer.toml`, `observer.sqlite` and `observer:read` MCP scope retain their names. See [schema and configuration migration](docs/MIGRATION.md).
 
-Les prévisions sont expérimentales : elles comparent des situations historiques, ne démontrent aucun avantage prédictif et n'établissent pas de causalité. Les journées doivent contenir 24 bougies horaires complètes ; les semaines vont du lundi au dimanche UTC. Les cotations USD, EUR et stablecoins restent séparées. Les interfaces publiques de collecte ne nécessitent aucune API payante (coût d'API de collecte : 0 €) ; les coûts d'infrastructure, de réseau et d'hébergement ne sont pas chiffrés sans mesure.
+## Development and evidence
 
-Consultez [l'exploitation](docs/OPERATIONS.md), le [catalogue des données](docs/DATA_CATALOG.md), [la connexion des clients MCP](docs/MCP_CLIENTS.md), et `uv run crypto-market-analysis --help`.
+The repository is [Dan-Popescu/crypto-market-analysis](https://github.com/Dan-Popescu/crypto-market-analysis), imported from Crypto Observer v0.1.0. The Python package is `crypto_market_analysis`.
 
-Le [compte rendu de validation](docs/VALIDATION.md) précise les vérifications réalisées et les limites de cette première version.
-
-## Développement local ou dans le cloud
-
-Le dépôt est [Dan-Popescu/crypto-market-analysis](https://github.com/Dan-Popescu/crypto-market-analysis).
-Il reprend le prototype Crypto Observer v0.1.0 sous le nom **Crypto Market Analysis**.
-Le paquet Python est `crypto_market_analysis` et la commande est `crypto-market-analysis`.
-Les variables `OBSERVER_*`, le scope `observer:read` et le fichier `observer.toml`
-gardent leur nom pour conserver les réglages existants.
-
-Après avoir récupéré le dépôt, préparez les dépendances puis lancez les contrôles :
+See [architecture and invariant ownership](docs/ARCHITECTURE.md) when changing
+purchase accounting, captured evidence, journal reads or empirical sample rules.
+The [domain glossary](CONTEXT.md) defines the shared accumulation terminology.
 
 ```bash
 uv sync --frozen --extra dev
 uv run --frozen python tools/check.py
+uv build --wheel --offline
 ```
 
-Ces commandes s'utilisent sur le PC et dans un environnement Codex cloud où `uv`
-est installé. Les contrôles vérifient les dépendances, le code et les tests avec
-des données temporaires ; ils ne lancent pas de collecte publique. Les tests MCP
-utilisent un processus local et une connexion HTTP locale temporaire.
+Checks use temporary data and local MCP transports, independently of public APIs. Record the exact tested revision, commands, results and unavailable checks before merging. GitHub Actions remains disabled; no hosted CI success is assumed. Original author-reported validation remains in [VALIDATION.md](docs/VALIDATION.md), separately from independently executed [import checks](docs/IMPORT.md).
 
-GitHub Actions est désactivé pour ce dépôt. Les résultats de vérification de la
-version finale doivent être indiqués dans chaque pull request avant sa fusion.
-
-Le dépôt contient le code et les démonstrations synthétiques. Les rapports réels
-du ZIP d'origine restent locaux, comme les bases, les secrets et les réglages
-personnels. Ledgerly conserve la gestion du portefeuille ; son raccordement à
-cet outil d'analyse n'est pas encore réalisé.
+Keep budgets, portfolio records, databases, runtime journals, secrets and generated personal reports outside version control. Ledgerly remains the source of actual holdings and acquisition history; optional local inputs do not imply a live Ledgerly connection. No permanent job, external notification, account connection or public deployment is activated by these changes.

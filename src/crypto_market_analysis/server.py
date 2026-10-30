@@ -17,43 +17,46 @@ from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP, Image
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
+from pydantic import StrictInt
 
 from .config import Settings
 from .engine import Engine
+from .mcp_results import MCPResultPresenter, result_message
+from .reporting import bounded_as_of, bounded_integers, bounded_object, bounded_origins, bounded_thresholds
 from .venues import VENUES
 
 GLOSSARY = {
     "open_interest": {
-        "definition": "Contrats dérivés encore ouverts. Chaque contrat a un acheteur et un vendeur.",
-        "limit": "Une hausse ne prouve pas une demande spot ; les unités dépendent de la plateforme.",
+        "definition": "Derivative contracts still open. Every contract has a buyer and a seller.",
+        "limit": "An increase does not establish spot demand; units depend on the venue.",
     },
     "funding": {
-        "definition": "Paiement périodique entre détenteurs de positions sur contrats perpétuels.",
-        "limit": "Comparer uniquement des périodes identiques ; projeté et réalisé sont distincts.",
+        "definition": "Periodic payment between holders of perpetual contract positions.",
+        "limit": "Compare only identical periods; projected and realized values are distinct.",
     },
     "depth": {
-        "definition": "Montant des ordres affichés dans une bande de prix autour du milieu du carnet.",
-        "limit": "La liquidité peut disparaître. Une couverture incomplète donne une borne inférieure.",
+        "definition": "Amount of displayed orders within a price band around the order book midpoint.",
+        "limit": "Liquidity can disappear. Incomplete coverage gives a lower bound.",
     },
     "volatility": {
-        "definition": "Ampleur des variations ; la mesure réalisée sur 21 jours est annualisée avec 365 jours.",
-        "limit": "Elle ne donne pas la direction du prochain mouvement.",
+        "definition": "Magnitude of price changes; the 21-day realized measure is annualized using 365 days.",
+        "limit": "It does not give the direction of the next move.",
     },
     "implied_volatility": {
-        "definition": "Volatilité compatible avec les prix cotés des options.",
-        "limit": "Elle reflète aussi les primes de risque ; ce n'est pas une probabilité réelle calibrée.",
+        "definition": "Volatility consistent with quoted option prices.",
+        "limit": "It also reflects risk premiums; it is not a calibrated real-world probability.",
     },
     "spot_pressure": {
-        "definition": "Part du volume déclenchée par des achats agressifs contre des vendeurs.",
-        "limit": "Mesure locale à une plateforme ; toute transaction a un acheteur et un vendeur.",
+        "definition": "Share of volume initiated by aggressive buyers trading against sellers.",
+        "limit": "A venue-specific measure; every trade has a buyer and a seller.",
     },
     "brier": {
-        "definition": "Erreur quadratique moyenne entre probabilité prévue et événement observé ; plus petit est meilleur.",
-        "limit": "Comparer à une référence sur exactement les mêmes dates, sans information future.",
+        "definition": "Mean squared error between predicted probability and observed outcome; lower is better.",
+        "limit": "Compare with a baseline on exactly the same dates, without future information.",
     },
     "red": {
-        "definition": "Cours à l'échéance inférieur à la clôture horaire servant d'ancrage, sur des fenêtres de 24 heures.",
-        "limit": "Distinct d'une bougie calendaire rouge. Le cours instantané peut différer de l'ancrage.",
+        "definition": "Endpoint price below the anchor hourly close, over 24-hour windows.",
+        "limit": "Distinct from a red calendar candle. The current price may differ from the anchor.",
     },
 }
 
@@ -101,11 +104,13 @@ def create_server(
     auth = verifier = None
     if any((issuer, jwks, public_url)):
         if not all((issuer, jwks, public_url)):
-            raise ValueError("OAuth exige OBSERVER_OAUTH_ISSUER, OBSERVER_JWKS_URL et OBSERVER_PUBLIC_URL.")
+            raise ValueError(
+                "OAuth requires OBSERVER_OAUTH_ISSUER, OBSERVER_JWKS_URL and OBSERVER_PUBLIC_URL."
+            )
         if any(urlparse(v).scheme != "https" or not urlparse(v).hostname for v in (issuer, jwks, public_url)):
-            raise ValueError("Les URL OAuth et publique doivent être en HTTPS.")
+            raise ValueError("OAuth and public URLs must use HTTPS.")
         if not public_url.rstrip("/").endswith("/mcp"):
-            raise ValueError("OBSERVER_PUBLIC_URL doit être l'URL HTTPS complète terminant par /mcp.")
+            raise ValueError("OBSERVER_PUBLIC_URL must be the full HTTPS URL ending in /mcp.")
         audience = os.getenv("OBSERVER_OAUTH_AUDIENCE", public_url)
         verifier = JWTVerifier(issuer, jwks, audience, public_url)
         auth = AuthSettings(
@@ -115,9 +120,7 @@ def create_server(
             validate_token_resource=True,
         )
     elif host not in ("127.0.0.1", "localhost", "::1"):
-        raise ValueError(
-            "Une écoute réseau publique exige la configuration OAuth ; sinon utilisez 127.0.0.1."
-        )
+        raise ValueError("A public network listener requires OAuth configuration; otherwise use 127.0.0.1.")
     allowed_hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
     if public_url:
         allowed_hosts.append(urlparse(public_url).netloc)
@@ -132,14 +135,15 @@ def create_server(
         transport_security=TransportSecuritySettings(
             enable_dns_rebinding_protection=True, allowed_hosts=allowed_hosts
         ),
-        instructions="Analyse BTC/ETH à 1–60 jours. Commencez par get_analysis_bundle pour connaître date, mode, couverture et sources. Les pourcentages sont expérimentaux ; ne les décrivez jamais comme calibrés ou comme un avantage démontré. Un manque de données n'est pas un signal neutre. Citez la source, l'unité et l'ancrage. Ne mélangez pas USD, EUR et stablecoins, ni démonstration et données réelles. Utilisez render_chart pour illustrer les observations. Expliquez clairement les contradictions et les conditions qui changeraient l'interprétation. Aucun passage d'ordre.",
+        instructions="Use get_analysis_readiness with an explicit native dossier to establish supported claims, missing inputs and nonexecuting next actions. get_analysis_changes compares the same selection at two known-at cutoffs and separates market events from revisions and collection issues. get_plan_robustness tests a caller-declared fixed origin/cost/missing-data grid without selecting a winning policy. get_history_backfill_status inspects resumable import jobs; capture remains a separate explicit local operation. Analyze BTC/ETH over 1–60 days. For accumulation use get_accumulation_brief with an explicitly pinned source/native EUR or USD quote or matching plan. It combines descriptive context through 730 days, experimental 1/3/7/14-day purchase windows and hypothetical plans assessed at 90/180 days on one snapshot. Use compare_cost_sensitivity for caller-declared costs and get_journal_summary for bounded pending/missing cohorts. get_journal_scorecard adds descriptive outcomes with independent sample selection; replay_assessment verifies frozen original calculations without observing outcomes. preview_shared_budget describes declared shared cash constraints. calculate_purchase_costs, calculate_venue_disagreement, get_quote_context and get_derivatives_context use explicit caller-supplied local observations without collection. All tools are read-only; assessment issuance and outcome observation require explicit local CLI operations. get_analysis_bundle provides the broader source dossier. Percentages are experimental; never describe them as calibrated or as a demonstrated edge. Missing data is not a neutral signal. Cite the source, unit and anchor. Keep USD, EUR and stablecoins separate, and distinguish demonstration data from real data. Use render_chart to illustrate observations. Explain contradictions and the conditions that would change the interpretation. No order execution. Use get_request_schema with list or a tool name for bounded input contracts/examples. Inspect _mcp_result for omitted paths, frozen content and selection hashes, and expiry. Use get_result_page for bounded frozen details; expired handles require a fresh calculation. get_metric_series discovers actual native dimensions before paginated get_metric_history reads.",
     )
-    engine = Engine(settings, mode)
+    engine = Engine(settings, mode, initialize=False)
+    presenter = MCPResultPresenter()
     readonly = ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     )
 
-    @server.tool(annotations=readonly)
+    @presenter.tool(server, annotations=readonly)
     def get_analysis_bundle(
         asset: Literal["BTC", "ETH"] = "BTC",
         source: str | None = None,
@@ -149,12 +153,220 @@ def create_server(
         """Use first for a concise research dossier: observations, scenarios, coverage, sources and limits. as_of is UTC epoch seconds; never invent missing evidence."""
         return engine.bundle(asset, source, quote, as_of)
 
-    @server.tool(annotations=readonly)
+    @presenter.tool(server, annotations=readonly)
+    def get_accumulation_brief(
+        asset: Literal["BTC", "ETH"] = "BTC",
+        source: str | None = None,
+        quote: Literal["EUR", "USD"] | None = None,
+        as_of: int | None = None,
+        plan_config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """One pinned-snapshot next-tranche review: observations, funding, targets/deadlines and pending outcomes. Supply explicit source/native quote or a matching plan object. No buy score or policy selection."""
+        return engine.accumulation_brief(asset, source, quote, as_of,
+            bounded_object(plan_config) if plan_config is not None else None)
+
+    @presenter.tool(server, annotations=readonly)
+    def construct_purchase_plan(request: dict[str, Any]) -> dict[str, Any]:
+        """Pure UTC recurrence constructor returning schema-1 JSON without saving it. Amounts are decimal strings; monthly schedules require an explicit clip/skip month-end convention. No personal holdings required."""
+        from .plan_builder import construct_plan
+        return construct_plan(bounded_object(request, "plan request"))
+
+    @presenter.tool(server, annotations=readonly)
+    def preview_purchase_funding(config: dict[str, Any], as_of: int | None = None) -> dict[str, Any]:
+        """Price-free funding constraints with fees, future deposits and free/locked commitments. This is a conservative declared-plan illustration, not an account balance or fill simulation."""
+        from .plan_builder import preview_plan_funding
+        return preview_plan_funding(bounded_object(config), int(time.time()) if as_of is None else as_of)
+
+    @presenter.tool(server, annotations=readonly)
+    def compare_cost_sensitivity(
+        config: dict[str, Any], cost_cases: list[dict[str, Any]], as_of: int | None = None,
+        validation: Literal["known_at", "retrospective"] = "retrospective",
+    ) -> dict[str, Any]:
+        """Read-only comparison of 1–3 caller-named fee/spread/slippage cases with frozen policy/cashflows/bars. First case is an arithmetic reference, never a preferred case. No optimization or measured-fill claim."""
+        bounded_object({"cases": cost_cases}, "cost cases")
+        return engine.cost_sensitivity(bounded_object(config), cost_cases, as_of, validation)
+
+    @presenter.tool(server, annotations=readonly)
+    def get_journal_summary(as_of: int | None = None, limit: int = 20) -> dict[str, Any]:
+        """Bounded read-only issued-event cohorts with pending/missing/excluded denominators and first definite outcomes. Modes/quotes/lineages stay separate; no independence or performance score is claimed. Up to 100 originals."""
+        return engine.journal_summary(as_of, limit)
+
+    @presenter.tool(server, annotations=readonly)
+    def get_journal_scorecard(as_of: StrictInt | None = None, limit: StrictInt = 20) -> dict[str, Any]:
+        """Bounded descriptive journal scorecard with pending/missing counts, independent scenario selection and uncertainty. Quotes, modes, rules and chronology stay separate; no calibrated forecast or proven advantage. Up to 100 originals."""
+        return engine.journal_scorecard(bounded_as_of(as_of), limit)
+
+    @presenter.tool(server, annotations=readonly)
+    def preview_shared_budget(request: dict[str, Any], as_of: StrictInt | None = None) -> dict[str, Any]:
+        """Price-free preview of 2–16 declared plans sharing one explicit native-quote cash envelope. Supply a bounded JSON object, never a path. Declared contributions and commitments are hypothetical; this is not an account ledger."""
+        from .budget import preview_budget_envelope
+
+        return preview_budget_envelope(bounded_object(request, "budget request"), bounded_as_of(as_of))
+
+    @presenter.tool(server, annotations=readonly)
+    def calculate_purchase_costs(request: dict[str, Any], as_of: StrictInt | None = None) -> dict[str, Any]:
+        """Read-only purchase arithmetic from caller-supplied native-quote ask ladders, explicit fees and product rules. Missing/stale/skewed venues remain visible. No collection, execution, implicit currency conversion or preferred venue."""
+        from .venue_analysis import analyze_purchase_costs
+
+        return analyze_purchase_costs(bounded_object(request, "purchase cost request"), bounded_as_of(as_of))
+
+    @presenter.tool(server, annotations=readonly)
+    def calculate_venue_disagreement(request: dict[str, Any], as_of: StrictInt | None = None) -> dict[str, Any]:
+        """Describe same-basis, contemporaneous native-quote prices supplied as a bounded JSON object. Show coverage, dispersion and timing exclusions; disagreement alone is not an arbitrage or purchase signal."""
+        from .venue_analysis import analyze_venue_disagreement
+
+        return analyze_venue_disagreement(bounded_object(request, "venue request"), bounded_as_of(as_of))
+
+    @presenter.tool(server, annotations=readonly)
+    def get_quote_context(request: dict[str, Any], as_of: StrictInt | None = None) -> dict[str, Any]:
+        """Describe explicitly sourced indicative EUR/USD and stablecoin basis observations supplied as JSON. Native observations, conversion lineage and endpoint timing remain visible; indicative FX is not an executable rate."""
+        from .quote_context import analyze_quote_context
+
+        return analyze_quote_context(bounded_object(request, "quote context request"), bounded_as_of(as_of))
+
+    @presenter.tool(server, annotations=readonly)
+    def replay_assessment(assessment_id: str) -> dict[str, Any]:
+        """Verify an existing issued assessment's original calculations from its frozen local evidence. Accepts only an assessment ID; no file paths, collection, issuance, future outcomes or journal append."""
+        return engine.replay_assessment(assessment_id)
+
+    @presenter.tool(server, annotations=readonly)
+    def get_derivatives_context(request: dict[str, Any], as_of: StrictInt | None = None) -> dict[str, Any]:
+        """Describe fixed 4-hour/24-hour changes from caller-supplied derivatives observations. Native quotes, contracts, units, funding periods and known-at endpoints stay separate; missing endpoints remain unknown. No collection, annualization or directional forecast."""
+        from .derivatives_context import analyze_derivatives_context
+
+        return analyze_derivatives_context(bounded_object(request, "derivatives request"), bounded_as_of(as_of))
+
+    @presenter.tool(server, annotations=readonly)
+    def get_stored_derivatives(request: dict[str, Any], as_of: StrictInt | None = None) -> dict[str, Any]:
+        """Read bounded SQLite derivatives known at the cutoff. JSON requires asset, source, native quote and data_mode; optional policy controls endpoint age/skew. No network or paths. Native contract units remain separate; missing endpoints stay unknown."""
+        return engine.stored_derivatives(bounded_object(request, "stored derivatives request"), bounded_as_of(as_of))
+
+    @presenter.tool(server, annotations=readonly)
+    def get_stored_quotes(request: dict[str, Any], as_of: StrictInt | None = None) -> dict[str, Any]:
+        """Read bounded local FX/stablecoin references selected by explicit sources, native quote and data_mode JSON. Optional max_age_seconds and max_endpoint_skew_seconds bound eligibility. No paths, network or executable conversion; missing clocks remain unknown."""
+        return engine.stored_quotes(bounded_object(request, "stored quotes request"), bounded_as_of(as_of))
+
+    @presenter.tool(server, annotations=readonly)
+    def get_stored_venue_costs(request: dict[str, Any], as_of: StrictInt | None = None) -> dict[str, Any]:
+        """Read retained local ask ladders for explicit sources, asset, native quote and data_mode. Supply budget and assumptions_by_source with declared fees/product rules. Unknown fees remain unknown; no collection, paths, currency conversion or preferred venue."""
+        request = dict(bounded_object(request, "stored venue costs request"))
+        if request.get("analysis", "purchase_costs") != "purchase_costs":
+            raise ValueError("analysis must be purchase_costs for this tool.")
+        request["analysis"] = "purchase_costs"
+        return engine.stored_venues(request, bounded_as_of(as_of))
+
+    @presenter.tool(server, annotations=readonly)
+    def get_stored_venue_disagreement(request: dict[str, Any], as_of: StrictInt | None = None) -> dict[str, Any]:
+        """Describe bounded local snapshots for explicit sources, asset, native quote and data_mode JSON. Timing, missing venues, capture truncation and provenance stay visible. No paths, network, implicit conversion or arbitrage claim."""
+        request = dict(bounded_object(request, "stored venue disagreement request"))
+        if request.get("analysis", "disagreement") != "disagreement":
+            raise ValueError("analysis must be disagreement for this tool.")
+        request["analysis"] = "disagreement"
+        return engine.stored_venues(request, bounded_as_of(as_of))
+
+    @presenter.tool(server, annotations=readonly)
+    def qualify_sources(request: dict[str, Any], as_of: StrictInt | None = None) -> dict[str, Any]:
+        """Read-only offline qualification of bounded local native-market history and declared resources. JSON includes sources, optional markets/market_sources, data_mode, required_history_days and resource ceilings. Show gaps, freshness, access/rights/eligibility and qualification gates independently. No paths, collection, issuance or completeness promise."""
+        return engine.qualify_sources(bounded_object(request, "qualification request"), bounded_as_of(as_of))
+
+    @presenter.tool(server, annotations=readonly)
+    def get_market_context(
+        asset: Literal["BTC", "ETH"] = "BTC",
+        source: str | None = None,
+        quote: str | None = None,
+        as_of: int | None = None,
+        lookbacks: list[int] | None = None,
+    ) -> dict[str, Any]:
+        """Descriptive native-quote historical context, complete UTC calendar periods and coverage. Up to 16 lookbacks of 1–3650 days; low historical rank is not undervaluation."""
+        return engine.context(asset, source, quote, as_of, bounded_integers(lookbacks, "lookbacks", 3650, 16))
+
+    @presenter.tool(server, annotations=readonly)
+    def get_purchase_windows(
+        asset: Literal["BTC", "ETH"] = "BTC",
+        source: str | None = None,
+        quote: str | None = None,
+        as_of: int | None = None,
+        horizons: list[int] | None = None,
+        thresholds: list[float] | None = None,
+    ) -> dict[str, Any]:
+        """Experimental endpoint and below-anchor touch frequencies, reference rates, uncertainty and expiry. Defaults: 1/3/7/14 days; up to 16 horizons and 12 decline fractions. No fill or calibrated purchase signal is implied."""
+        horizons = bounded_integers(horizons, "horizons", 365, 16)
+        thresholds = bounded_thresholds(thresholds)
+        return engine.purchase_windows(asset, source, quote, as_of, horizons, thresholds)
+
+    @presenter.tool(server, annotations=readonly)
+    def compare_purchase_plans(
+        config: dict[str, Any],
+        as_of: int | None = None,
+        validation: Literal["known_at", "retrospective"] = "retrospective",
+    ) -> dict[str, Any]:
+        """Read-only regular/split/deferred purchase simulation, including reserve, fees, holdings plus reserve and pending 90/180-day outcomes. Supply a bounded JSON object, never a path. Money uses decimal strings."""
+        return engine.compare_plans(bounded_object(config), as_of=as_of, validation=validation)
+
+    @presenter.tool(server, annotations=readonly)
+    def evaluate_purchase_plans(
+        config: dict[str, Any],
+        as_of: int | None = None,
+        origins: list[int] | None = None,
+        validation: Literal["known_at", "retrospective"] = "known_at",
+        held_out_start: int | None = None,
+        policy_frozen_at: int | None = None,
+    ) -> dict[str, Any]:
+        """Read-only paired multi-origin evaluation with baseline underperformance, reserve and contribution-adjusted drawdown. Up to 24 UTC origin timestamps; strict empty availability remains empty."""
+        return engine.evaluate_plans(
+            bounded_object(config),
+            as_of=as_of,
+            origins=bounded_origins(origins),
+            validation=validation,
+            held_out_start=held_out_start,
+            policy_frozen_at=policy_frozen_at,
+        )
+
+    @presenter.tool(server, annotations=readonly)
+    def get_assessment(assessment_id: str) -> dict[str, Any]:
+        """Read an immutable previously issued local assessment and its appended outcomes. This lookup does not issue assessments or append observations."""
+        if not 1 <= len(assessment_id) <= 200:
+            raise ValueError("assessment_id must contain 1–200 characters.")
+        original = engine.assessment(assessment_id)
+        evidence = original.get("evidence", {})
+        outcomes = engine.assessment_outcomes(assessment_id)
+        return {**original, "evidence_summary": {"available_locally": True,
+                "candles": evidence.get("candles_count", len(evidence.get("candles", []))),
+                "observations": evidence.get("observations_count", len(evidence.get("observations", []))),
+                "content_hash": original["content_hash"]},
+                "outcomes": outcomes, "outcomes_truncated": False}
+
+    @presenter.tool(server, annotations=readonly)
+    def get_vigilance(
+        asset: Literal["BTC", "ETH"] = "BTC",
+        source: str | None = None,
+        quote: str | None = None,
+        as_of: int | None = None,
+        horizon_hours: Literal[4, 8] = 4,
+        policy: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Read-only exceptional 4/8-hour observed fragility, reasons, contradictions, missing evidence and expiry. No persistent watch, notification, state transition or crash probability is created."""
+        return engine.vigilance(
+            asset,
+            source,
+            quote,
+            as_of,
+            horizon_hours,
+            bounded_object(policy, "policy") if policy is not None else None,
+        )
+
+    @presenter.tool(server, annotations=readonly)
+    def get_source_catalog() -> dict[str, Any]:
+        """Documented source access, native quotes, rights and dated French entity evidence; not a live availability check."""
+        from .source_catalog import source_catalog
+        return source_catalog()
+
+    @presenter.tool(server, annotations=readonly)
     def get_source_status() -> dict[str, Any]:
         """Use to check collection failures, stale data, configured venue coverage and entity-specific regulatory unknowns."""
         return {**engine.status(), "venues": [asdict(v) for v in VENUES.values()]}
 
-    @server.tool(annotations=readonly)
+    @presenter.tool(server, annotations=readonly)
     def get_forecast(
         asset: Literal["BTC", "ETH"] = "BTC",
         horizon: int = 7,
@@ -164,10 +376,10 @@ def create_server(
     ) -> dict[str, Any]:
         """Experimental historical frequencies at 1–60 days: endpoint up/down, intraperiod up/down barriers. Not calibrated probabilities; include hourly anchor, 24-hour window alignment and sample size."""
         if not 1 <= horizon <= 60:
-            raise ValueError("Horizon entre 1 et 60 jours.")
+            raise ValueError("Horizon must be between 1 and 60 days.")
         return engine.predictions(asset, [horizon], threshold, source, quote)
 
-    @server.tool(annotations=readonly)
+    @presenter.tool(server, annotations=readonly)
     def get_evaluation(
         asset: Literal["BTC", "ETH"] = "BTC",
         horizon: int = 7,
@@ -177,62 +389,115 @@ def create_server(
     ) -> dict[str, Any]:
         """Chronological, non-overlapping evaluation against an unconditional base, with Brier and observed calibration. No claim of profitability."""
         if not 1 <= horizon <= 60:
-            raise ValueError("Horizon entre 1 et 60 jours.")
+            raise ValueError("Horizon must be between 1 and 60 days.")
         result = engine.evaluation(asset, horizon, 0.10, source, quote, validation=validation)
         return {
             **result,
-            "origins": result["origins"][-20:],
-            "origins_truncated": len(result["origins"]) > 20,
+            "origins": result["origins"],
+            "origins_truncated": False,
         }
 
-    @server.tool(annotations=readonly)
+    @presenter.tool(server, annotations=readonly)
     def get_metric_history(
         asset: Literal["BTC", "ETH", "MACRO", "STABLECOINS"],
         metric: str,
         source: str | None = None,
-        limit: int = 100,
+        limit: StrictInt = 100,
+        quote: str | None = None,
+        unit: str | None = None,
+        dimension: dict[str, Any] | None = None,
+        as_of: StrictInt | None = None,
+        start: StrictInt | None = None,
+        end: StrictInt | None = None,
+        cursor: str | None = None,
     ) -> dict[str, Any]:
-        """Read up to 500 observed points with source, unit, native quote, timestamps and coverage metadata. No currency conversion."""
-        if not 1 <= limit <= 500:
-            raise ValueError("limit doit être entre 1 et 500.")
-        rows = [
-            o
-            for o in engine.store.observations(asset, mode=mode)
-            if o.metric == metric and (source is None or o.source == source)
-        ]
-        return {
-            "asset": asset,
-            "metric": metric,
-            "data_mode": mode,
-            "points": [asdict(o) for o in rows[:limit]],
-            "truncated": len(rows) > limit,
-        }
+        """Read known-at native metric history, up to 500 points per page. Pin source, quote, unit and complete dimension to select one series; mixed series are explicitly identified. Repeat selectors with next_cursor to continue a cutoff/watermark-pinned view. Default coverage is 365 days; explicit start/end are UTC seconds. Retention may invalidate a cursor. No currency conversion or collection."""
+        return engine.store.metric_history(asset, metric, source, limit, mode=mode, quote=quote,
+                                           unit=unit, dimension=dimension, as_of=as_of,
+                                           start=start, end=end, cursor=cursor)
 
-    @server.tool(annotations=readonly)
+    @presenter.tool(server, annotations=readonly)
+    def get_metric_series(
+        asset: Literal["BTC", "ETH", "MACRO", "STABLECOINS"],
+        metric: str | None = None, source: str | None = None, quote: str | None = None,
+        unit: str | None = None, dimension: dict[str, Any] | None = None,
+        as_of: StrictInt | None = None, start: StrictInt | None = None,
+        end: StrictInt | None = None, limit: StrictInt = 100,
+    ) -> dict[str, Any]:
+        """Discover stored native series, exact dimensions and known-at date coverage before selecting history. Bounded; no collection or conversion."""
+        return engine.store.metric_series(asset, metric, source=source, mode=mode,
+                                          quote=quote, unit=unit, dimension=dimension,
+                                          as_of=as_of, start=start, end=end, limit=limit)
+
+    @presenter.tool(server, annotations=readonly)
     def explain_metric(metric: str) -> dict[str, Any]:
-        """Use for plain French definitions and interpretation limits. Without a matching key, returns available glossary keys."""
+        """Use for plain English definitions and interpretation limits. Without a matching key, returns available glossary keys."""
         return GLOSSARY.get(metric, {"available_metrics": list(GLOSSARY), "unknown_metric": metric})
 
     @server.tool(annotations=readonly)
     def render_chart(
         asset: Literal["BTC", "ETH"] = "BTC",
-        kind: Literal["price", "weekly", "liquidity", "leverage", "options", "calibration"] = "weekly",
+        kind: Literal[
+            "price",
+            "weekly",
+            "liquidity",
+            "leverage",
+            "options",
+            "calibration",
+            "context",
+            "windows",
+            "plans",
+        ] = "weekly",
         source: str | None = None,
         quote: str | None = None,
         validation: Literal["known_at", "retrospective"] = "known_at",
+        as_of: int | None = None,
+        plan_config: dict[str, Any] | None = None,
     ) -> Image:
         """Create a sourced PNG from observed data: weekly candles, daily price, liquidity, leverage, options or empirical calibration. Missing data returns an error, never a simulated chart."""
         # Temporary output is returned as native MCP image content, no public file hosting needed.
         with tempfile.TemporaryDirectory(prefix="crypto-market-analysis-") as folder:
-            path = engine.chart(
-                kind,
-                asset,
-                Path(folder) / "chart.png",
-                source,
-                quote,
-                int(time.time()),
-                validation=validation,
-            )
+            if kind == "plans":
+                from .charts import render_result_chart
+
+                if plan_config is None:
+                    raise ValueError("A plans chart requires plan_config.")
+                result = engine.compare_plans(bounded_object(plan_config), as_of=as_of, validation=validation)
+                path = render_result_chart("plans", result, Path(folder) / "chart.png")
+            else:
+                path = engine.chart(
+                    kind,
+                    asset,
+                    Path(folder) / "chart.png",
+                    source,
+                    quote,
+                    as_of if as_of is not None else int(time.time()),
+                    validation=validation,
+                )
             return Image(data=path.read_bytes(), format="png")
+
+    @server.tool(annotations=readonly)
+    def get_result_page(
+        handle: str, selection_hash: str, content_hash: str, path: str = "",
+        offset: StrictInt = 0, limit: StrictInt = 100, fragment_offset: StrictInt = 0,
+    ) -> dict[str, Any]:
+        """Read a frozen result by opaque handle and matching hashes, within 5 minutes unless evicted. Empty path pages the complete result; paths use JSON pointers. Structured items preserve order; oversized rows use canonical-json-text fragments with character offsets: concatenate fragments before JSON parsing. No database reread or file/network access."""
+        return result_message(presenter.page(handle, selection_hash, content_hash, path,
+                                             offset, limit, fragment_offset))
+
+    from .operational_reads import register_operational_tools
+
+    register_operational_tools(server, engine, readonly,
+                               present=presenter.tool(server, annotations=readonly))
+
+    from .capacity_mcp import register_capacity_tools
+
+    register_capacity_tools(server, engine, readonly,
+                            present=presenter.tool(server, annotations=readonly))
+
+    from .analysis_mcp import register_analysis_tools
+
+    register_analysis_tools(server, engine, readonly,
+                            present=presenter.tool(server, annotations=readonly))
 
     return server

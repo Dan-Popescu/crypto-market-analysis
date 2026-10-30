@@ -50,7 +50,7 @@ def test_observation_expiries_and_revisions_are_not_overwritten(tmp_path):
 
 def test_invalid_batch_is_atomic(tmp_path):
     store = Store(tmp_path / "state.sqlite")
-    with pytest.raises(ValueError, match="ouverte"):
+    with pytest.raises(ValueError, match="open candle"):
         store.put_candles([candle(), replace(candle(), observed_at=1000)])
     assert store.counts()["candles"] == 0
 

@@ -17,6 +17,8 @@ class VenueSpec:
 
 
 USDT_FIRST = ("USDT", "USD", "USDC", "EUR")
+EUR_FIRST = ("EUR", "USDC", "USD", "USDT")
+FRANCE_PURCHASE_CANDIDATES = ("kraken", "bitvavo", "coinbase")
 
 
 VENUES = {
@@ -25,13 +27,14 @@ VENUES = {
         VenueSpec("binance", "Binance", book_limit=5000, preferred_quotes=USDT_FIRST),
         VenueSpec("coinbase", "Coinbase"),
         VenueSpec("kraken", "Kraken", book_limit=500),
+        VenueSpec("bitvavo", "Bitvavo", book_limit=1000, preferred_quotes=EUR_FIRST),
         VenueSpec("okx", "OKX", book_limit=400, preferred_quotes=USDT_FIRST),
         VenueSpec("bybit", "Bybit", preferred_quotes=USDT_FIRST),
         VenueSpec("bitstamp", "Bitstamp"),
         VenueSpec("bitfinex", "Bitfinex"),
         VenueSpec("kucoin", "KuCoin", preferred_quotes=USDT_FIRST),
         VenueSpec("gate", "Gate", preferred_quotes=USDT_FIRST),
-        VenueSpec("cryptocom", "Crypto.com"),
+        VenueSpec("cryptocom", "Crypto.com", book_limit=50),
         VenueSpec("gemini", "Gemini"),
         VenueSpec("bitget", "Bitget", preferred_quotes=USDT_FIRST),
         VenueSpec("mexc", "MEXC", preferred_quotes=USDT_FIRST),

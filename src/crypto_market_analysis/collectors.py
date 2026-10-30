@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 import time
-from typing import Any
+from threading import RLock
+from typing import TYPE_CHECKING, Any
 
+from .http_accounting import account_exchange, instrument_exchange, public_error
+from .http_limits import HTTPBudgetExceeded, bounded_public_operation, check_http_budget
 from .models import Candle, CollectionResult, Observation
 from .venues import VENUES
 
+if TYPE_CHECKING:
+    from .storage import Store
+
 QUOTES = ("USD", "USDT", "USDC", "EUR")
+log = logging.getLogger(__name__)
 
 
 def select_market(
@@ -86,7 +94,7 @@ def summarize_book(book: dict, source: str, asset: str, quote: str, now: int) ->
     if not bids or not asks or bids[0][0] >= asks[0][0]:
         return []
     mid = (bids[0][0] + asks[0][0]) / 2
-    ts = int(book.get("timestamp") or now * 1000) // 1000
+    ts = int(now * 1000 if book.get("timestamp") is None else book["timestamp"]) // 1000
     if ts > now:
         return []
     meta = {
@@ -94,7 +102,7 @@ def summarize_book(book: dict, source: str, asset: str, quote: str, now: int) ->
         "best_ask": asks[0][0],
         "mid": mid,
         "quote": quote,
-        "timestamp_source": "exchange" if book.get("timestamp") else "observation",
+        "timestamp_source": "exchange" if book.get("timestamp") is not None else "observation",
     }
     out = [
         Observation(
@@ -141,10 +149,10 @@ def funding_interval_hours(data: dict) -> float | None:
     interval = data.get("interval")
     if not isinstance(interval, str):
         return None
-    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([hH])\s*", interval)
+    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([hHsS])\s*", interval)
     if not match:
         return None
-    value = float(match.group(1))
+    value = float(match.group(1)) / (3600 if match.group(2).lower() == "s" else 1)
     return value if math.isfinite(value) and value > 0 else None
 
 
@@ -152,6 +160,64 @@ def _cap(client: Any, name: str) -> bool:
     return bool((getattr(client, "has", {}) or {}).get(name))
 
 
+class ExchangeClients:
+    """Bounded public clients with per-instance rate limits and a TTL catalogue cache.
+
+    The owner closes the pool. A scheduler can reuse it across collection cycles;
+    one-shot callers get an automatically closed pool. No account keys are loaded.
+    """
+
+    def __init__(self, catalogue_ttl: int = 3600):
+        if catalogue_ttl <= 0:
+            raise ValueError("catalogue_ttl must be positive")
+        self.catalogue_ttl = catalogue_ttl
+        self._clients: dict[str, Any] = {}
+        self._catalogues: dict[str, tuple[float, dict]] = {}
+        self._lock = RLock()
+        self._venue_locks = {venue: RLock() for venue in VENUES}
+
+    def client(self, venue: str) -> Any:
+        with self._lock:
+            if venue not in VENUES:
+                raise ValueError(f"Unknown venue: {venue}")
+            if venue not in self._clients:
+                import ccxt
+
+                self._clients[venue] = getattr(ccxt, venue)(
+                    {"enableRateLimit": True, "timeout": 10000, "requests_trust_env": True}
+                )
+            return self._clients[venue]
+
+    def markets(self, venue: str, client: Any) -> dict:
+        cached = self._catalogues.get(venue)
+        if cached is not None and time.monotonic() - cached[0] < self.catalogue_ttl:
+            return cached[1]
+        # CCXT caches load_markets too; refresh that catalogue when our TTL expires.
+        markets = client.load_markets(reload=True) if cached else client.load_markets()
+        if markets:
+            self._catalogues[venue] = (time.monotonic(), markets)
+        return markets
+
+    def close(self) -> None:
+        with self._lock:
+            clients, self._clients = self._clients, {}
+            self._catalogues.clear()
+        for client in clients.values():
+            close = getattr(client, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    log.exception("Failed to close public exchange client")
+
+    def __enter__(self) -> ExchangeClients:
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.close()
+
+
+@account_exchange
 def collect_exchange(
     venue: str,
     assets: list[str],
@@ -161,42 +227,112 @@ def collect_exchange(
     max_pages: int = 20,
     *,
     client: Any = None,
+    quotes: tuple[str, ...] | None = None,
+    since_by_market: dict[tuple[str, str], int | None] | None = None,
+    clients: ExchangeClients | None = None,
+    retain_books: bool = False,
+) -> CollectionResult:
+    """Collect explicit native quotes, or one preferred quote for legacy callers.
+
+    Pagination is bounded by max_pages per asset/quote, including retries on a later
+    run. Missing requested pairs remain missing; no FX or stablecoin parity applies.
+    Injected clients remain owned by the caller. retain_books explicitly opts
+    into bounded raw-level evidence; its single fetch also supplies liquidity.
+    """
+    if venue not in VENUES:
+        return CollectionResult(venue, errors=[f"Unknown venue: {venue}"])
+    if quotes is not None and (not quotes or any(q not in QUOTES for q in quotes)):
+        raise ValueError("quotes must contain native EUR, USD, USDT or USDC quotes")
+    try:
+        check_http_budget()
+    except HTTPBudgetExceeded as exc:
+        return CollectionResult(venue, warnings=[public_error(exc)])
+    if client is not None:
+        instrument_exchange(client, venue)
+        return _collect_exchange(
+            venue, assets, since, now, include, max_pages, client, quotes, since_by_market,
+            retain_books=retain_books,
+        )
+    if clients is None:
+        with ExchangeClients() as owned:
+            return collect_exchange(
+                venue,
+                assets,
+                since,
+                now,
+                include,
+                max_pages,
+                quotes=quotes,
+                since_by_market=since_by_market,
+                clients=owned,
+                retain_books=retain_books,
+            )
+    # Serialise uses of the same instance so its own CCXT rate limiter stays coherent.
+    with clients._venue_locks[venue]:
+        try:
+            client = clients.client(venue)
+            instrument_exchange(client, venue)
+            markets = clients.markets(venue, client)
+        except Exception as exc:
+            return CollectionResult(venue, errors=[f"{venue} client/catalogue: {public_error(exc)}"])
+        return _collect_exchange(
+            venue, assets, since, now, include, max_pages, client, quotes, since_by_market, markets,
+            retain_books=retain_books,
+        )
+
+
+def _collect_exchange(
+    venue: str,
+    assets: list[str],
+    since: int | None,
+    now: int | None,
+    include: tuple[str, ...],
+    max_pages: int,
+    client: Any,
+    quotes: tuple[str, ...] | None,
+    since_by_market: dict[tuple[str, str], int | None] | None,
+    markets: dict | None = None,
+    *,
+    retain_books: bool = False,
 ) -> CollectionResult:
     live_clock = now is None
     now = int(time.time()) if live_clock else int(now)
     result = CollectionResult(venue)
-    if venue not in VENUES:
-        result.errors.append(f"Unknown venue: {venue}")
-        return result
-    if client is None:
-        try:
-            import ccxt
-
-            client = getattr(ccxt, venue)(
-                {"enableRateLimit": True, "timeout": 10000, "requests_trust_env": True}
-            )
-        except Exception as exc:
-            result.errors.append(f"{venue} client: {type(exc).__name__}: {exc}")
-            return result
     try:
-        markets = client.load_markets()
+        markets = client.load_markets() if markets is None else markets
     except Exception as exc:
-        result.errors.append(f"{venue} load_markets: {type(exc).__name__}: {exc}")
+        result.errors.append(f"{venue} load_markets: {public_error(exc)}")
         return result
     if not markets:
         result.errors.append(f"{venue} load_markets: empty market catalogue; source may be unavailable")
         return result
-    for asset in dict.fromkeys(a.upper() for a in assets):
-        spot = select_market(markets, asset, quotes=VENUES[venue].preferred_quotes)
-        swap = select_market(markets, asset, "swap", quotes=VENUES[venue].preferred_quotes)
-        if not spot:
-            result.warnings.append(f"{asset}: no active supported spot market")
+    requests = (
+        (asset, quote)
+        for asset in dict.fromkeys(a.upper() for a in assets)
+        for quote in (dict.fromkeys(quotes) if quotes is not None else (None,))
+    )
+    for asset, requested_quote in requests:
+        try:
+            check_http_budget()
+        except HTTPBudgetExceeded as exc:
+            result.warnings.append(public_error(exc))
+            break
+        preferred = (requested_quote,) if requested_quote else VENUES[venue].preferred_quotes
+        market_since = (since_by_market or {}).get((asset, requested_quote), since)
+        label = f"{asset}/{requested_quote}" if requested_quote else asset
+        spot = select_market(markets, asset, quotes=preferred)
+        swap = select_market(markets, asset, "swap", quotes=preferred)
+        if not spot and (retain_books or any(task in include for task in ("candles", "liquidity"))):
+            result.warnings.append(f"{label}: no active supported spot market")
         if spot and "candles" in include:
             if not _cap(client, "fetchOHLCV"):
-                result.warnings.append(f"{asset}: fetchOHLCV unsupported or requires credentials")
+                result.warnings.append(
+                    f"{label}: fetchOHLCV adapter unsupported; provider availability unknown"
+                )
             else:
-                cursor = since * 1000 if since is not None else None
+                cursor = market_since * 1000 if market_since is not None else None
                 pages = 0
+                candle_count = len(result.candles)
                 try:
                     while pages < max(0, min(max_pages, 100)):
                         raw_binance = (
@@ -214,12 +350,21 @@ def collect_exchange(
                         if live_clock:
                             now = int(time.time())
                         pages += 1
-                        result.candles.extend(
-                            parse_candles(
-                                rows, venue, asset, spot["quote"], now, since, binance_raw=raw_binance
-                            )
+                        parsed = parse_candles(
+                            rows, venue, asset, spot["quote"], now, market_since, binance_raw=raw_binance
                         )
-                        if not rows or since is None:
+                        result.candles.extend(parsed)
+                        if (
+                            pages == 1
+                            and parsed
+                            and market_since is not None
+                            and parsed[0].open_time > market_since + 3600
+                        ):
+                            result.warnings.append(
+                                f"{label}: requested history starts at {market_since}; oldest returned closed candle "
+                                f"is {parsed[0].open_time}; earlier coverage unavailable or contains gaps"
+                            )
+                        if not rows or market_since is None:
                             break
                         next_cursor = max(int(r[0]) for r in rows if r and r[0] is not None) + 3600000
                         if (cursor is not None and next_cursor <= cursor) or next_cursor >= now * 1000:
@@ -227,27 +372,48 @@ def collect_exchange(
                         cursor = next_cursor
                     else:
                         result.warnings.append(
-                            f"{asset}: candle pagination limit reached; history may be incomplete"
+                            f"{label}: candle pagination limit reached; history may be incomplete"
                         )
+                    if len(result.candles) == candle_count:
+                        result.warnings.append(f"{label}: no closed candles returned for requested history")
                 except Exception as exc:
-                    result.errors.append(f"{asset} fetchOHLCV: {type(exc).__name__}: {exc}")
-        if spot and "liquidity" in include:
+                    result.errors.append(f"{label} fetchOHLCV: {public_error(exc)}")
+                    if isinstance(exc, HTTPBudgetExceeded):
+                        return result
+        if spot and ("liquidity" in include or retain_books):
             if not _cap(client, "fetchOrderBook"):
-                result.warnings.append(f"{asset}: fetchOrderBook unsupported or requires credentials")
+                result.warnings.append(
+                    f"{label}: fetchOrderBook adapter unsupported; provider availability unknown"
+                )
             else:
                 try:
                     book = client.fetch_order_book(spot["symbol"], limit=VENUES[venue].book_limit)
                     if live_clock:
                         now = int(time.time())
-                    obs = summarize_book(book, venue, asset, spot["quote"], now)
-                    result.observations.extend(obs)
-                    if not obs:
-                        result.warnings.append(f"{asset}: empty, crossed or future-dated order book")
+                    if "liquidity" in include:
+                        obs = summarize_book(book, venue, asset, spot["quote"], now)
+                        result.observations.extend(obs)
+                        if not obs:
+                            result.warnings.append(f"{label}: empty, crossed or future-dated order book")
+                    if retain_books:
+                        from .book_snapshots import retained_book
+
+                        result.books.append(retained_book(
+                            book, source=venue, asset=asset, quote=spot["quote"],
+                            symbol=spot["symbol"], captured_at=now,
+                            requested_limit=VENUES[venue].book_limit,
+                            provenance={"adapter": "ccxt", "capability": client.has.get("fetchOrderBook"),
+                                        "market_id": spot.get("id")},
+                        ))
                 except Exception as exc:
-                    result.errors.append(f"{asset} fetchOrderBook: {type(exc).__name__}: {exc}")
+                    result.errors.append(f"{label} fetchOrderBook: {public_error(exc)}")
+                    if isinstance(exc, HTTPBudgetExceeded):
+                        return result
         if "derivatives" in include:
             if not swap:
-                result.warnings.append(f"{asset}: no active supported swap market")
+                result.warnings.append(
+                    f"{label}: no active supported swap market in adapter catalogue; provider availability unknown"
+                )
                 continue
             symbol, quote = swap["symbol"], swap["quote"]
             metadata = {
@@ -267,23 +433,30 @@ def collect_exchange(
                 ),
             ):
                 if not _cap(client, capability):
-                    result.warnings.append(f"{asset}: {capability} unsupported or requires credentials")
+                    result.warnings.append(
+                        f"{label}: {capability} adapter unsupported; provider availability unknown"
+                    )
                     continue
                 try:
                     data = getattr(client, method)(symbol)
                     if live_clock:
                         now = int(time.time())
-                    ts = int(data.get("timestamp") or now * 1000) // 1000
+                    ts = int(now * 1000 if data.get("timestamp") is None else data["timestamp"]) // 1000
                     if ts > now:
-                        result.warnings.append(f"{asset} {capability}: future timestamp ignored")
+                        result.warnings.append(f"{label} {capability}: future timestamp ignored")
                         continue
                     detail = {
                         **metadata,
-                        "timestamp_source": "exchange" if data.get("timestamp") else "observation",
+                        "timestamp_source": "exchange"
+                        if data.get("timestamp") is not None
+                        else "observation",
+                        "adapter_capability": client.has.get(capability),
                     }
                     if capability == "fetchFundingRate":
                         detail["funding_interval"] = data.get("interval")
                         detail["funding_interval_hours"] = funding_interval_hours(data)
+                        hours = detail["funding_interval_hours"]
+                        detail["funding_interval_seconds"] = hours * 3600 if hours is not None else None
                     value = data.get(value_key)
                     if value is not None and math.isfinite(float(value)):
                         result.observations.append(
@@ -304,26 +477,28 @@ def collect_exchange(
                                 now,
                                 float(oi_value),
                                 "unknown",
-                                None,
+                                quote,
                                 {**detail, "value_currency": "unknown"},
                             )
                         )
                 except Exception as exc:
-                    result.errors.append(f"{asset} {capability}: {type(exc).__name__}: {exc}")
+                    result.errors.append(f"{label} {capability}: {public_error(exc)}")
+                    if isinstance(exc, HTTPBudgetExceeded):
+                        return result
             if _cap(client, "fetchFundingRateHistory"):
                 try:
                     history = client.fetch_funding_rate_history(
-                        symbol, since=since * 1000 if since is not None else None, limit=100
+                        symbol, since=market_since * 1000 if market_since is not None else None, limit=100
                     )
                     if live_clock:
                         now = int(time.time())
                     if len(history) >= 100:
-                        result.warnings.append(f"{asset}: funding history limited to 100 records")
+                        result.warnings.append(f"{label}: funding history limited to 100 records")
                     for entry in history:
                         ts = int(entry["timestamp"]) // 1000
                         if (
                             ts <= now
-                            and (since is None or ts >= since)
+                            and (market_since is None or ts >= market_since)
                             and entry.get("fundingRate") is not None
                             and math.isfinite(float(entry["fundingRate"]))
                         ):
@@ -341,14 +516,72 @@ def collect_exchange(
                                         **metadata,
                                         "funding_interval": entry.get("interval"),
                                         "funding_interval_hours": funding_interval_hours(entry),
+                                        "funding_interval_seconds": (
+                                            funding_interval_hours(entry) * 3600
+                                            if funding_interval_hours(entry) is not None
+                                            else None
+                                        ),
                                     },
                                 )
                             )
                 except Exception as exc:
-                    result.errors.append(f"{asset} fetchFundingRateHistory: {type(exc).__name__}: {exc}")
+                    result.errors.append(f"{label} fetchFundingRateHistory: {public_error(exc)}")
+                    if isinstance(exc, HTTPBudgetExceeded):
+                        return result
             else:
                 result.warnings.append(
-                    f"{asset}: fetchFundingRateHistory unsupported or requires credentials"
+                    f"{label}: fetchFundingRateHistory adapter unsupported; provider availability unknown"
                 )
     result.candles = list({(c.asset, c.quote, c.open_time): c for c in result.candles}.values())
     return result
+
+
+@bounded_public_operation
+def capture_books(
+    store: Store, *, sources: list[str], assets: list[str], quotes: tuple[str, ...],
+    now: int | None = None, clients: ExchangeClients | None = None,
+) -> dict:
+    """One-shot bounded public capture; caller-owned reusable clients stay open.
+
+    Derived liquidity observations from the same response are also persisted.
+    This does not qualify source access or reuse permission. No keys or private
+    API calls are loaded. Each venue failure is isolated from all other captures.
+    """
+    from .book_snapshots import retain_books
+
+    if (not isinstance(assets, list) or not assets or len(assets) > 2
+            or len(set(assets)) != len(assets) or any(a not in ("BTC", "ETH") for a in assets)):
+        raise ValueError("assets requires unique BTC/ETH selectors.")
+    if not isinstance(quotes, tuple) or not quotes or len(set(quotes)) != len(quotes):
+        raise ValueError("quotes requires explicit unique native quote selectors.")
+    if (not isinstance(sources, list) or not 1 <= len(sources) <= 32
+            or any(not isinstance(source, str) or not 1 <= len(source) <= 256
+                   or not source.isprintable() for source in sources)
+            or len(set(sources)) != len(sources)):
+        raise ValueError("sources requires 1 to 32 unique source identifiers.")
+    if any(quote not in QUOTES for quote in quotes):
+        raise ValueError("quotes requires explicit native EUR/USD/USDT/USDC selectors.")
+    if now is not None and (type(now) is not int or not 0 <= now <= 253402300799):
+        raise ValueError("now requires nonnegative integer UTC epoch seconds.")
+    if clients is None:
+        with ExchangeClients() as owned:
+            return capture_books(store, sources=sources, assets=assets, quotes=quotes, now=now, clients=owned)
+    reports, inserted, observations = [], 0, 0
+    for source in sources:
+        try:
+            result = collect_exchange(source, assets, now=now, include=("liquidity",), quotes=quotes,
+                                      clients=clients, retain_books=True)
+            written = retain_books(store, result.books) if result.books else 0
+            inserted += written
+            receipt = (max(row["captured_at"] for row in result.books) if result.books
+                       else now if now is not None else int(time.time()))
+            saved = store.save_result(result, "book_capture", receipt, data_mode="live")
+            observations += saved["inserted_observations"]
+            reports.append({"source": source, "captured_books": len(result.books), "inserted_books": written,
+                            "inserted_observations": saved["inserted_observations"],
+                            "warnings": result.warnings, "errors": result.errors})
+        except Exception as exc:
+            reports.append({"source": source, "captured_books": 0, "inserted_books": 0, "inserted_observations": 0,
+                            "warnings": [], "errors": [public_error(exc)]})
+    return {"inserted_books": inserted, "inserted_observations": observations, "reports": reports, "data_mode": "live",
+            "whole_book_completeness": "unknown", "source_access_qualified": False}

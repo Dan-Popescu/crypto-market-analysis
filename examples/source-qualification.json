@@ -1,0 +1,12 @@
+{
+  "sources": ["kraken", "coinbase"],
+  "markets": ["BTC/EUR", "ETH/EUR", "BTC/USD", "ETH/USD"],
+  "data_mode": "live",
+  "required_history_days": 730,
+  "freshness_seconds": 10800,
+  "max_gap_hours": 0,
+  "max_gap_details": 100,
+  "max_evidence_rows": 256,
+  "max_query_rows": 1000000,
+  "max_requests": 0
+}

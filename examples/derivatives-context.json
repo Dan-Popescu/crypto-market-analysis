@@ -1,0 +1,129 @@
+{
+  "schema_version": 1,
+  "asset": "BTC",
+  "data_mode": "demo",
+  "quote": "USDT",
+  "policy": {
+    "max_point_age_seconds": 3600,
+    "endpoint_tolerance_seconds": 900
+  },
+  "observations": [
+    {
+      "source": "synthetic-perpetual",
+      "asset": "BTC",
+      "event_time": 1767312000,
+      "observed_at": 1767312000,
+      "quote": "USDT",
+      "data_mode": "demo",
+      "metric": "open_interest_amount",
+      "value": 90000,
+      "unit": "contracts",
+      "metadata": {
+        "symbol": "BTC/USDT:USDT",
+        "market_type": "swap",
+        "settle": "USDT",
+        "timestamp_source": "exchange",
+        "counting_convention": "one_sided",
+        "contract_size": 0.001,
+        "contract_size_unit": "BTC"
+      }
+    },
+    {
+      "source": "synthetic-perpetual",
+      "asset": "BTC",
+      "event_time": 1767312000,
+      "observed_at": 1767312000,
+      "quote": "USDT",
+      "data_mode": "demo",
+      "metric": "funding_rate_projected",
+      "value": -0.0001,
+      "unit": "rate",
+      "metadata": {
+        "symbol": "BTC/USDT:USDT",
+        "market_type": "swap",
+        "settle": "USDT",
+        "timestamp_source": "exchange",
+        "funding_interval": "8h",
+        "funding_kind": "projected"
+      }
+    },
+    {
+      "source": "synthetic-perpetual",
+      "asset": "BTC",
+      "event_time": 1767384000,
+      "observed_at": 1767384000,
+      "quote": "USDT",
+      "data_mode": "demo",
+      "metric": "open_interest_amount",
+      "value": 100000,
+      "unit": "contracts",
+      "metadata": {
+        "symbol": "BTC/USDT:USDT",
+        "market_type": "swap",
+        "settle": "USDT",
+        "timestamp_source": "exchange",
+        "counting_convention": "one_sided",
+        "contract_size": 0.001,
+        "contract_size_unit": "BTC"
+      }
+    },
+    {
+      "source": "synthetic-perpetual",
+      "asset": "BTC",
+      "event_time": 1767384000,
+      "observed_at": 1767384000,
+      "quote": "USDT",
+      "data_mode": "demo",
+      "metric": "funding_rate_projected",
+      "value": 0.0001,
+      "unit": "rate",
+      "metadata": {
+        "symbol": "BTC/USDT:USDT",
+        "market_type": "swap",
+        "settle": "USDT",
+        "timestamp_source": "exchange",
+        "funding_interval": "8h",
+        "funding_kind": "projected"
+      }
+    },
+    {
+      "source": "synthetic-perpetual",
+      "asset": "BTC",
+      "event_time": 1767398400,
+      "observed_at": 1767398400,
+      "quote": "USDT",
+      "data_mode": "demo",
+      "metric": "open_interest_amount",
+      "value": 125000,
+      "unit": "contracts",
+      "metadata": {
+        "symbol": "BTC/USDT:USDT",
+        "market_type": "swap",
+        "settle": "USDT",
+        "timestamp_source": "exchange",
+        "counting_convention": "one_sided",
+        "contract_size": 0.001,
+        "contract_size_unit": "BTC"
+      }
+    },
+    {
+      "source": "synthetic-perpetual",
+      "asset": "BTC",
+      "event_time": 1767398400,
+      "observed_at": 1767398400,
+      "quote": "USDT",
+      "data_mode": "demo",
+      "metric": "funding_rate_projected",
+      "value": 0.0002,
+      "unit": "rate",
+      "metadata": {
+        "symbol": "BTC/USDT:USDT",
+        "market_type": "swap",
+        "settle": "USDT",
+        "timestamp_source": "exchange",
+        "funding_interval": "8h",
+        "funding_kind": "projected"
+      }
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "dossier": {
+    "data_mode": "demo",
+    "markets": [
+      {"asset": "BTC", "source": "demo", "quote": "EUR", "lookbacks": [7, 30, 365, 730]},
+      {"asset": "ETH", "source": "demo", "quote": "EUR", "lookbacks": [7, 30, 365, 730]},
+      {"asset": "BTC", "source": "demo", "quote": "USD", "lookbacks": [7, 30, 365, 730]},
+      {"asset": "ETH", "source": "demo", "quote": "USD", "lookbacks": [7, 30, 365, 730]}
+    ]
+  },
+  "windows": {"horizons": [1, 3, 7, 14], "thresholds": [0.02, 0.05], "max_price_age": 7200},
+  "qualification": {"required_history_days": 730, "max_gap_details": 32, "max_evidence_rows": 32},
+  "freshness_seconds": 7200
+}

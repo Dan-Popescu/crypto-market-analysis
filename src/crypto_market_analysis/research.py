@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 import numpy as np
 import pandas as pd
 
+from .evidence import metric_identity
 from .models import Candle, Observation
 
 _COLUMNS = ["open", "high", "low", "close", "volume", "quote_volume", "taker_buy_quote_volume"]
@@ -25,7 +26,7 @@ def _stamp(t: int) -> str:
 def daily_bars(candles: list[Candle]) -> pd.DataFrame:
     """Aggregate valid complete UTC days, retaining gaps instead of filling them."""
     if len({(c.source, c.asset, c.quote, c.data_mode) for c in candles}) > 1:
-        raise ValueError("Les bougies doivent partager source, actif, devise et mode.")
+        raise ValueError("Candles must share the same source, asset, quote currency and mode.")
     days: dict[int, list[Candle]] = {}
     for c in candles:
         day = c.open_time // 86400 * 86400
@@ -117,20 +118,22 @@ def _summarize_observations(
             if obs.metric in ("option_open_interest_expiry", "option_downside_minus_upside_iv")
             else None
         )
-        key = (obs.source, obs.asset, obs.metric, obs.quote, obs.unit, obs.data_mode, expiry)
+        key = (*metric_identity(obs), expiry)
         groups.setdefault(key, []).append(obs)
     summaries = []
     source_counts: dict[str, int] = {}
     for group in groups.values():
         group.sort(key=lambda o: (o.event_time, o.observed_at))
         latest = group[-1]
+        from .source_catalog import interpret_context
+        comparable = interpret_context([latest], as_of)["observations"][0]["comparable"]
         source_counts[latest.source] = source_counts.get(latest.source, 0) + 1
         changes = {}
         for days in (7, 21):
             cutoff = latest.event_time - days * 86400
             prior = next((o for o in reversed(group) if o.event_time <= cutoff), None)
             # Do not silently turn arbitrarily stale readings into a 7/21-day change.
-            if prior is None or cutoff - prior.event_time > 86400:
+            if not comparable or prior is None or cutoff - prior.event_time > 86400:
                 changes[str(days)] = None
             else:
                 changes[str(days)] = {
@@ -146,6 +149,7 @@ def _summarize_observations(
                 "quote": latest.quote,
                 "unit": latest.unit,
                 "unit_unknown": latest.unit.lower() in ("", "unknown", "inconnu", "unspecified"),
+                "comparable": comparable,
                 "value": float(latest.value),
                 "event_time": _stamp(latest.event_time),
                 "observed_at": _stamp(latest.observed_at),
@@ -195,8 +199,8 @@ def build_analysis(candles: list[Candle], observations: list[Observation], as_of
         "facts": [],
         "contradictions": [],
         "limitations": [
-            "Les bougies incomplètes et les jours incomplets sont exclus.",
-            "Les indicateurs descriptifs ne prédisent pas les rendements.",
+            "Incomplete candles and incomplete days are excluded.",
+            "Descriptive indicators do not predict returns.",
         ],
         "coverage": {
             "complete_days": len(bars),
@@ -206,7 +210,7 @@ def build_analysis(candles: list[Candle], observations: list[Observation], as_of
     }
     if "demo" in modes:
         result["limitations"].append(
-            "Données de démonstration synthétiques : aucune conclusion de marché réelle."
+            "Synthetic demonstration data: no real-market conclusions."
         )
     e = result["evidence"]
     if len(bars):
@@ -223,7 +227,7 @@ def build_analysis(candles: list[Candle], observations: list[Observation], as_of
         if len(w) == 22 and _contiguous(w.index) and (w.close > 0).all():
             e["volatility_21d"] = float(np.log(w.close).diff().dropna().std(ddof=1) * np.sqrt(365))
             e["daily_trend"] = (
-                "hausse" if e["returns"]["21"] > 0 else "baisse" if e["returns"]["21"] < 0 else "stable"
+                "up" if e["returns"]["21"] > 0 else "down" if e["returns"]["21"] < 0 else "flat"
             )
         # Complete weeks only: Monday through Sunday, ending no later than as_of.
         complete = []
@@ -247,7 +251,7 @@ def build_analysis(candles: list[Candle], observations: list[Observation], as_of
             change = complete[-1][1] / complete[-2][1] - 1 if complete[-2][1] > 0 else None
             if change is not None:
                 e["weekly_trend"] = {
-                    "direction": "hausse" if change > 0 else "baisse" if change < 0 else "stable",
+                    "direction": "up" if change > 0 else "down" if change < 0 else "flat",
                     "return": float(change),
                     "week_start": _iso(complete[-1][0]),
                 }
@@ -263,16 +267,16 @@ def build_analysis(candles: list[Candle], observations: list[Observation], as_of
                 "source": candles[0].source,
             }
         if e["daily_trend"]:
-            result["facts"].append(f"Tendance sur 21 jours : {e['daily_trend']}.")
+            result["facts"].append(f"21-day trend: {e['daily_trend']}.")
         if e["weekly_trend"] and e["daily_trend"] and e["weekly_trend"]["direction"] != e["daily_trend"]:
-            result["contradictions"].append("Les directions quotidienne et hebdomadaire divergent.")
+            result["contradictions"].append("Daily and weekly directions diverge.")
     if e["spot_pressure"] is None:
-        result["limitations"].append("Pression spot indisponible : volumes acheteurs incomplets ou absents.")
+        result["limitations"].append("Spot pressure unavailable: taker buy volumes are incomplete or missing.")
     e["observations"], result["coverage"]["observations"] = _summarize_observations(
         observations, as_of, modes
     )
     result["limitations"].append(
-        "Les observations sont descriptives ; les révisions macro et les données réseau ne sont pas utilisées dans le backtest."
+        "Observations are descriptive; macro revisions and network data are not used in the backtest."
     )
     return result
 
@@ -335,9 +339,11 @@ def _estimate(
         "training_end": None,
         "probabilities": None,
         "base_rates": None,
+        "reference_frequencies": None,
+        "reference_confidence_intervals": None,
         "required_effective_samples": 20,
         "confidence_intervals": None,
-        "insufficient_reason": "Il faut 20 fenêtres historiques valides sans chevauchement et 61 jours de caractéristiques.",
+        "insufficient_reason": "Requires 20 valid non-overlapping historical windows and 61 days of feature history.",
     }
     if f is None:
         return base
@@ -360,6 +366,14 @@ def _estimate(
     if selected:
         base["training_start"] = _iso(bars.index[selected[0][0]] + pd.Timedelta(days=1))
         base["training_end"] = _iso(bars.index[selected[-1][0] + horizon] + pd.Timedelta(days=1))
+        # Descriptive evidence survives the conditional estimator's support gate.
+        counts = {key: sum(item[2][key] for item in selected) for key in _EVENTS}
+        base["reference_frequencies"] = {
+            key: count / len(selected) for key, count in counts.items()
+        }
+        base["reference_confidence_intervals"] = {
+            key: _wilson(count, len(selected)) for key, count in counts.items()
+        }
     if len(selected) < 20:
         return base
     x = np.stack([v[1] for v in selected])
@@ -374,7 +388,7 @@ def _estimate(
         insufficient_reason=None,
         confidence_intervals={key: _wilson(sum(selected[n][2][key] for n in nearest), k) for key in _EVENTS},
         probabilities={key: float(np.mean([selected[n][2][key] for n in nearest])) for key in _EVENTS},
-        base_rates={key: float(np.mean([v[2][key] for v in selected])) for key in _EVENTS},
+        base_rates=base["reference_frequencies"],
     )
     return base
 
@@ -385,11 +399,19 @@ def forecast(
     threshold: float = 0.10,
     as_of: int | None = None,
 ) -> dict:
+    """Return empirical evidence and, with sufficient support, conditional estimates.
+
+    Each horizon's reference frequencies and Wilson intervals describe all eligible
+    disjoint outcomes, including samples below the 20-outcome conditional gate.
+    Sample counts and training dates describe that same selection. Feature warmup,
+    gaps and the origin purge apply to both. Legacy base_rates remain available
+    only alongside supported conditional probabilities.
+    """
     if not 0 < threshold < 1:
-        raise ValueError("threshold doit être entre 0 et 1")
+        raise ValueError("threshold must be between 0 and 1")
     horizons = [1, 7, 21, 30, 60] if horizons is None else horizons
     if any(not isinstance(h, int) or isinstance(h, bool) or h < 1 for h in horizons):
-        raise ValueError("Les horizons doivent être des entiers positifs")
+        raise ValueError("Horizons must be positive integers")
     filtered = _asof(candles, as_of)
     closed_hours = [
         c.close_time
@@ -401,16 +423,19 @@ def forecast(
     results = {
         str(h): _estimate(bars, len(bars) - 1, h, threshold)
         if len(bars)
-        else {"status": "insufficient", "probabilities": None, "base_rates": None}
+        else {
+            "status": "insufficient", "probabilities": None, "base_rates": None,
+            "reference_frequencies": None, "reference_confidence_intervals": None,
+        }
         for h in horizons
     }
     stale = bool(
         as_of is not None
         and len(bars)
-        and as_of - int((bars.index[-1] + pd.Timedelta(days=1)).timestamp()) > 2 * 86400
+        and as_of - int((bars.index[-1] + pd.Timedelta(days=1)).timestamp()) >= 7200
     )
     return {
-        "method": "régimes historiques voisins, expérimental",
+        "method": "neighboring historical regimes, experimental",
         "bar_alignment": "rolling_24h_at_last_hourly_close",
         "stale": stale,
         "as_of": _stamp(as_of) if as_of is not None else None,
@@ -424,22 +449,22 @@ def forecast(
             "end": _iso(bars.index[-1] + pd.Timedelta(days=1)) if len(bars) else None,
         },
         "horizons": results,
-        "edge": "non évalué",
+        "edge": "not evaluated",
         "limitations": [
-            "Estimations expérimentales, non calibrées ; aucun avantage démontré.",
-            "Red, up et flat comparent la clôture finale à la clôture initiale ; ce ne sont pas des couleurs de bougies calendaires.",
-            "Les horizons partent de la dernière clôture horaire affichée. Les événements de barrière utilisent les extrêmes de périodes de 24 heures ; leur ordre est inconnu.",
-            "Les variables macro et réseau sont exclues faute de données historiques disponibles au bon moment.",
-            "Les fenêtres avec jours manquants sont exclues.",
-            "Les intervalles de Wilson décrivent les fréquences voisines sous hypothèse d’indépendance ; ils ne prouvent pas une calibration.",
-            "Les prix historiques disponibles peuvent comprendre des révisions ou remblayages inconnus à l’époque.",
+            "Experimental, uncalibrated estimates; no demonstrated edge.",
+            "Red, up and flat compare the endpoint close with the initial close; they are not calendar candle colors.",
+            "Horizons start at the displayed last hourly close. Barrier events use the extremes of 24-hour periods; their sequence is unknown.",
+            "Macro and network variables are excluded because historical data availability at each origin is unknown.",
+            "Windows with missing days are excluded.",
+            "Wilson intervals describe neighboring frequencies under an independence assumption; they do not establish calibration.",
+            "Available historical prices may include revisions or backfills unknown at the time.",
             *(
-                ["Dernière clôture complète vieille de plus de deux jours à la date demandée."]
+                ["The latest complete close is at least two hours old; interfaces apply their configured expiry."]
                 if stale
                 else []
             ),
             *(
-                ["Données de démonstration synthétiques."]
+                ["Synthetic demonstration data."]
                 if filtered and filtered[0].data_mode == "demo"
                 else []
             ),
@@ -465,6 +490,18 @@ def _latest_versions(candles: list[Candle]) -> list[Candle]:
     return list(versions.values())
 
 
+def _post_issuance_barriers(candles, issued_at, endpoint, anchor_price, threshold):
+    """A coarse boundary extreme cannot prove a touch after delayed issuance."""
+    rows = [row for row in candles if row.open_time < endpoint and row.close_time > issued_at]
+    full = [row for row in rows if row.open_time >= issued_at and row.close_time <= endpoint]
+    boundary = [row for row in rows if row not in full]
+    result = {}
+    for key, crossed in (("down_barrier", lambda row: row.low <= anchor_price * (1 - threshold)),
+                         ("up_barrier", lambda row: row.high >= anchor_price * (1 + threshold))):
+        result[key] = 1 if any(crossed(row) for row in full) else None if any(crossed(row) for row in boundary) else 0
+    return result
+
+
 def evaluate(
     candles: list[Candle],
     horizon: int = 7,
@@ -473,17 +510,18 @@ def evaluate(
     anchor_hour_utc: int = 0,
 ) -> dict:
     if not isinstance(horizon, int) or isinstance(horizon, bool) or horizon < 1 or not 0 < threshold < 1:
-        raise ValueError("Horizon ou seuil invalide")
+        raise ValueError("Invalid horizon or threshold")
     if validation not in ("known_at", "retrospective"):
-        raise ValueError("validation doit être known_at ou retrospective")
+        raise ValueError("validation must be known_at or retrospective")
     if (
         not isinstance(anchor_hour_utc, int)
         or isinstance(anchor_hour_utc, bool)
         or not 0 <= anchor_hour_utc <= 23
     ):
-        raise ValueError("anchor_hour_utc doit être un entier entre 0 et 23")
+        raise ValueError("anchor_hour_utc must be an integer between 0 and 23")
     offset = anchor_hour_utc * 3600
     bars = _aligned_bars(_latest_versions(candles), offset)
+    outcome_hours = _latest_versions(candles)
     records = []
     # Derive the first instant when all 24 hourly bars of each anchor day were known.
     first_seen: dict[int, int] = {}
@@ -543,6 +581,9 @@ def evaluate(
         out = _outcome(bars, i, horizon, threshold, anchor_price)
         if out is None:
             continue
+        if issued_at > anchor_time:
+            out.update(_post_issuance_barriers(outcome_hours, issued_at, anchor_time + horizon * 86400,
+                                              anchor_price, threshold))
         prediction.update(
             anchor_time=_stamp(anchor_time),
             issued_at=_stamp(issued_at),
@@ -553,12 +594,13 @@ def evaluate(
         last_time = anchor_time
     metrics = {}
     for key in _EVENTS:
-        if not records:
+        eligible_records = [record for record in records if record[1][key] is not None]
+        if not eligible_records:
             metrics[key] = None
             continue
-        p = np.array([r[0]["probabilities"][key] for r in records])
-        b = np.array([r[0]["base_rates"][key] for r in records])
-        y = np.array([r[1][key] for r in records])
+        p = np.array([r[0]["probabilities"][key] for r in eligible_records])
+        b = np.array([r[0]["base_rates"][key] for r in eligible_records])
+        y = np.array([r[1][key] for r in eligible_records])
         bins = []
         for lo in np.arange(0, 1, 0.2):
             mask = (p >= lo) & (p < lo + 0.2 if lo < 0.8 else p <= 1)
@@ -573,27 +615,29 @@ def evaluate(
                     }
                 )
         metrics[key] = {
+            "sample_size": len(eligible_records),
+            "ambiguous_origins_excluded": len(records) - len(eligible_records),
             "brier": float(np.mean((p - y) ** 2)),
             "base_brier": float(np.mean((b - y) ** 2)),
             "calibration_bins": bins,
         }
     limitations = [
-        "Validation chronologique expérimentale ; les origines évaluées ne se chevauchent pas.",
-        "Les échantillons rares rendent les probabilités et la calibration incertaines.",
-        "La vérité des résultats utilise les dernières bougies futures disponibles ; leur clôture peut avoir été révisée, mais le prix initial est celui connu à l’émission.",
-        "Les horizons commencent à la clôture horaire de référence ; les extrêmes de la première période peuvent inclure le délai avant émission, donc les barrières sont ambiguës pendant ce délai.",
-        "Red, up et flat comparent la clôture finale à la clôture initiale ; ils ne décrivent pas une bougie calendaire.",
+        "Experimental chronological validation; evaluated origins do not overlap.",
+        "Sparse samples make probabilities and calibration uncertain.",
+        "Outcome scoring uses the latest available future candles; their close may have been revised, but the initial price is the one known at issuance.",
+        "Horizons start at the reference hourly close; first-period extremes may include the delay before issuance, so barrier events are ambiguous during that delay.",
+        "Red, up and flat compare the endpoint close with the initial close; they do not describe a calendar candle.",
     ]
     if validation == "retrospective":
         limitations.append(
-            "Rétrospectif : les prix utilisés pour les caractéristiques et l’entraînement peuvent avoir été remblayés ou révisés après chaque origine ; disponibilité historique non vérifiée."
+            "Retrospective: feature and training prices may have been backfilled or revised after each origin; historical availability is not verified."
         )
     else:
         limitations.append(
-            "Seules les versions observées au plus tard à chaque origine sont utilisées pour les caractéristiques et l’entraînement ; les archives incomplètes réduisent la couverture."
+            "Only versions observed by each origin are used for features and training; incomplete archives reduce coverage."
         )
     if candles and candles[0].data_mode == "demo":
-        limitations.append("Données de démonstration synthétiques.")
+        limitations.append("Synthetic demonstration data.")
     return {
         "status": "experimental" if len(records) >= 20 else "insufficient",
         "horizon": horizon,

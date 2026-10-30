@@ -1,0 +1,13 @@
+{
+  "dossier": {
+    "data_mode": "demo",
+    "markets": [
+      {"asset": "BTC", "source": "demo", "quote": "EUR", "lookbacks": [7, 30, 365, 730]},
+      {"asset": "ETH", "source": "demo", "quote": "EUR", "lookbacks": [7, 30, 365, 730]},
+      {"asset": "BTC", "source": "demo", "quote": "USD", "lookbacks": [7, 30, 365, 730]},
+      {"asset": "ETH", "source": "demo", "quote": "USD", "lookbacks": [7, 30, 365, 730]}
+    ]
+  },
+  "previous_as_of": 1793145600,
+  "max_changes": 100
+}

@@ -1,0 +1,404 @@
+"""Lossless bounded retention checks use temporary synthetic SQLite stores only."""
+import hashlib
+import json
+from dataclasses import replace
+
+import pytest
+
+from crypto_market_analysis.book_snapshots import read_books, retain_books, retained_book
+from crypto_market_analysis.cli import main
+from crypto_market_analysis.journal import AssessmentJournal
+from crypto_market_analysis.models import CollectionResult, Observation
+from crypto_market_analysis.recovery import create_backup, restore_backup, verify_backup
+from crypto_market_analysis.storage import Store
+from crypto_market_analysis.storage_policy import (
+    StoragePolicy,
+    archive_directory,
+    archive_rows,
+    inspect_storage,
+    maintain_storage,
+    physical_storage,
+    read_archived_books,
+    restore_archive,
+    verify_archive,
+)
+
+DAY = 86400
+
+
+def book(at=1, source="kraken", event=1000):
+    return retained_book({"timestamp": event, "bids": [["99", "1", 3]], "asks": [["101", "2"]]},
+                         source=source, asset="BTC", quote="EUR", symbol="BTC/EUR", captured_at=at,
+                         requested_limit=500, provenance={"provider": "synthetic-offline-test"})
+
+
+def selectors():
+    return {"sources": ["kraken"], "asset": "BTC", "quote": "EUR", "data_mode": "live", "as_of": 100}
+
+
+def archive_one(store, **changes):
+    policy = replace(StoragePolicy(), **changes)
+    return maintain_storage(store, policy, apply=True, now=10 * DAY)["families"][0]["archive"]
+
+
+def test_default_dry_run_does_not_write_or_delete(tmp_path, capsys):
+    store = Store(tmp_path / "observer.sqlite")
+    retain_books(store, [book()])
+    before = store.path.read_bytes()
+    result = maintain_storage(store, now=10 * DAY)
+    assert result["apply"] is False and result["families"][0]["eligible_batch_rows"] == 1
+    assert read_books(store, **selectors()) == [book()]
+    assert not archive_directory(store.path).exists()
+    assert store.path.read_bytes() == before
+    assert main(["--data-dir", str(tmp_path), "maintain"]) == 0
+    assert json.loads(capsys.readouterr().out)["apply"] is False
+    assert not archive_directory(store.path).exists()
+
+
+def test_verified_archive_roundtrip_preserves_exact_book_and_unknown_clock(tmp_path):
+    store = Store(tmp_path / "observer.sqlite")
+    captures = [book(), book(at=2, source="coinbase", event=None)]
+    retain_books(store, captures)
+    path = archive_one(store)
+    checked = verify_archive(path)
+    assert checked["status"] == "verified" and len(checked["rows"]) == 2
+    assert read_books(store, **selectors()) == []
+    archived = read_archived_books(store.path, **{**selectors(), "sources": ["kraken", "coinbase"]})
+    assert archived["books"] == captures and archived["storage_tier"] == "archive"
+    assert archived["books"][1]["event_time"] is None
+    assert restore_archive(path, store)["inserted_rows"] == 0
+    assert restore_archive(path, store, apply=True)["inserted_rows"] == 2
+    assert restore_archive(path, store, apply=True)["inserted_rows"] == 0
+    assert read_books(store, **selectors()) == [captures[0]]
+
+
+def test_interruption_after_archive_before_delete_reuses_original_file(tmp_path, monkeypatch):
+    store = Store(tmp_path / "observer.sqlite")
+    retain_books(store, [book()])
+    import crypto_market_analysis.storage_policy as module
+    publish = module.archive_rows
+
+    def interrupted(*args, **kwargs):
+        publish(*args, **kwargs)
+        raise RuntimeError("crash before hot deletion")
+
+    monkeypatch.setattr(module, "archive_rows", interrupted)
+    with pytest.raises(RuntimeError, match="before hot deletion"):
+        archive_one(store)
+    assert read_books(store, **selectors()) == [book()]
+    monkeypatch.setattr(module, "archive_rows", publish)
+    path = archive_one(store)
+    assert verify_archive(path)["rows"][0]["payload"]
+    assert len(list(archive_directory(store.path).iterdir())) == 1
+    assert read_books(store, **selectors()) == []
+
+
+def test_interrupted_partial_staging_resumes_without_losing_originals(tmp_path):
+    store = Store(tmp_path / "observer.sqlite")
+    retain_books(store, [book()])
+    with store.connection() as con:
+        rows = [dict(row) for row in con.execute("SELECT * FROM book_snapshots")]
+    encoded = json.dumps({"schema_version": 1, "family": "book_snapshots", "rows": rows},
+                         sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode()
+    directory = archive_directory(store.path)
+    directory.mkdir()
+    pending = directory / (hashlib.sha256(encoded).hexdigest() + ".pending")
+    pending.write_bytes(encoded[:25])
+    target = archive_rows(store, "book_snapshots", rows)
+    assert not pending.exists() and verify_archive(target)["rows"] == rows
+    assert read_books(store, **selectors()) == [book()]
+
+
+def test_concurrent_late_capture_is_not_deleted_by_snapshot_batch(tmp_path, monkeypatch):
+    store = Store(tmp_path / "observer.sqlite")
+    other = Store(store.path)
+    retain_books(store, [book()])
+    import crypto_market_analysis.storage_policy as module
+    publish = module.archive_rows
+
+    def interleave(*args, **kwargs):
+        path = publish(*args, **kwargs)
+        retain_books(other, [book(at=2)])
+        return path
+
+    monkeypatch.setattr(module, "archive_rows", interleave)
+    result = maintain_storage(store, apply=True, now=10 * DAY)
+    assert result["families"][0]["deleted_rows"] == 1
+    assert read_books(store, **selectors()) == [book(at=2)]
+
+
+def test_archive_exact_byte_quota_and_corruption_fail_closed(tmp_path):
+    store = Store(tmp_path / "observer.sqlite")
+    retain_books(store, [book()])
+    with store.connection() as con:
+        rows = [dict(row) for row in con.execute("SELECT * FROM book_snapshots")]
+    path = archive_rows(store, "book_snapshots", rows)
+    actual = physical_storage(store.path)["archive_bytes"]
+    assert actual == path.stat().st_size
+    assert archive_rows(store, "book_snapshots", rows, replace(StoragePolicy(), archive_max_bytes=actual)) == path
+    retain_books(store, [book(at=2)])
+    with pytest.raises(ValueError, match="Archive byte budget"):
+        archive_one(store, archive_max_bytes=actual)
+    assert read_books(store, **selectors()) == [book(at=2)]
+    path.write_bytes(path.read_bytes() + b" ")
+    with pytest.raises(ValueError, match="checksum"):
+        verify_archive(path)
+    with pytest.raises(ValueError):
+        restore_archive(path, store, apply=True)
+
+
+def test_bounded_batches_preserve_latest_runs_and_all_journal_originals(tmp_path):
+    store = Store(tmp_path / "observer.sqlite")
+    journal = AssessmentJournal(store)
+    issued = journal.issue("request", {"synthetic": True}, {}, issued_at=1)
+    outcome = journal.append_outcome(issued["assessment_id"], "outcome", {"synthetic": True}, observed_at=2)
+    retain_books(store, [book(at=at) for at in range(1, 5)])
+    for at in (1, 2, 3):
+        store.record_run(CollectionResult("kraken"), "options", at)
+    result = maintain_storage(store, replace(StoragePolicy(), batch_rows=2), apply=True, now=40 * DAY)
+    assert [item["deleted_rows"] for item in result["families"]] == [2, 2]
+    assert journal.get(issued["assessment_id"]) == issued
+    assert journal.outcomes(issued["assessment_id"]) == [outcome]
+    assert store.runs()[0]["observed_at"] == 3
+
+
+def test_hot_wal_guard_backpressure_keeps_reads_and_idempotent_retries(tmp_path):
+    store = Store(tmp_path / "observer.sqlite")
+    capture = book()
+    observation = Observation("kraken", "BTC", "price", 1, 1, 100, "EUR", "EUR")
+    retain_books(store, [capture])
+    store.put_observations([observation])
+    store.storage_policy = replace(StoragePolicy(), hot_max_bytes=1)
+    assert retain_books(store, [capture]) == 0
+    assert store.put_observations([observation]) == 0
+    assert read_books(store, **selectors()) == [capture]
+    with pytest.raises(ValueError, match="Hot SQLite/WAL"):
+        retain_books(store, [book(at=2)])
+    assert archive_one(store)
+    assert read_books(store, **selectors()) == []
+
+
+def test_backup_restore_includes_verified_retention_archives(tmp_path):
+    store = Store(tmp_path / "source" / "observer.sqlite")
+    retain_books(store, [book()])
+    archive_one(store)
+    bundle = tmp_path / "backup"
+    create_backup(store.path, bundle)
+    assert verify_backup(bundle)["manifest"]["retention_archives"]
+    restored = restore_backup(bundle, tmp_path / "restored")
+    assert read_archived_books(restored["database"], **selectors())["books"] == [book()]
+
+
+def test_inspection_reports_actual_utf8_payload_and_physical_files(tmp_path):
+    store = Store(tmp_path / "observer.sqlite")
+    retain_books(store, [book()])
+    status = inspect_storage(store.path)
+    assert status["physical"]["database_bytes"] == store.path.stat().st_size
+    assert status["families"]["book_snapshots"]["payload_bytes"] > 0
+    assert status["limits"]["kind"] == "admission_budgets_not_filesystem_quota"
+
+
+def test_book_budget_counter_tracks_prune_restore_and_duplicate_retries(tmp_path):
+    store = Store(tmp_path / "observer.sqlite")
+    retain_books(store, [book()])
+    with store.connection() as con:
+        size = con.execute("SELECT payload_bytes FROM book_snapshot_usage").fetchone()[0]
+    store.storage_policy = replace(StoragePolicy(), book_hot_max_bytes=size)
+    assert retain_books(store, [book()]) == 0
+    with pytest.raises(ValueError, match="Book hot byte budget"):
+        retain_books(store, [book(at=2)])
+    path = archive_one(store)
+    with store.connection() as con:
+        assert con.execute("SELECT payload_bytes FROM book_snapshot_usage").fetchone()[0] == 0
+    assert restore_archive(path, store, apply=True)["inserted_rows"] == 1
+    with store.connection() as con:
+        assert con.execute("SELECT payload_bytes FROM book_snapshot_usage").fetchone()[0] == size
+
+
+def test_journal_growth_guard_preserves_immutable_idempotent_retries(tmp_path):
+    store = Store(tmp_path / "observer.sqlite")
+    journal = AssessmentJournal(store)
+    issued = journal.issue("request", {"synthetic": True}, {}, issued_at=1)
+    outcome = journal.append_outcome(issued["assessment_id"], "outcome", {}, observed_at=2)
+    store.storage_policy = replace(StoragePolicy(), hot_max_bytes=1)
+    assert journal.issue("request", {"synthetic": True}, {}, issued_at=99) == issued
+    assert journal.append_outcome(issued["assessment_id"], "outcome", {}, observed_at=99) == outcome
+    with pytest.raises(ValueError, match="Hot SQLite/WAL"):
+        journal.issue("request-new", {"synthetic": True}, {}, issued_at=3)
+    with pytest.raises(ValueError, match="Hot SQLite/WAL"):
+        journal.append_outcome(issued["assessment_id"], "outcome-new", {}, observed_at=3)
+    assert journal.get(issued["assessment_id"]) == issued
+    assert journal.outcomes(issued["assessment_id"]) == [outcome]
+
+
+def test_archive_file_quota_and_bounded_reader_report_incomplete_selection(tmp_path):
+    store = Store(tmp_path / "observer.sqlite")
+    retain_books(store, [book()])
+    archive_one(store, batch_rows=1)
+    retain_books(store, [book(at=2)])
+    with pytest.raises(ValueError, match="Archive byte budget"):
+        archive_one(store, batch_rows=1, archive_max_files=1)
+    archive_one(store, batch_rows=1)
+    selected = read_archived_books(store.path, **selectors(), max_archives=1)
+    assert selected["coverage"] == {"archives_scanned": 1, "archives_truncated": True, "selection_complete": False}
+    assert read_archived_books(store.path, **selectors(), max_archives=2)["books"] == [book(at=2)]
+
+
+def test_wal_bytes_count_toward_hot_admission(tmp_path):
+    import sqlite3
+
+    store = Store(tmp_path / "observer.sqlite")
+    retain_books(store, [book()])
+    reader = sqlite3.connect(store.path)
+    writer = sqlite3.connect(store.path)
+    try:
+        reader.execute("BEGIN")
+        reader.execute("SELECT * FROM book_snapshots").fetchall()
+        writer.execute("INSERT INTO runs(source,task,observed_at,payload) VALUES('test','test',1,?)", ("x" * 50000,))
+        writer.commit()
+        sizes = physical_storage(store.path)
+        assert sizes["wal_bytes"] > 0
+        store.storage_policy = replace(StoragePolicy(), write_reserve_bytes=1,
+                                       hot_max_bytes=sizes["hot_bytes"] - sizes["wal_bytes"] + 1)
+        with pytest.raises(ValueError, match="Hot SQLite/WAL"):
+            retain_books(store, [book(at=2)])
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_dense_liquidity_hour_refuses_unbounded_compaction_and_preserves_raw(tmp_path):
+    from crypto_market_analysis.retention import compact_liquidity
+
+    store = Store(tmp_path / "observer.sqlite")
+    # Different sources preserve 4097 distinct observations within one UTC hour.
+    store.put_observations([Observation(f"synthetic-{n}", "BTC", "spread_bps", 1, 1, 1, "bps")
+                            for n in range(4097)])
+    with pytest.raises(ValueError, match="compaction bound"):
+        compact_liquidity(store, now=10 * DAY)
+    assert store.counts()["observations"] == 4097
+    assert not archive_directory(store.path).exists()
+
+
+def test_inspection_commands_never_initialize_missing_database(tmp_path, capsys):
+    assert main(["--data-dir", str(tmp_path), "maintain"]) == 2
+    assert "existing database" in capsys.readouterr().err
+    assert not (tmp_path / "observer.sqlite").exists()
+    assert main(["--data-dir", str(tmp_path), "storage-policy"]) == 2
+    assert not (tmp_path / "observer.sqlite").exists()
+
+
+def test_pruning_all_books_never_reuses_ids_or_breaks_archive_tie_selection(tmp_path):
+    store = Store(tmp_path / "observer.sqlite")
+    retain_books(store, [book()])
+    first = archive_one(store)
+    later = retained_book({"timestamp": 1000, "bids": [["99", "1"]], "asks": [["103", "1"]]},
+                          source="kraken", asset="BTC", quote="EUR", symbol="BTC/EUR", captured_at=1,
+                          requested_limit=500)
+    retain_books(store, [later])
+    with store.connection() as con:
+        assert con.execute("SELECT id FROM book_snapshots").fetchone()[0] == 2
+    second = archive_one(store)
+    assert first != second
+    assert read_archived_books(store.path, **selectors())["books"] == [later]
+
+
+def test_run_retention_preserves_latest_available_clock_per_mode_not_max_id(tmp_path):
+    store = Store(tmp_path / "observer.sqlite")
+    # An old restored live run has a higher ID than the latest live clock.
+    # Later demo/import/legacy modes each retain their own scheduling evidence.
+    clocks = [(300, "live"), (100, "live"), (400, "demo"), (200, "demo"),
+              (350, "import"), (50, "import"), (250, None), (10, None)]
+    with store.connection() as con:
+        for at, mode in clocks:
+            payload = {"source": "kraken", "task": "options", "observed_at": at}
+            if mode is not None:
+                payload["data_mode"] = mode
+            con.execute("INSERT INTO runs(source,task,observed_at,payload) VALUES(?,?,?,?)",
+                        ("kraken", "options", at, json.dumps(payload)))
+    result = maintain_storage(store, apply=True, now=40 * DAY)
+    assert result["families"][0]["deleted_rows"] == 4
+    with store.connection() as con:
+        retained = {(row["observed_at"], json.loads(row["payload"]).get("data_mode"))
+                    for row in con.execute("SELECT observed_at,payload FROM runs")}
+    assert retained == {(300, "live"), (400, "demo"), (350, "import"), (250, None)}
+
+
+@pytest.mark.parametrize("family", ["runs", "observations"])
+def test_restored_archive_duplicate_retry_bypasses_exceeded_quota(tmp_path, family):
+    store = Store(tmp_path / "observer.sqlite")
+    if family == "runs":
+        store.record_run(CollectionResult("kraken"), "options", 1)
+    else:
+        store.put_observations([Observation("kraken", "BTC", "spread_bps", 1, 1, 100, "bps")])
+    with store.connection() as con:
+        rows = [dict(row) for row in con.execute(f'SELECT * FROM "{family}"')]
+    path = archive_rows(store, family, rows)
+    with store.connection() as con:
+        con.execute(f'DELETE FROM "{family}"')
+    assert restore_archive(path, store, apply=True)["inserted_rows"] == 1
+    store.storage_policy = replace(StoragePolicy(), hot_max_bytes=1, archive_max_bytes=1)
+    before = store.path.read_bytes()
+    assert restore_archive(path, store, apply=True)["inserted_rows"] == 0
+    assert store.path.read_bytes() == before
+    with store.connection() as con:
+        assert con.execute(f'SELECT COUNT(*) FROM "{family}"').fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("existing_archive", [False, True])
+def test_archive_parent_and_child_directory_sync_precede_hot_delete(tmp_path, monkeypatch, existing_archive):
+    from contextlib import contextmanager
+
+    import crypto_market_analysis.storage_policy as module
+
+    store = Store(tmp_path / "observer.sqlite")
+    retain_books(store, [book()])
+    with store.connection() as con:
+        rows = [dict(row) for row in con.execute("SELECT * FROM book_snapshots")]
+    previous = archive_rows(store, "book_snapshots", rows) if existing_archive else None
+    events = []
+    sync = module._sync_path
+    connection = store.connection
+
+    def spy_sync(path):
+        sync(path)
+        events.append(("sync", path))
+
+    @contextmanager
+    def trace_deletion():
+        with connection() as con:
+            con.set_trace_callback(lambda sql: events.append(("delete", None))
+                                   if sql.startswith('DELETE FROM "book_snapshots"') else None)
+            yield con
+
+    monkeypatch.setattr(module, "_sync_path", spy_sync)
+    monkeypatch.setattr(store, "connection", trace_deletion)
+    result = maintain_storage(store, apply=True, now=10 * DAY)
+    assert result["families"][0]["deleted_rows"] == 1
+    assert events.index(("sync", store.path.parent)) < events.index(("sync", archive_directory(store.path)))
+    assert events.index(("sync", archive_directory(store.path))) < events.index(("delete", None))
+    if existing_archive:
+        assert events.index(("sync", previous)) < events.index(("sync", archive_directory(store.path)))
+
+
+@pytest.mark.parametrize("existing_archive", [False, True])
+def test_archive_parent_sync_failure_never_authorizes_hot_delete(tmp_path, monkeypatch, existing_archive):
+    import crypto_market_analysis.storage_policy as module
+
+    store = Store(tmp_path / "observer.sqlite")
+    retain_books(store, [book()])
+    if existing_archive:
+        with store.connection() as con:
+            rows = [dict(row) for row in con.execute("SELECT * FROM book_snapshots")]
+        archive_rows(store, "book_snapshots", rows)
+    sync = module._sync_path
+
+    def fail_parent(path):
+        if path == store.path.parent:
+            raise OSError("synthetic parent directory fsync failure")
+        sync(path)
+
+    monkeypatch.setattr(module, "_sync_path", fail_parent)
+    with pytest.raises(OSError, match="parent directory fsync"):
+        maintain_storage(store, apply=True, now=10 * DAY)
+    assert read_books(store, **selectors()) == [book()]

@@ -7197,12 +7197,12 @@
   "asset": "BTC",
   "quote": "USD",
   "limitations": [
-    "Validation chronologique expérimentale ; les origines évaluées ne se chevauchent pas.",
-    "Les échantillons rares rendent les probabilités et la calibration incertaines.",
-    "La vérité des résultats utilise les dernières bougies futures disponibles ; leur clôture peut avoir été révisée, mais le prix initial est celui connu à l’émission.",
-    "Les horizons commencent à la clôture horaire de référence ; les extrêmes de la première période peuvent inclure le délai avant émission, donc les barrières sont ambiguës pendant ce délai.",
-    "Red, up et flat comparent la clôture finale à la clôture initiale ; ils ne décrivent pas une bougie calendaire.",
-    "Rétrospectif : les prix utilisés pour les caractéristiques et l’entraînement peuvent avoir été remblayés ou révisés après chaque origine ; disponibilité historique non vérifiée.",
-    "Données de démonstration synthétiques."
+    "Experimental chronological validation; evaluated origins do not overlap.",
+    "Sparse samples make probabilities and calibration uncertain.",
+    "Outcome truth uses the latest available future candles; their close may have been revised, but the initial price is the one known at issuance.",
+    "Horizons start at the reference hourly close; extremes of the first period may include the delay before issuance, so barriers are ambiguous during that delay.",
+    "Red, up and flat compare the final close with the initial close; they do not describe a calendar candle.",
+    "Retrospective: prices used for features and training may have been backfilled or revised after each origin; historical availability is not verified.",
+    "Synthetic demonstration data."
   ]
 }

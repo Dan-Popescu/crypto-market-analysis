@@ -1,0 +1,16 @@
+{
+  "refresh": false,
+  "data_mode": "live",
+  "sources": ["kraken"],
+  "markets": ["BTC/EUR", "ETH/EUR", "BTC/USD", "ETH/USD"],
+  "required_history_days": 730,
+  "history_days": 7,
+  "freshness_seconds": 10800,
+  "max_gap_hours": 0,
+  "max_gap_details": 100,
+  "max_evidence_rows": 64,
+  "max_query_rows": 250000,
+  "max_storage_bytes": 536870912,
+  "max_pages": 2,
+  "max_logical_operations": 64
+}

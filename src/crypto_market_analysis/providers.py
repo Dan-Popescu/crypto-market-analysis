@@ -7,41 +7,100 @@ import io
 import math
 import time
 from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
+from .http_accounting import account_collection, httpx_get, mark_uninstrumented, prepare_httpx, public_error
+from .http_limits import HTTPBudgetExceeded, check_http_budget, current_http_budget
 from .models import CollectionResult, Observation
 
 
+class RetryDeferred(RuntimeError):
+    """A transient failure with a UTC deadline, safe to persist in run errors."""
+
+    def __init__(self, retry_at: float, reason: str):
+        self.retry_at = retry_at
+        super().__init__(f"{reason}; retry_at={retry_at:.3f}")
+
+
+def _retry_delay(value: str | None, now: float) -> float:
+    try:
+        delay = float(value) if value is not None else 0.25
+        return max(0.0, delay) if math.isfinite(delay) else 0.25
+    except ValueError:
+        try:
+            return max(0.0, parsedate_to_datetime(value).timestamp() - now)
+        except (ValueError, TypeError, OverflowError):
+            return 0.25
+
+
+def _sleep_before_retry(delay: float) -> None:
+    """Bound our own wait; the next attempt still needs transport admission."""
+    budget = current_http_budget()
+    if budget is not None:
+        budget.check()
+        delay = min(delay, budget.remaining())
+    time.sleep(delay)
+    if budget is not None:
+        budget.check()
+
+
 class PublicHTTP:
-    def __init__(self, timeout: float = 10):
-        self.client = httpx.Client(
-            timeout=timeout, follow_redirects=True, headers={"User-Agent": "crypto-market-analysis/0.1"}
+    def __init__(self, timeout: float = 10, *, client: httpx.Client | None = None):
+        self.client = client if client is not None else httpx.Client(
+            timeout=timeout, follow_redirects=True, headers={"User-Agent": "crypto-market-analysis/0.2"}
         )
 
     def close(self):
         self.client.close()
 
     def _get(self, url: str, params: dict | None = None):
+        check_http_budget()
+        prepare_httpx(self.client, url)
+        # Keep at most one short retry within a one-second worker sleep budget.
+        # Longer server deadlines are returned to the persistent scheduler.
+        origin = urlsplit(url).netloc
+        deadlines = getattr(self, "_deadlines", {})
+        self._deadlines = deadlines
+        if deadlines.get(origin, 0) > time.time():
+            raise RetryDeferred(deadlines[origin], "Origin cooldown")
         for attempt in range(2):
+            check_http_budget()
             try:
-                response = self.client.get(url, params=params)
+                response = httpx_get(self.client, url, params=params)
                 response.raise_for_status()
                 return response
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
-                if attempt or not (status == 429 or 500 <= status < 600):
+                if not (status == 429 or 500 <= status < 600):
                     raise
+                now = time.time()
+                delay = _retry_delay(exc.response.headers.get("retry-after"), now)
+                if attempt or delay > 1:
+                    deadline = now + max(delay, 1)
+                    deadlines[origin] = deadline
+                    raise RetryDeferred(deadline, f"HTTP {status}") from exc
                 try:
-                    delay = float(exc.response.headers.get("retry-after", "0.25"))
-                except ValueError:
-                    delay = 0.25
-                time.sleep(min(max(delay, 0), 1))
-            except httpx.TransportError:
-                if attempt:
+                    _sleep_before_retry(delay)
+                except HTTPBudgetExceeded:
+                    # A shorter invocation deadline must not erase the server's
+                    # remaining cooldown when this client is reused later.
+                    deadlines[origin] = now + delay
                     raise
-                time.sleep(0.25)
+            except httpx.TransportError as exc:
+                if attempt:
+                    deadline = time.time() + 1
+                    deadlines[origin] = deadline
+                    raise RetryDeferred(deadline, type(exc).__name__) from exc
+                now = time.time()
+                try:
+                    _sleep_before_retry(0.25)
+                except HTTPBudgetExceeded:
+                    deadlines[origin] = now + 0.25
+                    raise
         raise RuntimeError("unreachable")
 
     def get_json(self, url: str, params: dict | None = None):
@@ -52,7 +111,10 @@ class PublicHTTP:
 
 
 def _date(value: str) -> int:
-    return int(datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=UTC).timestamp())
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return int(parsed.astimezone(UTC).timestamp())
 
 
 def parse_options(instruments: list[dict], summaries: list[dict], asset: str, now: int) -> list[Observation]:
@@ -177,6 +239,7 @@ def parse_options(instruments: list[dict], summaries: list[dict], asset: str, no
     return out
 
 
+@account_collection
 def collect_options(assets: list[str], now: int | None = None, *, client: Any = None) -> CollectionResult:
     now = int(time.time()) if now is None else int(now)
     own_client = client is None
@@ -185,8 +248,10 @@ def collect_options(assets: list[str], now: int | None = None, *, client: Any = 
         try:
             client = PublicHTTP()
         except Exception as exc:
-            result.errors.append(f"Deribit HTTP client: {type(exc).__name__}: {exc}")
+            result.errors.append(f"Deribit HTTP client: {public_error(exc)}")
             return result
+    if not isinstance(client, PublicHTTP):
+        mark_uninstrumented("deribit")
     for asset in dict.fromkeys(a.upper() for a in assets):
         try:
             root = "https://www.deribit.com/api/v2/public/"
@@ -197,19 +262,23 @@ def collect_options(assets: list[str], now: int | None = None, *, client: Any = 
                 root + "get_book_summary_by_currency", {"currency": asset, "kind": "option"}
             )
             if "error" in instruments or "error" in summaries:
-                raise ValueError(str(instruments.get("error") or summaries.get("error")))
+                raise ValueError("Provider returned an error response")
             observations = parse_options(instruments["result"], summaries["result"], asset, now)
             result.observations.extend(observations)
             if not observations:
                 result.warnings.append(f"{asset}: no usable option summaries")
         except Exception as exc:
-            result.errors.append(f"{asset} Deribit public options: {type(exc).__name__}: {exc}")
+            result.errors.append(f"{asset} Deribit public options: {public_error(exc)}")
+            if isinstance(exc, HTTPBudgetExceeded):
+                break
     if own_client:
         client.close()
     return result
 
 
-def collect_context(now: int | None = None, days: int = 365, *, client: Any = None) -> list[CollectionResult]:
+@account_collection
+def collect_context(now: int | None = None, days: int = 365, *, client: Any = None,
+                    sources: tuple[str, ...] = ("coinmetrics", "defillama", "fred")) -> list[CollectionResult]:
     now = int(time.time()) if now is None else int(now)
     days = max(1, min(int(days), 3650))
     start = now - days * 86400
@@ -219,13 +288,29 @@ def collect_context(now: int | None = None, days: int = 365, *, client: Any = No
             client = PublicHTTP()
         except Exception as exc:
             return [
-                CollectionResult(source, errors=[f"HTTP client: {type(exc).__name__}: {exc}"])
-                for source in ("coinmetrics", "defillama", "fred")
+                CollectionResult(source, errors=[f"HTTP client: {public_error(exc)}"])
+                for source in sources
             ]
+    if not isinstance(client, PublicHTTP):
+        for source in sources:
+            mark_uninstrumented(source)
+
+    def stopped(result):
+        try:
+            check_http_budget()
+            return False
+        except HTTPBudgetExceeded as exc:
+            message = public_error(exc)
+            if message not in result.warnings:
+                result.warnings.append(message)
+            return True
+
     results = []
     network = CollectionResult("coinmetrics")
-    for asset in ("BTC", "ETH"):
+    for asset in (("BTC", "ETH") if "coinmetrics" in sources else ()):
         for metric in ("AdrActCnt", "TxCnt"):
+            if stopped(network):
+                break
             try:
                 data = client.get_json(
                     "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics",
@@ -258,11 +343,12 @@ def collect_context(now: int | None = None, days: int = 365, *, client: Any = No
                 if data.get("next_page_url"):
                     network.warnings.append(f"{asset} {metric}: response truncated; next page not fetched")
             except Exception as exc:
-                network.errors.append(f"{asset} {metric} Coin Metrics: {type(exc).__name__}: {exc}")
-    results.append(network)
+                network.errors.append(f"{asset} {metric} Coin Metrics: {public_error(exc)}")
+    if "coinmetrics" in sources:
+        results.append(network)
     stable = CollectionResult("defillama")
     try:
-        rows = client.get_json("https://stablecoins.llama.fi/stablecoincharts/all")
+        rows = client.get_json("https://stablecoins.llama.fi/stablecoincharts/all") if "defillama" in sources and not stopped(stable) else []
         for row in rows:
             ts = int(row["date"])
             value = (row.get("totalCirculatingUSD") or {}).get("peggedUSD")
@@ -281,10 +367,13 @@ def collect_context(now: int | None = None, days: int = 365, *, client: Any = No
                     )
                 )
     except Exception as exc:
-        stable.errors.append(f"DefiLlama stablecoincharts/all: {type(exc).__name__}: {exc}")
-    results.append(stable)
+        stable.errors.append(f"DefiLlama stablecoincharts/all: {public_error(exc)}")
+    if "defillama" in sources:
+        results.append(stable)
     fred = CollectionResult("fred")
-    for series in ("DFII10", "DTWEXBGS", "DGS2", "DGS10", "VIXCLS"):
+    for series in (("DFII10", "DTWEXBGS", "DGS2", "DGS10", "VIXCLS") if "fred" in sources else ()):
+        if stopped(fred):
+            break
         try:
             raw = client.get_text(
                 "https://fred.stlouisfed.org/graph/fredgraph.csv",
@@ -310,8 +399,9 @@ def collect_context(now: int | None = None, days: int = 365, *, client: Any = No
                         )
                     )
         except Exception as exc:
-            fred.errors.append(f"{series} FRED CSV: {type(exc).__name__}: {exc}")
-    results.append(fred)
+            fred.errors.append(f"{series} FRED CSV: {public_error(exc)}")
+    if "fred" in sources:
+        results.append(fred)
     if own_client:
         client.close()
     return results

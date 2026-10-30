@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "config": {
+    "schema_version": 1,
+    "asset": "BTC",
+    "quote": "EUR",
+    "source": "demo",
+    "data_mode": "demo",
+    "start_time": 1735689600,
+    "contributions": [{"time": 1735689600, "amount": "250"}],
+    "schedule": [{"time": 1735689600, "amount": "100"}],
+    "starting_holdings": {"quantity": "0", "cost": null},
+    "fees": {"asset": "quote", "rate": "0.002", "fixed": "0"},
+    "execution": {
+      "assumption": "historical_configured_costs",
+      "timeframe": "1h",
+      "spread_bps": "10",
+      "slippage_bps": "5",
+      "quantity_step": "0.00000001",
+      "price_step": "0.01",
+      "max_price_age_seconds": 3600
+    },
+    "plans": {
+      "split": {
+        "initial_fraction": "0.5",
+        "levels": [{"decline": "0.05", "fraction": "0.5"}],
+        "max_wait_days": 7,
+        "fallback": "buy_at_deadline"
+      },
+      "deferred": {
+        "fraction": "1",
+        "decline": "0.10",
+        "max_wait_days": 14,
+        "fallback": "reserve"
+      }
+    }
+  },
+  "origins": [1735689600, 1751241600],
+  "policy_frozen_at": 1735689600,
+  "held_out_start": 1735689600,
+  "validation": "known_at",
+  "cost_cases": [
+    {"name": "declared costs"},
+    {
+      "name": "higher assumed costs",
+      "fees": {"rate": "0.005", "fixed": "2"},
+      "execution": {"spread_bps": "25", "slippage_bps": "15"}
+    }
+  ],
+  "missing_data_cases": [
+    {"name": "activation hour missing", "removed_hours": [1735689600, 1751241600]},
+    {"name": "next hour missing", "removed_hours": [1735693200, 1751245200]}
+  ]
+}

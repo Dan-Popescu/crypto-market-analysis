@@ -1,48 +1,49 @@
-# Validation de la V1
+# V1 validation
 
-Ce document conserve le compte rendu fourni avec le ZIP Crypto Observer v0.1.0.
-Les résultats ci-dessous sont ceux déclarés dans cette livraison d'origine.
-Les vérifications de l'import renommé sont consignées dans [IMPORT.md](IMPORT.md).
+This document preserves the report supplied with the Crypto Observer v0.1.0 ZIP.
+The results below are those reported by the original author for that delivery.
+Independent checks of the renamed import are recorded in [IMPORT.md](IMPORT.md).
+Translation does not constitute a new execution of these checks.
 
-Vérifications d'origine réalisées le 28 octobre 2026 dans l'environnement de développement. Elles décrivent les résultats de cette exécution ; la disponibilité des interfaces publiques peut évoluer.
+The original checks were performed on October 28, 2026 in the development environment. They describe that execution; public interface availability may change.
 
-## Vérifications du logiciel
+## Software checks
 
-- Suite complète : **71 tests réussis**.
-- `uv run ruff check src tests` : aucune erreur.
-- `uv lock --check --offline` : fichier de verrouillage cohérent.
-- Construction de la distribution Python avec `uv build --wheel` réussie.
-- Intégration MCP testée sur STDIO et Streamable HTTP local, réponses JSON structurées et images natives comprises.
-- Vérification des révisions de données, de leur disponibilité à chaque date, des fenêtres sans chevauchement, des jours incomplets et de l'alignement horaire des scénarios.
-- Vérification de la séparation des sources, des devises et des modes réel/synthétique, de l'idempotence et de la reprise de la rétention après interruption.
-- Deux revues séparées, sur les exigences et les conventions du projet ; les problèmes retenus ont été corrigés et les points sensibles revérifiés.
+- Complete suite: **71 tests passed**.
+- `uv run ruff check src tests`: no errors.
+- `uv lock --check --offline`: consistent lockfile.
+- Python distribution built successfully with `uv build --wheel`.
+- MCP integration tested over STDIO and local Streamable HTTP, including structured JSON responses and native images.
+- Data revisions, availability at each date, non-overlapping windows, incomplete days and hourly scenario alignment checked.
+- Source, currency and real/synthetic mode separation, idempotence and retention recovery after interruption checked.
+- Two separate reviews covered requirements and project conventions; accepted issues were fixed and sensitive points checked again.
 
-La dernière modification de présentation des bilans a également été vérifiée avec les tests CLI et le contrôle Ruff.
+The final change to brief presentation was also checked with CLI tests and Ruff.
 
-## Collecte réelle
+## Real-market collection
 
-Des bougies horaires ont été obtenues sur **10 plateformes** : Coinbase, Kraken, OKX, Bitstamp, Bitfinex, Bitget, Crypto.com, Gate, Gemini et HTX. L'historique demandé n'est pas garanti sur chaque plateforme.
+Hourly candles were obtained from **10 venues**: Coinbase, Kraken, OKX, Bitstamp, Bitfinex, Bitget, Crypto.com, Gate, Gemini and HTX. The requested history is not guaranteed at every venue.
 
-Les quatre autres connecteurs du registre ont rencontré des restrictions : Binance a renvoyé HTTP 451 ; les catalogues publics de Bybit, KuCoin et MEXC étaient inaccessibles depuis cet environnement. Les erreurs apparaissent dans le statut et ne produisent jamais de données de remplacement.
+The other four registry connectors encountered restrictions: Binance returned HTTP 451; the public Bybit, KuCoin and MEXC catalogues were inaccessible from that environment. Errors appear in status and never produce replacement data.
 
-Les collectes Deribit, DefiLlama, FRED et les métriques gratuites de base de Coin Metrics ont aussi été exécutées. Les métriques réservées aux offres payantes ne sont pas activées.
+Deribit, DefiLlama, FRED and the basic free Coin Metrics metrics were also collected. Metrics restricted to paid plans are not enabled.
 
-Le statut MiCA reste **à vérifier par entité juridique et juridiction**. Le logiciel n'attribue pas un statut réglementaire à une marque entière.
+MiCA status remains **subject to verification by legal entity and jurisdiction**. The software does not assign regulatory status to an entire brand.
 
-## Exemples fournis
+## Supplied examples
 
-Dans le ZIP d'origine, les fichiers `live-*`, `btc-daily-live.md` et les deux graphiques `btc-*-live.png` proviennent d'une collecte réelle, avec une analyse arrêtée au `2026-10-28T18:07:44Z`. Ces sept sorties sont exclues du dépôt GitHub ; les fichiers `demo-*` synthétiques y sont conservés. Le projet n'embarque pas la base complète de collecte.
+In the original ZIP, `live-*`, `btc-daily-live.md` and the two `btc-*-live.png` charts came from real collection, with analysis as of `2026-10-28T18:07:44Z`. These seven outputs are excluded from the GitHub repository; synthetic `demo-*` files are retained. The project does not include the complete collection database.
 
-Un historique Bitstamp d'environ cinq ans a permis de calculer des fréquences expérimentales sur les cinq horizons. Il ne démontre aucun avantage prédictif.
+Approximately five years of Bitstamp history supported experimental frequencies over the five horizons. This demonstrates no predictive advantage.
 
-L'évaluation stricte `known_at` produit **zéro origine évaluable** sur cet historique téléchargé aujourd'hui : il n'était pas connu du système aux dates historiques simulées. L'évaluation `retrospective` est disponible pour explorer les données courantes, avec un avertissement explicite. Elle ne constitue pas une validation dans les conditions réelles.
+Strict `known_at` evaluation produces **zero evaluable origins** on this history downloaded today: the system did not know it at the simulated historical dates. `retrospective` evaluation is available to explore current data with an explicit warning. It does not constitute validation under real-world conditions.
 
-## Ce qui reste à configurer ou à mesurer
+## Remaining configuration and measurements
 
-- Le serveur n'est pas déployé publiquement et aucun compte ChatGPT ou Claude n'est connecté. L'accès depuis leurs sites web demande un hébergement HTTPS et un fournisseur OAuth compatible.
-- Les exemples Docker sont fournis ; leur construction n'a pas été vérifiée, Docker étant absent de cet environnement.
-- Les frais d'infrastructure et le volume de stockage sur plusieurs mois n'ont pas été mesurés. Les carnets détaillés sont compactés en statistiques horaires après sept jours par défaut.
-- L'historique macro utilise les valeurs actuellement publiées ; il n'est pas présenté comme un historique des premières publications. Le calendrier et les flux ETF passent par des imports sourcés.
-- Le suivi détaillé des whales est différé. Les scénarios de la V1 utilisent les prix et la volatilité ; les autres données enrichissent le dossier que l'IA peut interpréter, sans prétendre à un modèle causal validé.
+- The server is not publicly deployed and no ChatGPT or Claude account is connected. Access from their websites requires HTTPS hosting and a compatible OAuth provider.
+- Docker examples are provided; their build was not checked because Docker was absent from that environment.
+- Infrastructure costs and storage volume over several months have not been measured. Detailed order-book summaries are compacted into hourly statistics after seven days by default.
+- Macro history uses currently published values; it is not presented as a history of first releases. Calendar and ETF flows use sourced imports.
+- Detailed whale tracking is deferred. V1 scenarios use prices and volatility; other data enrich the evidence an AI can interpret, without claiming a validated causal model.
 
-La collecte continue commence uniquement lorsqu'on lance `uv run crypto-market-analysis run`. La livraison ne crée pas de tâche planifiée extérieure.
+Continuous collection starts only when `uv run crypto-market-analysis run` is launched. The delivery does not create an external scheduled task.

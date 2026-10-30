@@ -6,7 +6,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .venues import VENUES
+from .venues import FRANCE_PURCHASE_CANDIDATES, VENUES
 
 
 @dataclass
@@ -17,6 +17,8 @@ class Settings:
     history_days: int = 30
     max_pages: int = 20
     workers: int = 3
+    http_max_requests: int = 10_000
+    http_deadline_seconds: float = 300.0
     options: bool = True
     context: bool = True
     liquidity_interval: int = 300
@@ -24,6 +26,22 @@ class Settings:
     options_interval: int = 21600
     context_interval: int = 86400
     liquidity_retention_days: int = 7
+    storage_maintenance_enabled: bool = False
+    storage_hot_max_bytes: int = 2 * 1024**3
+    storage_archive_max_bytes: int = 4 * 1024**3
+    storage_archive_max_files: int = 4096
+    storage_book_hot_max_bytes: int = 512 * 1024**2
+    storage_book_keep_days: int = 7
+    storage_run_keep_days: int = 30
+    storage_batch_rows: int = 256
+    storage_write_reserve_bytes: int = 8 * 1024**2
+
+    # Explicit native markets; stablecoin quotes are never converted to USD.
+    quote_currencies: list[str] = field(default_factory=lambda: ["EUR", "USD", "USDT", "USDC"])
+    purchase_jurisdiction: str = "France"
+    purchase_candidates: list[str] = field(default_factory=lambda: list(FRANCE_PURCHASE_CANDIDATES))
+    # None samples all analytical venues; a subset bounds book requests only.
+    liquidity_venues: list[str] | None = None
 
     @property
     def database(self) -> Path:
@@ -37,7 +55,7 @@ def load_settings(path: Path | None = None, data_dir: Path | None = None) -> Set
             raw = tomllib.load(f)
     known = set(Settings.__dataclass_fields__)
     if set(raw) - known:
-        raise ValueError(f"Options de configuration inconnues : {sorted(set(raw) - known)}")
+        raise ValueError(f"Unknown configuration options: {sorted(set(raw) - known)}")
     if "data_dir" in raw:
         directory = Path(raw["data_dir"]).expanduser()
         raw["data_dir"] = directory if directory.is_absolute() else path.resolve().parent / directory
@@ -45,9 +63,27 @@ def load_settings(path: Path | None = None, data_dir: Path | None = None) -> Set
     if data_dir is not None:
         settings.data_dir = data_dir.expanduser().resolve()
     if not settings.assets or set(settings.assets) - {"BTC", "ETH"}:
-        raise ValueError("assets doit contenir BTC et/ou ETH.")
+        raise ValueError("assets must contain BTC and/or ETH.")
     if not settings.venues or set(settings.venues) - set(VENUES):
-        raise ValueError("Plateforme inconnue ; utilisez la commande venues.")
+        raise ValueError("Unknown venue; use the venues command.")
+    if (
+        not isinstance(settings.quote_currencies, list)
+        or not settings.quote_currencies
+        or any(q not in ("EUR", "USD", "USDT", "USDC") for q in settings.quote_currencies)
+        or len(set(settings.quote_currencies)) != len(settings.quote_currencies)
+    ):
+        raise ValueError("quote_currencies must contain distinct native EUR, USD, USDT or USDC quotes.")
+    if settings.purchase_jurisdiction != "France":
+        raise ValueError("purchase_jurisdiction currently supports France only.")
+    if not isinstance(settings.purchase_candidates, list) or any(
+        v not in VENUES for v in settings.purchase_candidates
+    ):
+        raise ValueError("purchase_candidates must contain known venues; eligibility remains unverified.")
+    if settings.liquidity_venues is not None and (
+        not isinstance(settings.liquidity_venues, list)
+        or any(v not in settings.venues for v in settings.liquidity_venues)
+    ):
+        raise ValueError("liquidity_venues must be a subset of analytical venues.")
     for name, low, high in (
         ("workers", 1, 8),
         ("history_days", 1, 3650),
@@ -60,5 +96,13 @@ def load_settings(path: Path | None = None, data_dir: Path | None = None) -> Set
     ):
         value = getattr(settings, name)
         if not isinstance(value, int) or isinstance(value, bool) or not low <= value <= high:
-            raise ValueError(f"{name} doit être un entier entre {low} et {high}.")
+            raise ValueError(f"{name} must be an integer between {low} and {high}.")
+    if type(settings.storage_maintenance_enabled) is not bool:
+        raise ValueError("storage_maintenance_enabled must be a boolean.")
+    from .storage_policy import StoragePolicy
+
+    StoragePolicy.from_settings(settings)
+    from .http_limits import HTTPPolicy
+
+    HTTPPolicy.from_settings(settings)
     return settings

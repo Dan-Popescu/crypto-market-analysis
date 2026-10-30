@@ -1,5 +1,9 @@
 # Conventions
 
+- Use English for all first-party repository content, software output, new commit
+  messages and pull request text. Preserve raw external evidence and technical
+  identifiers; see [the migration policy](docs/MIGRATION.md).
+
 - Install dependencies with `uv sync --frozen --extra dev`, then run
   `uv run --frozen python tools/check.py` on the PC or in the cloud workspace.
 - Include verification results for the final code version in each pull request.

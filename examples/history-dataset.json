@@ -1,0 +1,16 @@
+{
+  "name": "kraken-native-research",
+  "directory": "data/research/kraken-native",
+  "target_start": 1729987200,
+  "target_end": 1793059200,
+  "source": "kraken",
+  "data_mode": "import",
+  "max_parts": 8,
+  "max_part_bytes": 3221225472,
+  "max_archive_bytes": 17179869184,
+  "max_member_bytes": 67108864,
+  "max_rows": 200000,
+  "max_capture_bytes": 4194304,
+  "max_disk_bytes": 536870912,
+  "max_requests": 20
+}

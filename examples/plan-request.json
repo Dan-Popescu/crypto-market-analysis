@@ -1,0 +1,36 @@
+{
+  "asset": "BTC",
+  "quote": "EUR",
+  "source": "demo",
+  "data_mode": "demo",
+  "start_date": "2026-05-31T00:00:00Z",
+  "recurrence": {"frequency": "monthly", "count": 6, "month_end_rule": "clip"},
+  "contribution_amount": "100",
+  "purchase_amount": "100",
+  "fees": {"rate": "0.002", "fixed": "1", "asset": "quote"},
+  "execution": {
+    "assumption": "historical_configured_costs",
+    "timeframe": "1h",
+    "spread_bps": "10",
+    "slippage_bps": "5",
+    "quantity_step": "0.00000001",
+    "price_step": "0.01",
+    "max_price_age_seconds": 3600
+  },
+  "plans": {
+    "split": {
+      "initial_fraction": "0.5",
+      "levels": [{"decline": "0.05", "fraction": "0.5"}],
+      "max_wait_days": 7,
+      "max_deferred_reserve_quote": "50",
+      "fallback": "buy_at_deadline"
+    },
+    "deferred": {
+      "fraction": "1",
+      "decline": "0.10",
+      "max_wait_days": 14,
+      "max_deferred_reserve_quote": "100",
+      "fallback": "reserve"
+    }
+  }
+}

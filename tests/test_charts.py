@@ -46,7 +46,7 @@ def test_depth_incomplete_is_labelled_and_native_quotes_remain_separate(tmp_path
     ]
     output = render_chart("liquidity", [], rows, tmp_path / "book.svg", AS_OF)
     text = output.read_text()
-    assert "borne inférieure" in text and "USD" in text and "EUR" in text
+    assert "lower bound" in text and "USD" in text and "EUR" in text
 
 
 def test_calibration_uses_empirical_bins(tmp_path):
@@ -61,24 +61,24 @@ def test_calibration_uses_empirical_bins(tmp_path):
     }
     result = render_chart("calibration", [], [], tmp_path / "cal.svg", AS_OF, evaluation=evaluation)
     text = result.read_text()
-    assert "n=5" in text and "kraken" in text and "DÉMONSTRATION" in text
+    assert "n=5" in text and "kraken" in text and "DEMONSTRATION" in text
 
 
 @pytest.mark.parametrize("kind", ["price", "weekly", "liquidity", "leverage", "options", "calibration"])
 def test_missing_data_fails(kind, tmp_path):
-    with pytest.raises(ValueError, match="indisponible"):
+    with pytest.raises(ValueError, match="unavailable"):
         render_chart(kind, [], [], tmp_path / "empty.png", AS_OF)
 
 
 def test_future_observations_not_drawn(tmp_path):
     row = Observation("kraken", "BTC", "funding_rate_actual", AS_OF + 1, AS_OF, 0.01, "rate")
-    with pytest.raises(ValueError, match="indisponible"):
+    with pytest.raises(ValueError, match="unavailable"):
         render_chart("leverage", [], [row], tmp_path / "future.svg", AS_OF)
 
 
 def test_options_need_actual_expiry(tmp_path):
     row = obs("option_atm_iv_7d", "percent", 45)
-    with pytest.raises(ValueError, match="indisponibles"):
+    with pytest.raises(ValueError, match="unavailable"):
         render_chart("options", [], [row], tmp_path / "options.svg", AS_OF)
 
 
@@ -105,7 +105,7 @@ def test_weekly_excludes_incomplete_week(tmp_path, monkeypatch):
 
     monkeypatch.setattr(Axes, "add_patch", add_patch)
     render_chart("weekly", rows, [], tmp_path / "weekly.svg", monday + 14 * 86400)
-    assert len([patch for ax, patch in count if ax.get_ylabel() == "Prix (USD)"]) == 1
+    assert len([patch for ax, patch in count if ax.get_ylabel() == "Price (USD)"]) == 1
 
 
 def test_funding_periods_are_separate(tmp_path):
@@ -115,4 +115,4 @@ def test_funding_periods_are_separate(tmp_path):
     ]
     output = render_chart("leverage", [], rows, tmp_path / "funding.svg", AS_OF)
     text = output.read_text()
-    assert "Financement · 1 h" in text and "Financement · 8 h" in text
+    assert "Funding · 1 h" in text and "Funding · 8 h" in text
