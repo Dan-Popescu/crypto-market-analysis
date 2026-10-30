@@ -228,11 +228,16 @@ def simulate_cash_plan(series: Any, request: Any, *, as_of: int, instrument: dic
     bar_clocks = receipt_clocks(series, "bars")
     action_clocks = receipt_clocks(series, "actions")
     fill_bars: dict[int, dict] = {}
+    fill_ranks: dict[int, tuple[int, int]] = {}
     # Each exact close has its own purchase cutoff. Index once: historical fills
     # cannot use corrections received after that close, even at a later valuation.
     for candidate in series["bars"]:
-        if effective_known_at(series, candidate, "bars", receipt_index=bar_clocks) <= candidate["end"]:
-            fill_bars[candidate["end"]] = candidate
+        known_at = effective_known_at(series, candidate, "bars", receipt_index=bar_clocks)
+        rank = (known_at, candidate["observed_at"])
+        at = candidate["end"]
+        if known_at <= at and (at not in fill_ranks or rank > fill_ranks[at]):
+            fill_ranks[at] = rank
+            fill_bars[at] = candidate
     for deposit in request["deposits"]:
         if deposit["at"] <= as_of:
             events.append((deposit["at"], 0, "deposit", deposit))

@@ -2,6 +2,7 @@
 
 import copy
 import math
+from itertools import permutations
 
 import pytest
 
@@ -421,3 +422,79 @@ def test_derived_series_preserves_actual_receipt_gate_and_weakest_evidence():
     source["storage_provenance"]["descriptor_hash"] = content_hash(source["descriptor"])
     result = build_continuous_series(request, as_of=30)
     assert result["series"]["descriptor"]["revision_semantics"] == "captured_history"
+
+
+def out_of_order_receipts(document):
+    document = with_receipts(document, received_at=100)
+    for field in ("bars", "actions"):
+        for entry in document["storage_provenance"][field]:
+            if entry["declared_observed_at"] == 20:
+                entry.update(received_at=30, effective_known_at=30)
+            elif entry["declared_observed_at"] == 0:
+                entry.update(received_at=0, effective_known_at=0)
+    return document
+
+
+@pytest.mark.parametrize("reverse_bars,reverse_receipts", [(False, False), (True, False), (False, True), (True, True)])
+def test_actual_receipt_priority_overrides_publisher_clock_and_input_order(reverse_bars, reverse_receipts):
+    document = series((100,))
+    document["bars"] += [bar(0, 10, 110, observed_at=20)]
+    document["actions"] = [split(observed=10, ratio=2), split(observed=20, ratio=3)]
+    document = out_of_order_receipts(document)
+    if reverse_bars:
+        document["bars"].reverse()
+        document["actions"].reverse()
+    if reverse_receipts:
+        document["storage_provenance"]["bars"].reverse()
+        document["storage_provenance"]["actions"].reverse()
+    assert bars_as_of(document, 60)[0]["close"] == 110
+    assert actions_as_of(document, 60)[0]["ratio"] == 3
+    # A newer actual receipt supersedes an earlier receipt carrying a newer
+    # publisher-declared clock. Storage SQL and mathematical kernels share this.
+    assert bars_as_of(document, 100)[0]["close"] == 100
+    assert actions_as_of(document, 100)[0]["ratio"] == 2
+
+
+def test_cashplan_mark_uses_actual_receipt_priority_without_changing_original_fill():
+    document = series((100,))
+    document["bars"] += [bar(-10, 0, 100), bar(0, 10, 110, observed_at=20)]
+    document = out_of_order_receipts(document)
+    request = plan(purchases=[{"at": 0, "cash_amount": 100}])
+    for ordering in permutations(document["bars"]):
+        document["bars"] = list(ordering)
+        earlier = simulate(document, request, as_of=60)
+        later = simulate(document, request, as_of=100)
+        assert earlier["cash_wealth"] == 110
+        assert later["cash_wealth"] == 100
+        assert earlier["fills"] == later["fills"]
+        assert later["fills"][0]["price"] == 100
+
+
+def test_continuous_source_selection_uses_actual_receipt_version_order():
+    request = continuous_request()
+    first = request["contracts"][0]["series"]
+    first["bars"] = [bar(0, 10, 10), bar(0, 10, 110, observed_at=20)]
+    request["contracts"][0]["series"] = out_of_order_receipts(first)
+    for ordering in permutations(request["contracts"][0]["series"]["bars"]):
+        request["contracts"][0]["series"]["bars"] = list(ordering)
+        earlier = build_continuous_series(request, as_of=60)
+        later = build_continuous_series(request, as_of=100)
+        assert earlier["series"]["bars"][0]["close"] == 110
+        assert later["series"]["bars"][0]["close"] == 10
+        assert later["series"]["bars"][0]["observed_at"] == 100
+
+
+def test_later_action_correction_explicitly_rejects_reconstruction_of_held_units():
+    document = series((100, 50, 50))
+    document["actions"] = [split(observed=14, ratio=2), split(observed=25, ratio=3)]
+    with pytest.raises(ValueError, match="late-known corporate action"):
+        simulate(document, as_of=30)
+
+
+def test_equal_actual_receipts_use_declared_observation_as_secondary_version_clock():
+    document = series((100,))
+    document["bars"].append(bar(0, 10, 110, observed_at=20))
+    document["actions"] = [split(observed=10, ratio=2), split(observed=20, ratio=3)]
+    document = with_receipts(document, received_at=100)
+    assert bars_as_of(document, 100)[0]["close"] == 110
+    assert actions_as_of(document, 100)[0]["ratio"] == 3
