@@ -5,6 +5,7 @@ import sqlite3
 from copy import deepcopy
 
 import pytest
+from crypto_market_analysis.cross_asset.prices import actions_as_of, bars_as_of
 from crypto_market_analysis.cross_asset.research import simulate_cash_plan
 
 from crypto_market_analysis.cross_asset.snapshots import MarketSnapshot, export_market_snapshot
@@ -468,3 +469,30 @@ def test_nested_read_sessions_share_deadline_without_resetting_budget(tmp_path, 
         with pytest.raises(ValueError, match="shared query budget"):
             with reader.read_session():
                 pass
+
+
+@pytest.mark.parametrize("analytical", [False, True])
+def test_all_vintage_kernel_selection_agrees_with_latest_actual_receipt(tmp_path, analytical):
+    store = writer(tmp_path)
+    newer_receipt = bundle("live")
+    newer_receipt["registry"]["instruments"][0]["form"] = "fund"
+    newer_receipt["series"][0]["descriptor"]["interval"] = "session"
+    newer_receipt["series"][0]["actions"] = [{"id": "split", "kind": "split", "effective_at": 190,
+                                             "announced_at": 130, "observed_at": 140, "ratio": 2}]
+    older_receipt = deepcopy(newer_receipt)
+    older_receipt["series"][0]["bars"][0].update(close=-12, observed_at=240)
+    older_receipt["series"][0]["actions"][0].update(observed_at=240, ratio=3)
+    store.import_bundle(older_receipt, received_at=250)
+    store.import_bundle(newer_receipt, received_at=300)
+    if analytical:
+        export_market_snapshot(store, tmp_path / "receipt-order")
+        reader = MarketSnapshot(tmp_path / "receipt-order")
+    else:
+        reader = store
+    for cutoff, expected_close, expected_ratio in ((299, -12, 3), (300, -15, 2)):
+        latest = reader.read_series("reference-raw", as_of=cutoff, data_mode="live")
+        vintages = reader.read_series("reference-raw", as_of=cutoff, data_mode="live", all_vintages=True)
+        assert latest["bars"][0]["close"] == expected_close
+        assert latest["actions"][0]["ratio"] == expected_ratio
+        assert bars_as_of(vintages, cutoff) == latest["bars"]
+        assert actions_as_of(vintages, cutoff) == latest["actions"]
