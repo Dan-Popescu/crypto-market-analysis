@@ -52,7 +52,7 @@ def _text(value: Any, label: str) -> str:
 
 
 def _clock(value: Any, label: str) -> int:
-    if type(value) is not int or not 0 <= value <= 253402300799:
+    if type(value) is not int or not -62135596800 <= value <= 253402300799:
         raise IdentityError(f"{label} must be integer UTC epoch seconds")
     return value
 

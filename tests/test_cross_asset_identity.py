@@ -131,7 +131,15 @@ def test_validation_and_queries_return_independent_defensive_copies():
     assert document == registry()
 
 
-@pytest.mark.parametrize("timestamp", [True, False, 12.5, "2026-01-01T00:00:00Z", -1])
+def test_pre_1970_history_keeps_negative_epoch_seconds():
+    document = registry()
+    document["listings"][0].update(active_from=-315619200, known_at=-315619200)
+    document["aliases"][0].update(effective_from=-315619200, known_at=-315619200)
+    assert resolve(document, at=-1, cutoff=-1)["listing"]["active_from"] == -315619200
+    assert registry_view(document, as_of=-1, effective_at=-1)["effective_at"] == -1
+
+
+@pytest.mark.parametrize("timestamp", [True, False, 12.5, "2026-01-01T00:00:00Z", -62135596801])
 def test_invalid_timestamp_types_are_rejected(timestamp):
     document = registry()
     document["aliases"][0]["known_at"] = timestamp
