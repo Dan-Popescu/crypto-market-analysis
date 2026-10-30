@@ -209,7 +209,7 @@ def test_all_families_use_existing_single_plan_funding_policy_without_changes():
     lambda cfg: cfg.update(fx_rate='1'),
     lambda cfg: cfg['plans'][1]['config'].update(quote='USD'),
     lambda cfg: cfg['plans'][1]['config'].update(data_mode='live'),
-    lambda cfg: cfg['plans'][1]['config'].update(asset='SOL'),
+    lambda cfg: cfg['plans'][1]['config'].update(asset='SOL/USD'),
     lambda cfg: cfg['plans'][1]['config'].update(contributions=[{'time': 0, 'amount': 'NaN'}]),
     lambda cfg: cfg['plans'][1].update(id='btc'),
     lambda cfg: cfg['plans'][1].update(family='best'),
@@ -238,3 +238,11 @@ def test_plan_and_envelope_action_bounds_are_both_enforced():
         row['config']['schedule'] *= 700
     with pytest.raises(ValueError, match='Envelope purchase slices'):
         preview_budget_envelope(cfg, 0)
+
+
+def test_shared_quote_budget_accepts_explicit_generic_asset_without_inventing_prices():
+    cfg = request()
+    cfg["plans"][1]["config"]["asset"] = "SOL"
+    result = preview_budget_envelope(cfg, 0)
+    assert result["plans"][1]["market"]["asset"] == "SOL"
+    assert_conservation(result)

@@ -6,6 +6,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .asset_universe import validate_assets
 from .venues import FRANCE_PURCHASE_CANDIDATES, VENUES
 
 
@@ -17,6 +18,8 @@ class Settings:
     history_days: int = 30
     max_pages: int = 20
     workers: int = 3
+    collection_batch_size: int = 10
+    collection_work_limit: int = 256
     http_max_requests: int = 10_000
     http_deadline_seconds: float = 300.0
     options: bool = True
@@ -42,6 +45,7 @@ class Settings:
     purchase_candidates: list[str] = field(default_factory=lambda: list(FRANCE_PURCHASE_CANDIDATES))
     # None samples all analytical venues; a subset bounds book requests only.
     liquidity_venues: list[str] | None = None
+    liquidity_assets: list[str] | None = None
 
     @property
     def database(self) -> Path:
@@ -62,8 +66,7 @@ def load_settings(path: Path | None = None, data_dir: Path | None = None) -> Set
     settings = Settings(**raw)
     if data_dir is not None:
         settings.data_dir = data_dir.expanduser().resolve()
-    if not settings.assets or set(settings.assets) - {"BTC", "ETH"}:
-        raise ValueError("assets must contain BTC and/or ETH.")
+    validate_assets(settings.assets)
     if not settings.venues or set(settings.venues) - set(VENUES):
         raise ValueError("Unknown venue; use the venues command.")
     if (
@@ -84,7 +87,15 @@ def load_settings(path: Path | None = None, data_dir: Path | None = None) -> Set
         or any(v not in settings.venues for v in settings.liquidity_venues)
     ):
         raise ValueError("liquidity_venues must be a subset of analytical venues.")
+    if settings.liquidity_assets is not None and (
+        not isinstance(settings.liquidity_assets, list)
+        or len(set(settings.liquidity_assets)) != len(settings.liquidity_assets)
+        or any(asset not in settings.assets for asset in settings.liquidity_assets)
+    ):
+        raise ValueError("liquidity_assets must contain distinct configured assets.")
     for name, low, high in (
+        ("collection_batch_size", 1, 100),
+        ("collection_work_limit", 1, 10000),
         ("workers", 1, 8),
         ("history_days", 1, 3650),
         ("max_pages", 1, 100),

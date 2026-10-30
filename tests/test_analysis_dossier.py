@@ -7,7 +7,7 @@ from dataclasses import asdict, replace
 
 import pytest
 
-from crypto_market_analysis.analysis_dossier import build_analysis_dossier
+from crypto_market_analysis.analysis_dossier import build_analysis_dossier, capture_analysis_dossier
 from crypto_market_analysis.book_snapshots import retain_books, retained_book
 from crypto_market_analysis.context import market_context
 from crypto_market_analysis.evidence import content_hash
@@ -72,6 +72,28 @@ def seed(store):
 
 def without_evidence(result):
     return {key: value for key, value in result.items() if key != "stored_inputs"}
+
+
+def test_public_capture_retains_exact_native_candles_after_snapshot_closes(store):
+    eur, usd = candles(), candles(quote="USD", price=200)
+    store.put_candles(eur + usd)
+    request = {"data_mode": "import", "evidence_mode": "references", "markets": [
+        {"asset": "BTC", "source": "venue", "quote": quote, "lookbacks": [1]} for quote in ("EUR", "USD")]}
+    with store.read_session() as session:
+        captured = capture_analysis_dossier(session, request, NOW)
+    selection = {"asset": "BTC", "source": "venue", "quote": "EUR", "data_mode": "import"}
+    assert captured.candles_for(selection) == tuple(eur)
+    assert captured.candles_for({**selection, "quote": "USD"}) == tuple(usd)
+    with pytest.raises(KeyError):
+        captured.candles_for({**selection, "source": "unselected"})
+    with pytest.raises(TypeError):
+        captured.candles_by_native[("BTC", "venue", "EUR", "import")] = ()
+    assert "consumed_records" not in captured.result["markets"][0]["market_context"]["stored_inputs"]
+    before = content_hash(captured.result)
+    store.put_candles([replace(eur[-1], close=150, high=150, observed_at=NOW)])
+    assert content_hash(captured.result) == before
+    assert captured.candles_for(selection)[-1].close == 100
+    assert capture_analysis_dossier(store, request, NOW).candles_for(selection)[-1].close == 150
 
 
 def test_calculations_equal_independent_tools_and_all_sections_share_physical_watermark(store):

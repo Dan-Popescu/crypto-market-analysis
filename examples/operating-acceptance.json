@@ -1,0 +1,14 @@
+{
+  "session_id": "first-public-observation",
+  "tasks": [
+    "market"
+  ],
+  "max_cycles": 4,
+  "max_duration_seconds": 60,
+  "interval_seconds": 15,
+  "cycle_http_requests": 100,
+  "cycle_deadline_seconds": 10,
+  "required_history_hours": 24,
+  "freshness_seconds": 10800,
+  "max_gap_hours": 0
+}

@@ -12,7 +12,7 @@ _MARKET = ("source", "asset", "quote", "data_mode")
 _OBSERVABLE = "hourly_after_deadline_v1"
 
 
-def _clock(value):
+def observation_clock(value):
     if type(value) is int and value >= 0:
         return value
     if isinstance(value, str):
@@ -23,6 +23,9 @@ def _clock(value):
         except ValueError:
             pass
     return None
+
+
+_clock = observation_clock
 
 
 def _counts():

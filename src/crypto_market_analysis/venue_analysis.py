@@ -13,6 +13,7 @@ from bisect import bisect_left
 from copy import deepcopy
 from decimal import ROUND_CEILING, Context, Decimal, localcontext
 
+from .asset_universe import validate_asset
 from .reporting import bounded_object
 
 RULE_VERSION = "offline-venue-snapshots-v1"
@@ -66,8 +67,9 @@ def _integer(value, name: str, maximum: int = _MAX_TIME) -> int:
 def _common(request: dict, as_of: int) -> tuple[list[str], dict[str, dict]]:
     bounded_object(request, "venue analysis request")
     _integer(as_of, "as_of")
-    if request.get("asset") not in ("BTC", "ETH") or request.get("quote") not in ("EUR", "USD"):
-        raise ValueError("asset must be BTC/ETH and quote must be native EUR/USD.")
+    validate_asset(request.get("asset"))
+    if request.get("quote") not in ("EUR", "USD"):
+        raise ValueError("quote must be native EUR/USD.")
     if request.get("data_mode") not in ("live", "import", "demo"):
         raise ValueError("data_mode must be explicitly live, import or demo.")
     _integer(request.get("max_age_seconds"), "max_age_seconds", 86400)

@@ -6,7 +6,7 @@ Preserve raw external evidence, official names, symbols and URLs without transla
 
 ## Scope
 
-This repository contains the independent BTC/ETH market analysis tool imported
+This repository contains the independent multi-asset market analysis tool imported
 from Crypto Observer v0.1.0. Ledgerly remains the source of portfolio transactions,
 holdings and acquisition costs. See README.md for usage and docs/SPEC.md for scope.
 
@@ -22,6 +22,11 @@ USD analyses stay separate. Purchase eligibility is verified per legal entity
 and service. Global market analysis includes material venues regardless of MiCA
 status; data access, reuse permission and regulatory eligibility are independent.
 
+For multi-asset collection, analytical snapshots or prospective validation, read
+`docs/SCALABILITY.md` and `docs/adr/0001-storage-for-scaled-research.md`. The target is
+100 explicit assets, extensible to 1,000; BTC/ETH remain defaults and provider
+capabilities require separate evidence. Preserve named archive dataset scope.
+
 ## Verification and pull requests
 
 Use the `feat/` prefix for new branches, for example `feat/liquidity-analysis`.
@@ -30,7 +35,8 @@ Install development dependencies with `uv sync --frozen --extra dev`.
 Run `uv run --frozen python tools/check.py` in the working environment: either
 the local PC or Codex cloud. This runs the existing offline tests and code checks.
 Report the exact tested commit, commands, results and any unavailable checks in
-the pull request. Verify the final version again after code or merge changes.
+the pull request. Authorized delivery includes publishing the branch, reviewing
+and merging its PR, then verifying the merged main revision.
 
 GitHub Actions is disabled as of 2026-10-28. Local and cloud workspaces use the
 same verification command. Remote workflows may be prepared as a dedicated,

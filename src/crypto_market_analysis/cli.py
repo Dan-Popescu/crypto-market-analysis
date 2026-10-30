@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import __version__
+from .asset_universe import validate_asset
 from .config import Settings, load_settings
 from .engine import Engine, render_brief
 from .models import Candle
@@ -37,6 +38,9 @@ liquidity_venues = ["kraken", "bitvavo", "coinbase"]
 history_days = 30
 max_pages = 20
 http_max_requests = 10000
+collection_batch_size = 10
+collection_work_limit = 256
+# liquidity_assets = ["BTC", "ETH"]
 http_deadline_seconds = 300.0
 workers = 3
 options = true
@@ -243,7 +247,7 @@ def _common(parser: argparse.ArgumentParser, sub: bool = False) -> None:
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(
         prog="crypto-market-analysis",
-        description="BTC/ETH analysis using free public data.",
+        description="Multi-asset analysis using bounded free public data.",
         epilog="Examples: crypto-market-analysis demo ; crypto-market-analysis brief --mode demo ; crypto-market-analysis collect --venues kraken,coinbase",
     )
     root.add_argument("--version", action="version", version=__version__)
@@ -261,6 +265,9 @@ def parser() -> argparse.ArgumentParser:
     from .analysis_cli import register_analysis_commands
 
     register_analysis_commands(command)
+    from .scalability_cli import register_scalability_commands
+
+    register_scalability_commands(command)
 
     init = command(
         "init", "Create an editable configuration.", "crypto-market-analysis init --file observer.toml"
@@ -382,7 +389,7 @@ def parser() -> argparse.ArgumentParser:
     )
     candles.add_argument("--file", type=Path, required=True)
     candles.add_argument("--source", required=True)
-    candles.add_argument("--asset", choices=("BTC", "ETH"), default="BTC")
+    candles.add_argument("--asset", type=validate_asset, default="BTC")
     candles.add_argument("--quote", default="USD")
     metrics = command(
         "import-metrics",
@@ -466,7 +473,7 @@ def parser() -> argparse.ArgumentParser:
     ):
         p = command(name, description, f"crypto-market-analysis {name} --request request.json --as-of 1793145600")
         p.add_argument("--request", type=Path, help="Bounded selector/policy JSON; JSON data_mode takes precedence over --mode. Costs require budget; assumptions_by_source supplies fees, otherwise unknown")
-        p.add_argument("--asset", choices=("BTC", "ETH"), help="Native asset (required for derivatives and venue views)")
+        p.add_argument("--asset", type=validate_asset, help="Native asset (required for derivatives and venue views)")
         p.add_argument("--quote", choices=("EUR", "USD", "USDT", "USDC"), help="Explicit native quote; no conversion")
         if name == "stored-derivatives":
             p.add_argument("--source", help="Required explicit derivative source, for example binanceusdm")
@@ -504,7 +511,7 @@ def parser() -> argparse.ArgumentParser:
                       "crypto-market-analysis history-dataset init --dataset-config dataset.json")
     dataset.add_argument("action", choices=("init", "status", "stage", "refresh", "plan-repair", "repair"))
     dataset.add_argument("--dataset-config", type=Path, required=True)
-    dataset.add_argument("--asset", choices=("BTC", "ETH"), default="BTC")
+    dataset.add_argument("--asset", type=validate_asset, default="BTC")
     dataset.add_argument("--quote", choices=("EUR", "USD"), default="EUR")
     dataset.add_argument("--parts-manifest", type=Path)
     dataset.add_argument("--member")
@@ -542,6 +549,7 @@ def parser() -> argparse.ArgumentParser:
     )
     issue.add_argument("--idempotency-key", required=True)
     issue.add_argument("--plan-config", type=Path)
+    issue.add_argument("--validation-protocol", type=Path, help="Frozen prospective protocol to bind before immutable issuance")
     assessment = command(
         "assessment",
         "Read an issued local assessment and appended outcomes.",
@@ -597,7 +605,7 @@ def parser() -> argparse.ArgumentParser:
         p.add_argument("--format", choices=("json", "markdown"), default="json")
         p.add_argument("--output")
     for p in (brief, forecast, evaluation, chart, context, windows, issue, vigilance, history, accumulation):
-        p.add_argument("--asset", choices=("BTC", "ETH"), default="BTC")
+        p.add_argument("--asset", type=validate_asset, default="BTC")
         p.add_argument("--source", help="Reference venue; otherwise the most usable complete history")
         p.add_argument("--quote", help="Native quote currency; no implicit conversion")
     return root
@@ -620,10 +628,11 @@ def _guard_configured_dataset(args, settings, resources):
     from .analysis_cli import COMMANDS as ANALYSIS_COMMANDS
     from .capacity_cli import COMMANDS
     from .dataset_lock import DatasetBusy, dataset_writer_lock
+    from .scalability_cli import COMMANDS as SCALABILITY_COMMANDS
 
     if getattr(args, "output", None):
         _protect_report_output(args, settings)
-    if (args.command in COMMANDS | ANALYSIS_COMMANDS or args.command in ("serve", "storage-policy", "verify-archive")
+    if (args.command in COMMANDS | ANALYSIS_COMMANDS | SCALABILITY_COMMANDS or args.command in ("serve", "storage-policy", "verify-archive")
             or (args.command in ("maintain", "restore-archive") and not args.apply)):
         return
     try:
@@ -743,6 +752,20 @@ def _run_cli(argv, resources) -> int:
         from .analysis_cli import COMMANDS as ANALYSIS_COMMANDS
         from .analysis_cli import analysis_exit_code, render_analysis_report, run_analysis_command
         from .capacity_cli import COMMANDS, capacity_exit_code, render_capacity_report, run_capacity_command
+        from .scalability_cli import COMMANDS as SCALABILITY_COMMANDS
+        from .scalability_cli import run_scalability_command, scalability_exit_code
+
+        if args.command in SCALABILITY_COMMANDS:
+            _protect_report_output(args, settings)
+            request = _json_file(args.request) if args.request else None
+            result = run_scalability_command(args, settings, request)
+            if args.command == "freeze-validation" and args.output:
+                from .scalability_cli import publish_protocol
+
+                publish_protocol(result, Path(args.output))
+            else:
+                write_json(result, args.output)
+            return scalability_exit_code(args.command, result, apply=getattr(args, "apply", False))
 
         if args.command in COMMANDS | ANALYSIS_COMMANDS:
             _protect_report_output(args, settings)
@@ -898,6 +921,7 @@ def _run_cli(argv, resources) -> int:
                 quote=args.quote,
                 as_of=args.as_of,
                 plan_config=_json_file(args.plan_config) if args.plan_config else None,
+                validation_protocol=_json_file(args.validation_protocol) if args.validation_protocol else None,
             )
             _write_result(result, args)
         elif args.command == "assessment":

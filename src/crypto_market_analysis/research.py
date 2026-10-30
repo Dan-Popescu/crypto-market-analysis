@@ -412,6 +412,11 @@ def forecast(
     horizons = [1, 7, 21, 30, 60] if horizons is None else horizons
     if any(not isinstance(h, int) or isinstance(h, bool) or h < 1 for h in horizons):
         raise ValueError("Horizons must be positive integers")
+    return _forecast_prepared(_prepare_forecast(candles, as_of), horizons, threshold, as_of)
+
+
+def _prepare_forecast(candles, as_of):
+    """Request-local preparation; exact cutoff/vintages never cross requests."""
     filtered = _asof(candles, as_of)
     closed_hours = [
         c.close_time
@@ -420,8 +425,27 @@ def forecast(
     ]
     offset = max(closed_hours) % 86400 if closed_hours else 0
     bars = _aligned_bars(filtered, offset)
+    features = [_feature(bars, i) for i in range(len(bars))]
+    return filtered, bars, features
+
+
+def forecast_thresholds(candles, *, horizons, thresholds, as_of):
+    """Reuse complete aligned bars and regime features across threshold scenarios."""
+    prepared = _prepare_forecast(candles, as_of)
+    return [_forecast_prepared(prepared, horizons, threshold, as_of) for threshold in thresholds]
+
+
+def _forecast_prepared(prepared, horizons, threshold, as_of):
+    filtered, bars, features = prepared
+    caches = {}
+    for horizon in horizons:
+        cache = [(feature, None) for feature in features]
+        for i in range(60, len(bars) - 1 - horizon):
+            if features[i] is not None:
+                cache[i] = features[i], _outcome(bars, i, horizon, threshold)
+        caches[horizon] = cache
     results = {
-        str(h): _estimate(bars, len(bars) - 1, h, threshold)
+        str(h): _estimate(bars, len(bars) - 1, h, threshold, caches[h])
         if len(bars)
         else {
             "status": "insufficient", "probabilities": None, "base_rates": None,

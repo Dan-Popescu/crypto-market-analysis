@@ -6,7 +6,6 @@ from dataclasses import replace
 import pytest
 
 from crypto_market_analysis.analysis_changes import build_analysis_changes, render_analysis_changes_markdown
-from crypto_market_analysis.analysis_dossier import build_analysis_dossier
 from crypto_market_analysis.book_snapshots import retain_books, retained_book
 from crypto_market_analysis.models import Candle, CollectionResult, Observation
 from crypto_market_analysis.storage import Store
@@ -66,12 +65,13 @@ def test_nested_sessions_reuse_connection_and_expire(store, monkeypatch):
 
 def test_both_dossiers_share_watermark_despite_concurrent_correction(store, monkeypatch):
     store.put_candles([candle()])
-    original = build_analysis_dossier
+    from crypto_market_analysis.analysis_dossier import capture_analysis_dossier
+    original = capture_analysis_dossier
     called = 0
 
-    def between(session, selection, cutoff):
+    def between(session, selection, cutoff, **kwargs):
         nonlocal called
-        result = original(session, selection, cutoff)
+        result = original(session, selection, cutoff, **kwargs)
         called += 1
         if called == 1:
             def writer():
@@ -81,7 +81,7 @@ def test_both_dossiers_share_watermark_despite_concurrent_correction(store, monk
                 pool.submit(writer).result(timeout=5)
         return result
 
-    monkeypatch.setattr("crypto_market_analysis.analysis_changes.build_analysis_dossier", between)
+    monkeypatch.setattr("crypto_market_analysis.analysis_changes.capture_analysis_dossier", between)
     result = build_analysis_changes(store, request(), NOW)
     assert result["watermark"]["candles"] == 1
     assert result["summary"]["market_movements"] == 0

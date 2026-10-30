@@ -134,7 +134,7 @@ def test_concurrent_revision_between_dossier_and_qualification_uses_same_physica
     rows = candles()
     store.put_candles(rows)
     from crypto_market_analysis import analysis_readiness
-    original = analysis_readiness.build_analysis_dossier
+    original = analysis_readiness.capture_analysis_dossier
     called = False
 
     def after_dossier(*args, **kwargs):
@@ -148,7 +148,7 @@ def test_concurrent_revision_between_dossier_and_qualification_uses_same_physica
                 pool.submit(write).result(timeout=5)
         return result
 
-    monkeypatch.setattr(analysis_readiness, "build_analysis_dossier", after_dossier)
+    monkeypatch.setattr(analysis_readiness, "capture_analysis_dossier", after_dossier)
     first = build_analysis_readiness(store, request(), NOW)
     second = build_analysis_readiness(store, request(), NOW)
     assert first["dossier"]["markets"][0]["market_context"]["anchor"]["price"] == rows[-1].close

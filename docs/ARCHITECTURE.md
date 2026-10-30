@@ -143,3 +143,23 @@ filesystem/database snapshots and consumes public frozen-calculation interfaces.
 bounded local inputs. CLI and MCP adapters expose those same interfaces, with
 filesystem writes confined to explicit CLI operations. See
 [the offline completion plan](OFFLINE_COMPLETION_PLAN.md) for acceptance limits.
+
+
+## Multi-asset operation and analytical read model
+
+Version 0.9.0 centralizes canonical asset validation in asset_universe, while
+collection_plan owns explicit workload dimensions and durable fair dispatch.
+The collector releases persisted pair results between bounded attempts and reuses
+grouped source/native cursors. Provider-specific capabilities remain explicit.
+operating_acceptance owns finite session identity, clocks, locking and retained
+process evidence; cost_report and operational_reads expose shared bounded read
+interfaces. validation_protocol owns normalized frozen declarations;
+prospective_validation interprets journal-owned cohort projections. The journal
+atomically retains immutable slim projections and owns indexed bounded selection,
+explicit batch migration and legacy archive projection. DossierCapture owns
+snapshot-scoped exact Candle reuse without cross-owner private helper protocols.
+analytical_store owns explicit filtered/partitioned exports, verification, bounded
+identity-checked snapshot reuse and DuckDB reads. CLI and MCP dispatch independently
+through these owners. See the storage ADR for the measured SQLite/DuckDB roles and
+PostgreSQL migration triggers; no generic database adapter family is introduced
+for a second backend that is not used by the application.

@@ -70,7 +70,7 @@ def test_all_registered_schema_examples_and_readonly_annotations(tmp_path):
 
     async def check():
         tools = {tool.name: tool for tool in await server.list_tools()}
-        assert len(tools) == 46 and NEW_TOOLS <= tools.keys()
+        assert len(tools) == 53 and NEW_TOOLS <= tools.keys()
         assert all(tool.annotations.readOnlyHint for tool in tools.values())
         for name in NEW_TOOLS - {"get_history_backfill_status"}:
             contract = get_request_schema(name)
@@ -221,7 +221,7 @@ def test_actual_stdio_missing_readiness_and_backfill_status_remain_readonly(tmp_
         async with stdio_client(parameters) as (read, write), ClientSession(read, write) as session:
             await session.initialize()
             tools = (await session.list_tools()).tools
-            assert len(tools) == 46 and all(tool.annotations.readOnlyHint for tool in tools)
+            assert len(tools) == 53 and all(tool.annotations.readOnlyHint for tool in tools)
             for name, arguments in (("get_history_backfill_status", {}),
                                     ("get_analysis_readiness", {"request": {"dossier": dossier()}, "as_of": NOW})):
                 result = await session.call_tool(name, arguments)

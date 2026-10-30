@@ -7,6 +7,9 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+from .plans import RULE_VERSION as _PLAN_RULE_VERSION
+from .validation_protocol import freeze_validation_protocol as _freeze_validation_protocol
+
 
 def obj(properties, required=(), **extra):
     return {"type": "object", "properties": properties, "required": list(required),
@@ -29,7 +32,8 @@ TEXT = {"type": "string", "minLength": 1, "maxLength": 100}
 DECIMAL = {"type": "string", "pattern": r"^(?:0|[1-9][0-9]{0,17})(?:\.[0-9]{1,18})?$",
            "description": "Exact nonnegative decimal string; runtime checks enforce positive values where required."}
 MODE = enum("live", "import", "demo")
-ASSET = enum("BTC", "ETH")
+ASSET = {"type": "string", "pattern": r"^[A-Z0-9][A-Z0-9._-]{0,31}$", "maxLength": 32,
+         "description": "Explicit CCXT asset code; EUR/USD are quotes, and syntax does not prove economic identity or provider support."}
 QUOTE = enum("EUR", "USD")
 FEES = obj({"rate": {**DECIMAL, "default": "0"}, "fixed": {**DECIMAL, "default": "0"},
             "asset": enum("quote", "base", default="quote")},
@@ -116,7 +120,7 @@ STORED_VENUE = {**STORED_COMMON, "max_age_seconds": integer(86400, default=300),
                 "max_skew_seconds": integer(86400, default=30)}
 SOURCE_MAP = {"type": "object", "additionalProperties": ASSUMPTIONS, "maxProperties": 32}
 QUALIFICATION = obj({"sources": array({**TEXT, "maxLength": 64}, 16, uniqueItems=True, default=[]),
-                     "markets": array(enum("BTC/EUR", "ETH/EUR", "BTC/USD", "ETH/USD"), 4, 1, uniqueItems=True,
+                     "markets": array({"type": "string", "pattern": r"^[A-Z0-9][A-Z0-9._-]{0,31}/(?:EUR|USD)$"}, 4, 1, uniqueItems=True,
                                       default=["BTC/EUR", "ETH/EUR", "BTC/USD", "ETH/USD"]),
                      "market_sources": {"type": "object", "additionalProperties": array(TEXT, 16, 1, uniqueItems=True), "maxProperties": 4},
                      "data_mode": {**MODE, "default": "live"}, "required_history_days": integer(20000, 1, default=730),
@@ -221,7 +225,7 @@ _DOSSIER_MARKET = obj({"asset": ASSET, "source": TEXT, "quote": QUOTE,
                    "max_age_seconds": integer(86400, default=300),
                    "max_endpoint_skew_seconds": integer(86400, default=30)}, ("sources",))},
     ("asset", "source", "quote"))
-DOSSIER = obj({"data_mode": MODE, "markets": array(_DOSSIER_MARKET, 4, 1),
+DOSSIER = obj({"evidence_mode": enum("full", "references", default="full"), "data_mode": MODE, "markets": array(_DOSSIER_MARKET, 4, 1),
     "calendar": obj({"source": TEXT, "start": integer(), "end": integer()})}, ("data_mode", "markets"),
     description="One coherent read transaction, maximum 100000 total candles, 100 calendar rows, 64 KiB request and 32 MiB full result. Native quote identities remain separate.")
 REGISTRY["get_analysis_dossier"] = _contract("request", DOSSIER,
@@ -248,7 +252,7 @@ REGISTRY["get_analysis_changes"] = _contract("request", CHANGES,
                  "previous_as_of": AS_OF - 3600}}, as_of=_AS_OF)
 _READINESS_DOSSIER = deepcopy(DOSSIER)
 _READINESS_DOSSIER["properties"]["markets"]["items"]["properties"]["source"]["maxLength"] = 64
-READINESS = obj({"dossier": _READINESS_DOSSIER,
+READINESS = obj({"evidence_mode": enum("full", "references", default="full"), "dossier": _READINESS_DOSSIER,
     "qualification": obj({key: value for key, value in QUALIFICATION["properties"].items()
                           if key not in ("sources", "markets", "market_sources", "data_mode")}),
     "windows": obj({"horizons": array(integer(365, 1), 16, 1, uniqueItems=True),
@@ -278,6 +282,81 @@ ROBUSTNESS = obj({"schema_version": {"type": "integer", "const": 1}, "config": _
 REGISTRY["get_plan_robustness"] = _contract("request", ROBUSTNESS,
     {"request": {"schema_version": 1, "config": PLAN_EXAMPLE, "origins": [AS_OF],
                  "cost_cases": [{"name": "declared costs"}]}}, as_of=_AS_OF)
+
+_OPERATING_PAGE = {"source": TEXT, "limit": integer(100, 1, default=20),
+                   "cursor": {"type": ["string", "null"], "maxLength": 16384}}
+REGISTRY["get_collection_capacity"] = {
+    "input_schema": obj({"tasks": array(enum("market", "liquidity", "options", "context"), 4, 1, uniqueItems=True)}),
+    "examples": [{"tasks": ["market"]}]}
+REGISTRY["get_operating_health"] = _contract("request", obj({**_OPERATING_PAGE,
+    "required_history_hours": integer(8760, 1, default=24), "freshness_seconds": integer(31536000, default=10800),
+    "max_gap_hours": integer(8760, default=0), "max_query_rows": integer(2000000, 1, default=250000)}),
+    {"request": {"limit": 20, "required_history_hours": 24}}, as_of=_AS_OF)
+REGISTRY["get_operating_costs"] = _contract("request", obj({**_OPERATING_PAGE, "task": TEXT, "start": integer(),
+    "prices": obj({"currency": {**TEXT, "maxLength": 12},
+                   "per_million_requests": {"type": "number", "minimum": 0},
+                   "per_gib_decoded_bytes": {"type": "number", "minimum": 0}}, ("currency",))}),
+    {"request": {"limit": 20}}, as_of=_AS_OF)
+REGISTRY["get_operating_acceptance"] = _contract("request", obj({
+    "session_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"},
+    "refresh": {"type": "boolean", "const": False, "default": False}}),
+    {"request": {"session_id": "first-public-observation", "refresh": False}})
+_SNAPSHOT_NAME = {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$", "default": "default"}
+REGISTRY["get_analytical_snapshot_status"] = {"input_schema": obj({"snapshot_name": _SNAPSHOT_NAME}),
+                                           "examples": [{"snapshot_name": "research"}]}
+REGISTRY["get_analytical_fleet"] = _contract("request", obj({"assets": array(ASSET, 1000, 1, uniqueItems=True),
+    "start": integer(multipleOf=3600), "end": integer(multipleOf=3600), "as_of": integer(),
+    "source": TEXT, "quote": TEXT, "mode": MODE, "max_assets": integer(1000, 1, default=1000),
+    "max_series": integer(10000, 1, default=10000)}, ("assets", "start", "end", "as_of")),
+    {"request": {"assets": ["BTC", "ETH", "SOL"], "start": AS_OF - 86400, "end": AS_OF,
+                 "as_of": AS_OF, "source": "synthetic", "quote": "EUR", "mode": "demo"}, "snapshot_name": "research"},
+    snapshot_name=_SNAPSHOT_NAME)
+_VALIDATION_EVENT = obj({"event": enum("endpoint_below_anchor", "below_anchor_touch", "observable_endpoint"),
+    "convention": enum("exact_deadline_v1", "fully_contained_hourly_bars_v1", "hourly_after_deadline_v1"),
+    "time_anchor": {"type": "string", "const": "issuance"}, "horizon_days": integer(365, 1),
+    "threshold": {"type": ["number", "null"], "minimum": 0, "maximum": 1}},
+    ("event", "convention", "time_anchor", "horizon_days", "threshold"))
+_VALIDATION_COHORT = obj({"cohort_id": TEXT, "source": TEXT, "asset": ASSET, "quote": QUOTE,
+    "data_mode": MODE, "dataset_lineage": {"type": ["object", "null"]}, "rules": {"type": "object"},
+    "model_version": TEXT, "rule_version": TEXT, "events": array(_VALIDATION_EVENT, 64, 1)},
+    ("cohort_id", "source", "asset", "quote", "data_mode", "dataset_lineage", "rules", "model_version", "rule_version", "events"))
+VALIDATION_DECLARATION = obj({"name": TEXT, "mode": enum("prospective", "retrospective"),
+    "starts_at": integer(), "ends_at": integer(), "cohorts": array(_VALIDATION_COHORT, 1000, 1),
+    "criterion": obj({"minimum_resolved_nonoverlapping": integer(100, 1),
+                      "maximum_missing_fraction": DECIMAL}, ("minimum_resolved_nonoverlapping", "maximum_missing_fraction")),
+    "baseline": obj({"family": {"type": "string", "const": "regular"}, "reserve_yield": {"type": "string", "const": "0"},
+                     "rule_version": TEXT, "fees": FEES, "execution": EXECUTION},
+                    ("family", "reserve_yield", "rule_version", "fees", "execution"))},
+    ("name", "mode", "starts_at", "ends_at", "cohorts", "criterion", "baseline"))
+VALIDATION_PROTOCOL = obj({"schema_version": {"type": "integer", "const": 1},
+    "protocol_version": {"type": "string", "const": "prospective_validation_v1"}, "frozen_at": integer(),
+    "protocol_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "declaration": VALIDATION_DECLARATION},
+    ("schema_version", "protocol_version", "frozen_at", "protocol_hash", "declaration"))
+REGISTRY["get_prospective_validation"] = _contract("request", obj({"protocol": VALIDATION_PROTOCOL,
+    "cohort_page": integer(999, default=0), "page_size": integer(100, 1, default=10),
+    "origins_per_cohort": integer(100, 1, default=100), "record_budget": integer(1000, 1, default=1000)}, ("protocol",)),
+    {"request": {"protocol": {"schema_version": 1, "protocol_version": "prospective_validation_v1",
+                              "frozen_at": AS_OF, "protocol_hash": "0" * 64, "declaration": {}}, "page_size": 1}},
+    as_of=_AS_OF)
+
+
+# The example is executable and hash-valid; it remains explicitly synthetic.
+
+_VALIDATION_EXAMPLE = {
+    "name": "Synthetic schema example", "mode": "retrospective", "starts_at": AS_OF, "ends_at": AS_OF + 86400,
+    "criterion": {"minimum_resolved_nonoverlapping": 2, "maximum_missing_fraction": "0.1"},
+    "baseline": {"family": "regular", "reserve_yield": "0", "rule_version": _PLAN_RULE_VERSION,
+                 "fees": {"rate": "0", "fixed": "0", "asset": "quote"},
+                 "execution": {"timeframe": "1h", "max_price_age_seconds": 3600, "spread_bps": "0",
+                               "slippage_bps": "0", "quantity_step": "0.00000001", "price_step": "0.00000001",
+                               "assumption": "historical_configured_costs"}},
+    "cohorts": [{"cohort_id": "synthetic-btc-eur", "source": "synthetic", "asset": "BTC", "quote": "EUR",
+                 "data_mode": "demo", "dataset_lineage": None, "rules": {"purchase_windows": 1},
+                 "model_version": "purchase_windows_v1", "rule_version": "issuance_hourly_v1",
+                 "events": [{"event": "endpoint_below_anchor", "convention": "exact_deadline_v1",
+                             "time_anchor": "issuance", "horizon_days": 1, "threshold": None}]}]}
+REGISTRY["get_prospective_validation"]["examples"] = [{"request": {
+    "protocol": _freeze_validation_protocol(_VALIDATION_EXAMPLE, frozen_at=AS_OF-1), "page_size": 1}, "as_of": AS_OF}]
 
 
 def get_request_schema(tool_name: str) -> dict:

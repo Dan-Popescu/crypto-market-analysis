@@ -173,6 +173,7 @@ class ExchangeClients:
         self.catalogue_ttl = catalogue_ttl
         self._clients: dict[str, Any] = {}
         self._catalogues: dict[str, tuple[float, dict]] = {}
+        self._market_indexes: dict[str, dict[str, dict]] = {}
         self._lock = RLock()
         self._venue_locks = {venue: RLock() for venue in VENUES}
 
@@ -196,12 +197,25 @@ class ExchangeClients:
         markets = client.load_markets(reload=True) if cached else client.load_markets()
         if markets:
             self._catalogues[venue] = (time.monotonic(), markets)
+            indexed = {}
+            for key, market in markets.items():
+                indexed.setdefault(market.get("base"), {})[key] = market
+            self._market_indexes[venue] = indexed
         return markets
+
+    def markets_for_assets(self, venue: str, assets: list[str], markets: dict) -> dict:
+        """Project cached catalogue groups without rescanning every listed market."""
+        indexed = self._market_indexes.get(venue)
+        if indexed is None:
+            return markets
+        return {key: market for asset in assets
+                for key, market in indexed.get(asset, {}).items()}
 
     def close(self) -> None:
         with self._lock:
             clients, self._clients = self._clients, {}
             self._catalogues.clear()
+            self._market_indexes.clear()
         for client in clients.values():
             close = getattr(client, "close", None)
             if callable(close):
@@ -273,6 +287,13 @@ def collect_exchange(
             client = clients.client(venue)
             instrument_exchange(client, venue)
             markets = clients.markets(venue, client)
+            project = getattr(clients, "markets_for_assets", None)
+            if markets and callable(project):
+                # Pool wrappers may expose only client/markets/venue locks.
+                # Catalogue projection is optional on that existing protocol.
+                # A nonempty catalogue with no requested base is an unsupported
+                # pair, not an outage; retain a sentinel for the empty projection.
+                markets = project(venue, assets, markets) or {"_unsupported": {}}
         except Exception as exc:
             return CollectionResult(venue, errors=[f"{venue} client/catalogue: {public_error(exc)}"])
         return _collect_exchange(

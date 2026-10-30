@@ -284,7 +284,7 @@ def test_scope_selectors_keep_modes_and_native_quotes_separate_without_fx():
 
 
 @pytest.mark.parametrize('change', [
-    lambda cfg: cfg.update(schema_version=True), lambda cfg: cfg.update(asset='SOL'),
+    lambda cfg: cfg.update(schema_version=True), lambda cfg: cfg.update(asset='SOL/USDT'),
     lambda cfg: cfg.pop('data_mode'), lambda cfg: cfg.update(policy={'endpoint_tolerance_seconds': -1}),
     lambda cfg: cfg.update(policy={'endpoint_tolerance_seconds': 3601}),
     lambda cfg: cfg.update(policy={'max_point_age_seconds': True}),
@@ -311,3 +311,16 @@ def test_series_count_is_bounded_and_empty_evidence_is_honestly_empty():
         analyze_derivatives_context(cfg, NOW)
     cfg['observations'] = []
     assert analyze_derivatives_context(cfg, NOW)['series'] == []
+
+
+@pytest.mark.parametrize('native_unit,status', [('SOL', 'ok'), ('UNKNOWN', 'unknown_native_convention'),
+                                               ('sol', 'unknown_native_convention'), ('SOL/USDT', 'unknown_native_convention')])
+def test_third_asset_contract_size_unit_requires_a_known_canonical_native_code(native_unit, status):
+    cfg = request()
+    cfg['asset'] = 'SOL'
+    for row in cfg['observations']:
+        row.update(asset='SOL', unit='contracts')
+        row['metadata'].update(symbol='SOL/USDT:USDT', contract_size=0.1, contract_size_unit=native_unit)
+    series = analyze_derivatives_context(cfg, NOW)['series'][0]
+    assert series['status'] == status
+    assert series['comparisons']['4h']['native_change'] == (20 if status == 'ok' else None)

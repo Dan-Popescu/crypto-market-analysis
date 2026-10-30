@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 
+from .asset_universe import validate_asset, validate_assets
 from .evidence import metric_dimension
 from .metric_history import decode_cursor, encode_cursor
 from .metric_history import selection as history_selection
@@ -220,7 +221,8 @@ class Store:
             con.execute("BEGIN IMMEDIATE")
             admitted = False
             for c in rows:
-                if c.asset not in ("BTC", "ETH") or c.data_mode not in ("live", "demo", "import"):
+                validate_asset(c.asset)
+                if c.data_mode not in ("live", "demo", "import"):
                     raise ValueError("Unsupported asset or data mode.")
                 numeric = (c.open, c.high, c.low, c.close, c.volume)
                 if any(type(getattr(c, key)) is not int for key in ("open_time", "close_time", "observed_at")):
@@ -730,7 +732,8 @@ class Store:
         Optional replay history requires an explicit native market and is frozen
         here, rather than reconstructed later from recyclable physical row IDs.
         """
-        if asset not in ("BTC", "ETH") or mode not in ("live", "demo", "import"):
+        validate_asset(asset)
+        if mode not in ("live", "demo", "import"):
             raise ValueError("Unsupported asset or data mode.")
         if type(as_of) is not int:
             raise ValueError("as_of must be UTC epoch seconds.")
@@ -769,7 +772,7 @@ class Store:
                     ORDER BY observed_at DESC,id DESC) version_rank FROM candles
                 WHERE {' AND '.join(conditions)}), latest AS (SELECT *{series_rank}
                 FROM versions WHERE version_rank=1) """
-            candle_coverage = con.execute(cte + """SELECT source,quote,COUNT(*),MIN(open_time),MAX(close_time)
+            candle_coverage = [] if profile == "candles" else con.execute(cte + """SELECT source,quote,COUNT(*),MIN(open_time),MAX(close_time)
                 FROM latest GROUP BY source,quote""", values).fetchall()
             candles = con.execute(cte + "SELECT payload FROM latest "
                                   + ("WHERE series_rank<=48 " if profile == "vigilance" else "")
@@ -814,6 +817,19 @@ class Store:
                     counts[table] = con.execute(f"SELECT COUNT(*) FROM {table} WHERE observed_at<=?",
                                                 (as_of,)).fetchone()[0]
         retained_candles = [Candle(**json.loads(row[0])) for row in reversed(candles[:candle_limit])]
+        if profile == "candles":
+            # This profile fails on truncation, so the exact selected bars also
+            # provide coverage. Avoid ranking the same full native history twice.
+            groups = {}
+            for row in retained_candles:
+                key = row.source, row.quote
+                if key not in groups:
+                    groups[key] = [0, row.open_time, row.close_time]
+                summary = groups[key]
+                summary[0] += 1
+                summary[1] = min(summary[1], row.open_time)
+                summary[2] = max(summary[2], row.close_time)
+            candle_coverage = [(source, quote, *summary) for (source, quote), summary in sorted(groups.items())]
         market_coverage = [{"source": venue, "quote": currency, "available": count,
                             "captured": sum(row.source == venue and row.quote == currency for row in retained_candles),
                             "available_start": start, "available_end": end}
@@ -840,6 +856,26 @@ class Store:
                 + (" AND quote=?" if quote is not None else ""),
                 (source, asset, mode, quote) if quote is not None else (source, asset, mode),
             ).fetchone()[0]
+
+    def latest_candle_times(self, source: str, assets: list[str], *, quotes: list[str],
+                            mode: str = "live") -> dict[tuple[str, str], int]:
+        """Resolve collection cursors in one grouped native-market read.
+
+        Only present asset/quote combinations are returned; absence stays unknown.
+        This does not scan payloads or open one connection per market.
+        """
+        assets = validate_assets(assets)
+        if (mode not in ("live", "demo", "import") or not isinstance(source, str) or not source or len(source) > 256
+                or not isinstance(quotes, list) or not 1 <= len(quotes) <= 16
+                or any(not isinstance(quote, str) or not quote or len(quote) > 120 for quote in quotes)
+                or len(set(quotes)) != len(quotes)):
+            raise ValueError("Latest candle times require bounded native source, quote and mode selectors.")
+        asset_slots, quote_slots = ",".join("?" for _ in assets), ",".join("?" for _ in quotes)
+        with self.connection() as con:
+            rows = con.execute(f"""SELECT asset,quote,MAX(open_time) FROM candles
+                WHERE source=? AND data_mode=? AND asset IN ({asset_slots}) AND quote IN ({quote_slots})
+                GROUP BY asset,quote""", [source, mode, *assets, *quotes]).fetchall()
+        return {(row[0], row[1]): row[2] for row in rows}
 
     def save_local_record(self, kind: str, payload: dict) -> dict:
         """Preserve sourced imports and date-only calendars without invented event times."""
@@ -900,8 +936,10 @@ class Store:
                 or not isinstance(quote, str) or not quote or len(quote) > 120
                 or type(history_seconds) is not int or not 86400 <= history_seconds <= 172800
                 or type(limit) is not int or not 1 <= limit <= 5000
-                or (kind == "derivatives" and asset not in ("BTC", "ETH"))):
+                ):
             raise ValueError("Stored analysis requires explicit bounded native selectors, mode and cutoff.")
+        if kind == "derivatives":
+            validate_asset(asset)
         placeholders = ",".join("?" for _ in sources)
         with self.connection() as con:
             if not getattr(con, "in_transaction", False):

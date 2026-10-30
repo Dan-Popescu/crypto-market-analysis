@@ -224,3 +224,20 @@ and `get_journal_summary`. They accept bounded objects, not arbitrary file paths
 and create no assessments, orders, datasets or notifications. Journal summaries
 report their record/outcome bounds and count each issued event once; they are not
 a calibrated scorecard or evidence of an investment advantage.
+
+
+## Version 0.9.0 multi-asset workflows
+
+Existing command/tool names, native currencies, modes and OBSERVER configuration
+names remain compatible. Explicit CCXT asset codes replace BTC/ETH-only generic
+selectors; defaults stay BTC/ETH, and actual source capabilities remain unknown
+until observed. Named Kraken archives keep their existing identity constraints.
+Optional collection_batch_size, collection_work_limit and liquidity_assets control
+bounded work and book scope. MCP grows from 46 to 53 read-only tools. Dossier/readiness
+evidence_mode defaults to full; references explicitly omits raw records while
+retaining calculations and exact input digests/counts. Compatible v1 and partitioned
+v2 analytical exports are read-only snapshots, never automatic replacements for
+live collection or the journal. Explicit journal writers initialize bounded slim
+validation projections/indexes; read-only servers never migrate, and budgeted
+legacy projection remains available. Protocol hashes bind new opted-in issues;
+legacy originals remain immutable and do not gain invented predictions.

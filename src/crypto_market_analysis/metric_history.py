@@ -6,10 +6,12 @@ import hashlib
 import json
 import time
 
+from .asset_universe import validate_asset
+
 
 def selection(asset, metric, mode, source, quote, unit, dimension, as_of, start, end):
-    if asset not in ("BTC", "ETH", "MACRO", "STABLECOINS"):
-        raise ValueError("Unsupported history asset.")
+    if asset not in ("MACRO", "STABLECOINS"):
+        validate_asset(asset)
     if mode not in ("live", "demo", "import"):
         raise ValueError("Unsupported history data mode.")
     for name, value in (("metric", metric), ("source", source), ("quote", quote), ("unit", unit)):

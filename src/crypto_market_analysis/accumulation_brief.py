@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from decimal import Decimal, localcontext
 
+from .asset_universe import validate_asset
 from .context import _eligible_candles, _timestamp, market_context
 from .evidence import CapturedInputs
 from .plans import (
@@ -85,7 +86,8 @@ def build_accumulation_brief(captured: CapturedInputs, plan_config: dict | None 
     _timestamp(captured.as_of, "as_of")
     if not isinstance(captured.source, str) or not captured.source or captured.quote not in ("EUR", "USD"):
         raise ValueError("The brief requires an explicit source and native EUR or USD quote")
-    if captured.asset not in ("BTC", "ETH") or captured.data_mode not in ("live", "import", "demo"):
+    validate_asset(captured.asset)
+    if captured.data_mode not in ("live", "import", "demo"):
         raise ValueError("Unsupported captured market identity")
     market = {key: getattr(captured, key) for key in ("asset", "quote", "source", "data_mode")}
     candles = list(captured.candles)
