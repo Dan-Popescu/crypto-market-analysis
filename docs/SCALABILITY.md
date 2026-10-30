@@ -9,6 +9,11 @@ these identifiers; source-specific ETF, option and network capabilities remain
 limited to their actual supported assets. Existing named Kraken archive datasets
 retain their four original native markets.
 
+The 0.9.0 target is multiple cryptocurrency codes. Future equities, commodities
+and other asset classes require [separate instrument, calendar and price-basis
+semantics](CROSS_ASSET_DESIGN.md); the current capacity measurements do not certify
+mixed-class support.
+
 ## Plan demand before collection
 
 ```bash

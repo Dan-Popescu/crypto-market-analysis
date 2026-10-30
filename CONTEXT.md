@@ -1,17 +1,58 @@
-# Crypto accumulation analysis
+# Market research and accumulation
 
-This tool studies spot accumulation using public market evidence; BTC and ETH are its default assets.
+The product studies market evidence and hypothetical accumulation across asset classes.
+Cryptocurrencies are the currently implemented market profile; BTC and ETH are its defaults.
 Ledgerly remains authoritative for actual transactions, holdings and acquisition costs.
 
 ## Market scope
 
 **Asset universe**:
-The explicitly selected set of asset identifiers whose native markets are monitored.
+The explicitly selected instruments or listings whose observations are monitored.
 Membership does not establish provider availability or recommend an investment.
 
 **Native market**:
-An asset and quote pair on a named source, retaining that source's instrument identity.
-The same ticker on another source does not by itself establish economic equivalence.
+An instrument, listing or reference series with its actual denomination, units
+and applicable venue; a shared ticker does not establish economic equivalence.
+
+**Instrument**:
+A financial object or reference with its own economic or contractual identity,
+distinct from its provider symbols and possible exchange listings.
+
+**Asset class**:
+The economic category of an exposure, such as cryptocurrency, equity or commodity.
+It is separate from the instrument's form, such as a share, fund or futures contract.
+
+**Listing**:
+An instrument's quoted representation on a particular venue and in a particular
+currency, with its own market schedule and published identifiers.
+
+**Provider symbol**:
+A source-specific alias for an instrument, listing or reference series, with a
+period of validity; the alias is not a global instrument identifier.
+
+**Market session**:
+A sourced period of permitted trading attributed to a venue's local session date,
+including its relevant openings, breaks, auctions and closing convention.
+
+**Observation schedule**:
+The expected publication intervals for a selected series, including any sessions,
+release cadence or delays relevant to interpreting missing and stale observations.
+
+**Price basis**:
+The economic meaning of a price series, such as raw traded prices, split-adjusted
+prices or a total-return reference incorporating declared distributions.
+
+**Corporate action**:
+A dated issuer event affecting units, identity or cash entitlements, retaining
+its announcement, effective and knowledge times.
+
+**Futures contract**:
+A particular contract with its own venue, expiry, multiplier, units and settlement
+terms, distinct from other expiries sharing an underlying exposure.
+
+**Continuous futures series**:
+A derived sequence of contracts with a declared selection, roll and adjustment
+method; the sequence is distinct from a directly executable contract.
 
 **Operating acceptance period**:
 Actual elapsed observation of a declared collection workload, with its gaps,
