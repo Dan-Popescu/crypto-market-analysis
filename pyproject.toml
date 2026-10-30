@@ -16,6 +16,7 @@ dependencies = [
   "requests[socks]>=2.32,<3",
   "pyjwt[crypto]>=2.10,<3",
   "anyio>=4.15.1",
+  "exchange-calendars>=4.11,<5",
 ]
 
 [project.optional-dependencies]
