@@ -5,6 +5,7 @@ import sqlite3
 from copy import deepcopy
 
 import pytest
+from crypto_market_analysis.cross_asset.research import simulate_cash_plan
 
 from crypto_market_analysis.cross_asset.snapshots import MarketSnapshot, export_market_snapshot
 from crypto_market_analysis.cross_asset.storage import CrossAssetStore
@@ -333,3 +334,69 @@ def test_mixed_bundle_does_not_backdate_live_or_hide_declared_demo_history(tmp_p
     store.import_bundle(mixed, received_at=500)
     assert store.read_series("live", as_of=200, data_mode="live") is None
     assert store.read_series("demo", as_of=200, data_mode="demo")["storage_provenance"]["receipt_evidence"] == "self_declared_history"
+
+
+@pytest.mark.parametrize("analytical", [False, True])
+def test_all_vintages_preserve_original_cash_fill_under_later_price_correction(tmp_path, analytical):
+    store = writer(tmp_path)
+    original = bundle()
+    instrument = original["registry"]["instruments"][0]
+    instrument["form"] = "fund"
+    original["registry"]["listings"] = [{"id": "listing", "instrument_id": "reference", "native_currency": "USD",
+                                         "calendar_id": "synthetic-calendar", "active_from": 0, "active_until": None,
+                                         "known_at": 0, "venue_mic": "XTST"}]
+    original["registry"]["aliases"][0]["listing_id"] = "listing"
+    original["series"][0]["descriptor"].update(interval="session", listing_id="listing")
+    original_bar = original["series"][0]["bars"][0]
+    original_bar.update(open=10, high=10, low=10, close=10, observed_at=130)
+    store.import_bundle(original, received_at=200)
+    correction = deepcopy(original)
+    corrected_bar = correction["series"][0]["bars"][0]
+    corrected_bar.update(high=20, close=20, observed_at=160)
+    store.import_bundle(correction, received_at=300)
+    if analytical:
+        export_market_snapshot(store, tmp_path / "historical-fill")
+        reader = MarketSnapshot(tmp_path / "historical-fill")
+    else:
+        reader = store
+    plan = {"currency": "USD", "initial_cash": 100, "deposits": [], "purchases": [{"at": 130, "cash_amount": 100}],
+            "fee_per_trade": 0, "distributions": "cash", "actions_complete": False}
+    latest = reader.read_series("reference-raw", as_of=200, data_mode="import")
+    assert [bar["close"] for bar in latest["bars"]] == [20]
+    with pytest.raises(ValueError, match="already received"):
+        simulate_cash_plan(latest, plan, as_of=200, instrument=instrument)
+    all_versions = reader.read_series("reference-raw", as_of=200, data_mode="import", all_vintages=True)
+    assert all_versions["bars"] == [original_bar, corrected_bar]
+    assert [entry["hash"] for entry in all_versions["storage_provenance"]["bars"]] == [content_hash(original_bar), content_hash(corrected_bar)]
+    result = simulate_cash_plan(all_versions, plan, as_of=200, instrument=instrument)
+    assert result["fills"][0]["price"] == 10
+    assert result["mark"]["price"] == 20
+    assert result["units"] == 10 and result["position_value"] == 200
+
+
+@pytest.mark.parametrize("analytical", [False, True])
+def test_all_vintages_include_action_revisions_and_obey_combined_row_budget(tmp_path, analytical):
+    store = writer(tmp_path)
+    first = bundle()
+    first["registry"]["instruments"][0]["form"] = "fund"
+    first["series"][0]["descriptor"]["interval"] = "session"
+    first["series"][0]["actions"] = [{"id": "split", "kind": "split", "effective_at": 150,
+                                     "announced_at": 140, "observed_at": 140, "ratio": 2}]
+    store.import_bundle(first, received_at=200)
+    revised = deepcopy(first)
+    revised["series"][0]["bars"][0].update(close=-12, observed_at=160)
+    revised["series"][0]["actions"][0].update(ratio=3, observed_at=180)
+    store.import_bundle(revised, received_at=300)
+    if analytical:
+        export_market_snapshot(store, tmp_path / "action-versions")
+        reader = MarketSnapshot(tmp_path / "action-versions")
+    else:
+        reader = store
+    assert len(reader.read_series("reference-raw", as_of=200, data_mode="import")["actions"]) == 1
+    versions = reader.read_series("reference-raw", as_of=200, data_mode="import", all_vintages=True)
+    assert [action["ratio"] for action in versions["actions"]] == [2, 3]
+    assert [entry["hash"] for entry in versions["storage_provenance"]["actions"]] == [content_hash(first["series"][0]["actions"][0]), content_hash(revised["series"][0]["actions"][0])]
+    with pytest.raises(ValueError, match="row budget"):
+        reader.read_series("reference-raw", as_of=200, data_mode="import", all_vintages=True, max_rows=3)
+    with pytest.raises(ValueError, match="boolean"):
+        reader.read_series("reference-raw", as_of=200, data_mode="import", all_vintages="true")

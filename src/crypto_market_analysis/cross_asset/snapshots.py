@@ -332,10 +332,12 @@ class MarketSnapshot:
                              "coverage_note": "Observed native intervals only; calendar coverage and live acceptance are separate evidence."})
 
     def read_series(self, series_id: str, *, as_of: int, data_mode: str, start: int | None = None,
-                    end: int | None = None, max_rows: int = 10_000) -> dict | None:
+                    end: int | None = None, max_rows: int = 10_000, all_vintages: bool = False) -> dict | None:
         _epoch(as_of, "as_of")
         _mode(data_mode)
         _limit(max_rows, MAX_READ_ROWS, "max_rows")
+        if type(all_vintages) is not bool:
+            raise ValueError("all_vintages must be boolean.")
         if not isinstance(series_id, str) or not series_id or len(series_id) > 256:
             raise ValueError("series_id must be a bounded nonempty string.")
         for name, value in (("start", start), ("end", end)):
@@ -356,10 +358,12 @@ class MarketSnapshot:
             if end is not None:
                 conditions.append('"end"<=?')
                 values.append(end)
+            bar_selection = '' if all_vintages else ' QUALIFY ROW_NUMBER() OVER (PARTITION BY start,"end" ORDER BY known_at DESC,observed_at DESC)=1'
+            action_selection = '' if all_vintages else 'QUALIFY ROW_NUMBER() OVER (PARTITION BY action_id ORDER BY known_at DESC,observed_at DESC)=1 '
             rows = con.execute('SELECT payload,hash,observed_at,received_at,known_at FROM bars WHERE ' + " AND ".join(conditions) +
-                               ' QUALIFY ROW_NUMBER() OVER (PARTITION BY start,"end" ORDER BY known_at DESC,observed_at DESC)=1 ORDER BY start,"end" LIMIT ?', values + [max_rows + 1]).fetchall()
+                               bar_selection + ' ORDER BY start,"end",known_at,observed_at LIMIT ?', values + [max_rows + 1]).fetchall()
             actions = con.execute("SELECT payload,hash,observed_at,received_at,known_at FROM actions WHERE series_id=? AND known_at<=? "
-                                  "QUALIFY ROW_NUMBER() OVER (PARTITION BY action_id ORDER BY known_at DESC,observed_at DESC)=1 ORDER BY effective_at,action_id LIMIT ?", [series_id, as_of, max_rows + 1]).fetchall()
+                                  + action_selection + "ORDER BY effective_at,action_id,known_at,observed_at LIMIT ?", [series_id, as_of, max_rows + 1]).fetchall()
             if len(rows) + len(actions) > max_rows:
                 raise ValueError("Market snapshot exceeds result row budget; narrow the interval.")
             def receipt(item):

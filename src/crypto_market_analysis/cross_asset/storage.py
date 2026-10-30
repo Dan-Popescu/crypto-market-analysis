@@ -371,10 +371,13 @@ class CrossAssetStore:
                              "next_cursor": rows[limit - 1]["id"] if len(rows) > limit else None})
 
     def read_series(self, series_id: str, *, as_of: int, data_mode: str, start: int | None = None,
-                    end: int | None = None, max_rows: int = 10_000) -> dict | None:
+                    end: int | None = None, max_rows: int = 10_000, all_vintages: bool = False) -> dict | None:
+        """Read latest intervals, or all admitted vintages for historical execution."""
         _epoch(as_of, "as_of")
         _mode(data_mode)
         _limit(max_rows, MAX_READ_ROWS, "max_rows")
+        if type(all_vintages) is not bool:
+            raise ValueError("all_vintages must be boolean.")
         if not isinstance(series_id, str) or not series_id or len(series_id) > 256:
             raise ValueError("series_id must be a nonempty bounded string.")
         for name, value in (("start", start), ("end", end)):
@@ -395,12 +398,18 @@ class CrossAssetStore:
             if end is not None:
                 conditions.append("end<=?")
                 values.append(end)
-            sql = ("WITH versions AS (SELECT *,ROW_NUMBER() OVER (PARTITION BY start,end ORDER BY known_at DESC,observed_at DESC) AS rank "
-                   f"FROM cross_asset_bars WHERE {' AND '.join(conditions)}) SELECT * FROM versions WHERE rank=1 ORDER BY start,end LIMIT ?")
+            if all_vintages:
+                sql = (f"SELECT * FROM cross_asset_bars WHERE {' AND '.join(conditions)} "
+                       "ORDER BY start,end,known_at,observed_at LIMIT ?")
+                action_sql = ("SELECT * FROM cross_asset_actions WHERE series_id=? AND known_at<=? "
+                              "ORDER BY effective_at,action_id,known_at,observed_at LIMIT ?")
+            else:
+                sql = ("WITH versions AS (SELECT *,ROW_NUMBER() OVER (PARTITION BY start,end ORDER BY known_at DESC,observed_at DESC) AS rank "
+                       f"FROM cross_asset_bars WHERE {' AND '.join(conditions)}) SELECT * FROM versions WHERE rank=1 ORDER BY start,end LIMIT ?")
+                action_sql = ("WITH versions AS (SELECT *,ROW_NUMBER() OVER (PARTITION BY action_id ORDER BY known_at DESC,observed_at DESC) AS rank "
+                              "FROM cross_asset_actions WHERE series_id=? AND known_at<=?) SELECT * FROM versions WHERE rank=1 ORDER BY effective_at,action_id LIMIT ?")
             bars = con.execute(sql, (*values, max_rows + 1)).fetchall()
-            actions = con.execute("WITH versions AS (SELECT *,ROW_NUMBER() OVER (PARTITION BY action_id ORDER BY known_at DESC,observed_at DESC) AS rank "
-                                  "FROM cross_asset_actions WHERE series_id=? AND known_at<=?) SELECT * FROM versions WHERE rank=1 ORDER BY effective_at,action_id LIMIT ?",
-                                  (series_id, as_of, max_rows + 1)).fetchall()
+            actions = con.execute(action_sql, (series_id, as_of, max_rows + 1)).fetchall()
             if len(bars) + len(actions) > max_rows:
                 raise ValueError("Cross-asset result exceeds row budget; narrow the interval.")
             def receipt(item):
