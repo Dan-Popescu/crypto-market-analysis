@@ -17,7 +17,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .identity import resolve_alias
-from .prices import number, object_fields, validate_series
+from .prices import effective_known_at, number, object_fields, receipt_clocks, validate_series
 from .sessions import expected_observations, validate_calendar
 from .storage import CrossAssetStore
 
@@ -136,7 +136,8 @@ def _stored(database, *, assessment_id=None, idempotency_key=None):
 
 
 def _series(store, descriptor, cutoff):
-    series = store.read_series(descriptor["id"], as_of=cutoff, data_mode=descriptor["data_mode"], max_rows=10000)
+    series = store.read_series(descriptor["id"], as_of=cutoff, data_mode=descriptor["data_mode"],
+                               max_rows=10000, all_vintages=True)
     if series is None or series["descriptor"] != descriptor:
         raise ValueError("Series lineage differs from frozen protocol or is unavailable")
     evidence = series.get("storage_provenance", {}).get("receipt_evidence")
@@ -230,10 +231,13 @@ def issue_market_assessment(database, request, *, issued_at):
     if identity["instrument"]["form"] not in {"spot", "share", "fund"}:
         raise ValueError("This prospective method does not support the instrument form")
     series = _series(store, descriptor, issued_at)
-    bars = [bar for bar in series["bars"] if bar["end"] <= issued_at and bar["observed_at"] <= issued_at]
+    clocks = receipt_clocks(series, "bars")
+    bars = [bar for bar in series["bars"] if bar["end"] <= issued_at
+            and effective_known_at(series, bar, "bars", receipt_index=clocks) <= issued_at]
     if not bars:
         raise ValueError("No completed native anchor observation is known at issuance")
-    anchor = max(bars, key=lambda bar: (bar["end"], bar["observed_at"]))
+    anchor = max(bars, key=lambda bar: (bar["end"], effective_known_at(series, bar, "bars", receipt_index=clocks),
+                                       bar["observed_at"]))
     _identity(registry, descriptor, anchor["start"], issued_at)
     _identity(registry, descriptor, anchor["end"] - 1, issued_at)
     if anchor["close"] <= 0:
@@ -303,11 +307,12 @@ def evaluate_market_assessment(database, request, *, as_of):
     if any(assessment["anchor"]["end"] <= action["effective_at"] <= target["end"] and action["kind"] == "split"
            for action in series["actions"]):
         return {**result, "status": "excluded", "reason": "split crosses raw price-only outcome"}
+    clocks = receipt_clocks(series, "bars")
     bars = [bar for bar in series["bars"] if (bar["start"], bar["end"]) == (target["start"], target["end"])
-            and bar["observed_at"] <= as_of]
+            and effective_known_at(series, bar, "bars", receipt_index=clocks) <= as_of]
     if not bars:
         return {**result, "status": "missing"}
-    bar = max(bars, key=lambda row: row["observed_at"])
+    bar = max(bars, key=lambda row: (effective_known_at(series, row, "bars", receipt_index=clocks), row["observed_at"]))
     receipt = _receipt(series, bar)
     lag = declaration.get("max_receipt_lag_seconds")
     if lag is not None and (receipt is None or receipt["effective_known_at"] > target["due_at"] + lag):
@@ -316,7 +321,9 @@ def evaluate_market_assessment(database, request, *, as_of):
                       if (row["start"], row["end"]) == (target["start"], target["end"])]
         if not candidates:
             return {**result, "status": "excluded", "reason": "target receipt is late or unwitnessed"}
-        bar = max(candidates, key=lambda row: row["observed_at"])
+        timely_clocks = receipt_clocks(timely, "bars")
+        bar = max(candidates, key=lambda row: (effective_known_at(timely, row, "bars", receipt_index=timely_clocks),
+                                              row["observed_at"]))
         receipt = _receipt(timely, bar)
     if bar["close"] <= 0:
         return {**result, "status": "excluded", "reason": "nonpositive target is unsupported"}

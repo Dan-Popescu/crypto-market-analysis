@@ -270,3 +270,36 @@ def test_eligibility_is_half_open_and_freeze_precedes_start(setup):
         issue_market_assessment(database, request, issued_at=NOW)
     with pytest.raises(ValueError, match="frozen before"):
         freeze_market_protocol(declaration, frozen_at=declaration["eligibility"]["start"])
+
+
+def test_anchor_vintage_priority_uses_actual_receipt_before_declared_clock(setup):
+    database, bundle, request = setup
+    first = issue_market_assessment(database, request, issued_at=NOW)
+    correction = copy.deepcopy(bundle)
+    correction["series"][0]["bars"][0].update(observed_at=NOW - 30, open=120.0, high=120.0, low=120.0, close=120.0)
+    CrossAssetStore(database, initialize=True).import_bundle(correction, received_at=NOW + 1)
+    newer = issue_market_assessment(database, {**request, "idempotency_key": "newer-receipt"}, issued_at=NOW + 2)
+    assert first["anchor"]["close"] == 100
+    assert newer["anchor"]["close"] == 120
+    assert newer["anchor"]["observed_at"] == NOW - 30
+    assert newer["anchor_receipt"]["effective_known_at"] == NOW + 1
+
+
+def test_target_vintage_priority_and_cutoffs_use_actual_receipt(setup):
+    database, bundle, request = setup
+    assessment = issue_market_assessment(database, request, issued_at=NOW)
+    updates = copy.deepcopy(bundle)
+    segment = updates["calendars"][0]["sessions"][2]["segments"][0]
+    for declared_delay, actual_delay, close in ((90, 90, 110.0), (60, 100, 90.0)):
+        updates["series"][0]["bars"] = [{**segment, "open": close, "high": close, "low": close,
+                                         "close": close, "observed_at": MONDAY_CLOSE + declared_delay,
+                                         "session_date": "2026-03-09"}]
+        CrossAssetStore(database, initialize=True).import_bundle(updates, received_at=MONDAY_CLOSE + actual_delay)
+    query = {"assessment_id": assessment["assessment_id"]}
+    earlier = evaluate_market_assessment(database, query, as_of=MONDAY_CLOSE + 95)
+    later = evaluate_market_assessment(database, query, as_of=MONDAY_CLOSE + 100)
+    assert earlier["status"] == later["status"] == "scored"
+    assert earlier["outcome_up"] == 1 and later["outcome_up"] == 0
+    assert later["target"]["observed_at"] == MONDAY_CLOSE + 60
+    assert later["target_receipt"]["effective_known_at"] == MONDAY_CLOSE + 100
+    assert later["brier_score"] == pytest.approx(0.5625)
