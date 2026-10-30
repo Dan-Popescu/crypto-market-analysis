@@ -140,13 +140,12 @@ class CrossAssetStore:
         deadline = time.monotonic() + QUERY_SECONDS
         con.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
         try:
+            con.execute("BEGIN IMMEDIATE" if write else "BEGIN")
             if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='cross_asset_imports'").fetchone():
                 if write:
                     raise ValueError("Cross-asset schema is missing.")
                 yield None
             else:
-                if write:
-                    con.execute("BEGIN IMMEDIATE")
                 yield con
                 if write:
                     con.commit()
@@ -159,8 +158,6 @@ class CrossAssetStore:
     def read_transaction(self):
         """Yield one bounded consistent journal view for explicit export owners."""
         with self._connection() as con:
-            if con is not None:
-                con.execute("BEGIN")
             yield con
 
     def import_bundle(self, bundle: dict, *, received_at: int) -> dict:

@@ -9,6 +9,8 @@ import pytest
 from crypto_market_analysis.cross_asset.snapshots import MarketSnapshot, export_market_snapshot
 from crypto_market_analysis.cross_asset.storage import CrossAssetStore
 from crypto_market_analysis.evidence import content_hash
+from crypto_market_analysis.recovery import create_backup, verify_backup
+from crypto_market_analysis.storage import Store
 
 
 def bundle(mode="import", sid="reference-raw"):
@@ -270,3 +272,36 @@ def test_fleet_summary_preserves_native_dimensions_and_negative_admissibility(tm
     assert by_id["positive"]["simple_return"] == 0
     with pytest.raises(ValueError, match="row budget"):
         snapshot.fleet_summary(["positive", "negative"], as_of=200, data_mode="import", start=100, end=130, max_rows=1)
+
+
+def test_authority_read_transaction_is_consistent_across_concurrent_wal_commit(tmp_path):
+    store = writer(tmp_path)
+    original = bundle()
+    store.import_bundle(original, received_at=200)
+    with store.read_transaction() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM cross_asset_bars").fetchone()[0] == 1
+        revised = deepcopy(original)
+        revised["series"][0]["bars"][0].update(close=-12, observed_at=240)
+        store.import_bundle(revised, received_at=300)
+        assert connection.execute("SELECT COUNT(*) FROM cross_asset_bars").fetchone()[0] == 1
+    assert store.read_series("reference-raw", as_of=500, data_mode="import")["bars"][0]["close"] == -12
+
+
+def test_existing_online_backup_preserves_cross_asset_tables_and_original_hashes(tmp_path):
+    legacy = Store(tmp_path / "observer.sqlite")
+    store = CrossAssetStore(legacy.path, initialize=True)
+    store.import_bundle(bundle(), received_at=200)
+    target = tmp_path / "backup"
+    create_backup(store.path, target)
+    verify_backup(target)
+    restored = CrossAssetStore(target / "observer.sqlite")
+    assert restored.read_series("reference-raw", as_of=500, data_mode="import") == store.read_series("reference-raw", as_of=500, data_mode="import")
+
+
+def test_unclosed_source_bars_are_rejected_before_journal_or_snapshot(tmp_path):
+    store = writer(tmp_path)
+    partial = bundle()
+    partial["series"][0]["bars"][0]["observed_at"] = 120
+    with pytest.raises(ValueError, match="observed before its end"):
+        store.import_bundle(partial, received_at=200)
+    assert store.read_series("reference-raw", as_of=500, data_mode="import") is None

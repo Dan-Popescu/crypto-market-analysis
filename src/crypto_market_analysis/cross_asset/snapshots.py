@@ -299,7 +299,7 @@ class MarketSnapshot:
         ), latest AS (
           SELECT b.series_id,b.start,b."end",CAST(json_extract(b.payload,'$.close') AS DOUBLE) AS close
           FROM bars b INNER JOIN eligible s ON b.series_id=s.id
-          WHERE b.known_at<=? AND b.start>=? AND b."end"<=?
+          WHERE b.known_at<=? AND b.start>=? AND b."end"<=? AND b."end"<=?
           QUALIFY ROW_NUMBER() OVER (PARTITION BY b.series_id,b.start,b."end" ORDER BY b.known_at DESC,b.observed_at DESC)=1
         ), summary AS (
           SELECT series_id,COUNT(*) AS rows,MIN(start) AS first_start,MAX("end") AS last_end,
@@ -309,7 +309,7 @@ class MarketSnapshot:
           FROM eligible e LEFT JOIN summary m ON e.id=m.series_id ORDER BY e.id"""
         with analytical_query_connection() as con:
             self._views(con)
-            rows = con.execute(query, [*identifiers, data_mode, as_of, as_of, start, end]).fetchall()
+            rows = con.execute(query, [*identifiers, data_mode, as_of, as_of, start, end, as_of]).fetchall()
             total = sum(row[2] for row in rows)
             if total > max_rows:
                 raise ValueError("Fleet exceeds selected native row budget; narrow the interval.")
