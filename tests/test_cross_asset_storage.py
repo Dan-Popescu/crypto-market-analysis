@@ -305,3 +305,31 @@ def test_unclosed_source_bars_are_rejected_before_journal_or_snapshot(tmp_path):
     with pytest.raises(ValueError, match="observed before its end"):
         store.import_bundle(partial, received_at=200)
     assert store.read_series("reference-raw", as_of=500, data_mode="import") is None
+
+
+def test_live_first_then_historical_import_preserves_independent_admission_clocks(tmp_path):
+    store = writer(tmp_path)
+    store.import_bundle(bundle("live", "live"), received_at=500)
+    assert store.registry(200) is None
+    assert store.calendar("synthetic-calendar", "v1", as_of=200) is None
+    historical = bundle("import", "historical")
+    store.import_bundle(historical, received_at=600)
+    assert store.registry(200)["instruments"][0]["id"] == "reference"
+    assert store.calendar("synthetic-calendar", "v1", as_of=200)["id"] == "synthetic-calendar"
+    assert store.read_series("historical", as_of=200, data_mode="import")["bars"][0]["observed_at"] == 140
+    assert store.read_series("live", as_of=200, data_mode="live") is None
+    assert store.read_series("live", as_of=500, data_mode="live")["storage_provenance"]["bars"][0]["effective_known_at"] == 500
+    export_market_snapshot(store, tmp_path / "mixed-admissions")
+    snapshot = MarketSnapshot(tmp_path / "mixed-admissions")
+    assert snapshot.registry(200) == store.registry(200)
+    assert snapshot.calendar("synthetic-calendar", "v1", as_of=200) == store.calendar("synthetic-calendar", "v1", as_of=200)
+    assert snapshot.read_series("historical", as_of=200, data_mode="import") == store.read_series("historical", as_of=200, data_mode="import")
+
+
+def test_mixed_bundle_does_not_backdate_live_or_hide_declared_demo_history(tmp_path):
+    store = writer(tmp_path)
+    mixed = bundle("live", "live")
+    mixed["series"].append(bundle("demo", "demo")["series"][0])
+    store.import_bundle(mixed, received_at=500)
+    assert store.read_series("live", as_of=200, data_mode="live") is None
+    assert store.read_series("demo", as_of=200, data_mode="demo")["storage_provenance"]["receipt_evidence"] == "self_declared_history"

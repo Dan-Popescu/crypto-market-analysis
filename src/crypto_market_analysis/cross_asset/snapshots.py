@@ -25,7 +25,7 @@ MAX_FILES = 4096
 MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_FILE_BYTES = 256 * 1024 * 1024
 VERIFICATION_SECONDS = 30
-TABLES = ("registries", "registry_components", "calendars", "series", "bars", "actions", "imports", "series_imports")
+TABLES = ("registries", "registry_components", "admissions", "calendars", "series", "bars", "actions", "imports", "series_imports")
 INTEGER_COLUMNS = {"start", "end", "observed_at", "known_at", "received_at", "declared_at", "effective_at", "bars", "actions"}
 
 
@@ -231,9 +231,11 @@ class MarketSnapshot:
         _epoch(as_of, "as_of")
         with analytical_query_connection() as con:
             self._views(con)
-            if not con.execute("SELECT 1 FROM registries WHERE known_at<=? LIMIT 1", [as_of]).fetchone():
+            if not con.execute("SELECT 1 FROM admissions WHERE kind LIKE 'registry:%' AND known_at<=? LIMIT 1", [as_of]).fetchone():
                 return None
-            cursor = con.execute("SELECT kind,payload FROM registry_components WHERE known_at<=? AND kind<>'listing_identity' ORDER BY kind,identity LIMIT 150001", [as_of])
+            cursor = con.execute("SELECT kind,payload FROM registry_components c WHERE kind<>'listing_identity' AND EXISTS "
+                                 "(SELECT 1 FROM admissions a WHERE a.kind='registry:'||c.kind AND a.identity=c.identity AND a.known_at<=?) "
+                                 "ORDER BY kind,identity LIMIT 150001", [as_of])
 
             def components():
                 while rows := cursor.fetchmany(1000):
@@ -266,11 +268,12 @@ class MarketSnapshot:
             raise ValueError("version must be a bounded nonempty string.")
         with analytical_query_connection() as con:
             self._views(con)
-            conditions, values = ["id=?", "known_at<=?"], [calendar_id, as_of]
+            conditions, values = ["id=?", "EXISTS (SELECT 1 FROM admissions a WHERE a.kind='calendar' "
+                                   "AND a.identity=CAST(json_array(c.id,c.version) AS VARCHAR) AND a.known_at<=?)"], [calendar_id, as_of]
             if version is not None:
                 conditions.append("version=?")
                 values.append(version)
-            row = con.execute("SELECT payload FROM calendars WHERE " + " AND ".join(conditions) + " ORDER BY known_at DESC,version DESC LIMIT 1", values).fetchone()
+            row = con.execute("SELECT payload FROM calendars c WHERE " + " AND ".join(conditions) + " ORDER BY declared_at DESC,version DESC LIMIT 1", values).fetchone()
             self._assert_unchanged()
             return _bounded(json.loads(row[0])) if row else None
 

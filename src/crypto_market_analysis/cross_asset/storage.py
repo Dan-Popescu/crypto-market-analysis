@@ -34,6 +34,11 @@ CREATE TABLE IF NOT EXISTS cross_asset_registry_components (
  known_at INTEGER NOT NULL, received_at INTEGER NOT NULL,
  PRIMARY KEY(kind,identity));
 CREATE INDEX IF NOT EXISTS cross_asset_component_cutoff ON cross_asset_registry_components(known_at,kind,identity);
+CREATE TABLE IF NOT EXISTS cross_asset_admissions (
+ kind TEXT NOT NULL, identity TEXT NOT NULL, known_at INTEGER NOT NULL,
+ received_at INTEGER NOT NULL, import_hash TEXT NOT NULL,
+ PRIMARY KEY(kind,identity,import_hash));
+CREATE INDEX IF NOT EXISTS cross_asset_admission_cutoff ON cross_asset_admissions(kind,identity,known_at);
 CREATE TABLE IF NOT EXISTS cross_asset_calendars (
  id TEXT NOT NULL, version TEXT NOT NULL, hash TEXT NOT NULL, declared_at INTEGER NOT NULL,
  received_at INTEGER NOT NULL, known_at INTEGER NOT NULL, payload TEXT NOT NULL,
@@ -62,7 +67,7 @@ CREATE TABLE IF NOT EXISTS cross_asset_series_imports (
  received_at INTEGER NOT NULL, bars INTEGER NOT NULL, actions INTEGER NOT NULL, known_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS cross_asset_series_admission ON cross_asset_series_imports(series_id,known_at);
 """
-_TABLES = ("imports", "registries", "registry_components", "calendars", "series", "bars", "actions", "series_imports")
+_TABLES = ("imports", "registries", "registry_components", "admissions", "calendars", "series", "bars", "actions", "series_imports")
 
 
 def _epoch(value, name):
@@ -204,7 +209,10 @@ class CrossAssetStore:
             previous = con.execute("SELECT summary FROM cross_asset_imports WHERE hash=?", (original_hash,)).fetchone()
             if previous:
                 return {**json.loads(previous[0]), "idempotent": True}
-            live = any(item["descriptor"]["data_mode"] == "live" for item in series)
+            # Shared metadata in a mixed bundle also has a self-declared
+            # historical admission. Each live observation still requires this
+            # import's actual receipt independently below.
+            live = bool(series) and all(item["descriptor"]["data_mode"] == "live" for item in series)
             declared = _registry_clock(registry)
             clocks = [row["known_at"] for kind in ("listings", "aliases", "memberships") for row in registry.get(kind, [])]
             admission = min(clocks, default=0)
@@ -221,6 +229,8 @@ class CrossAssetStore:
                     component_known = max(source_known, received_at) if live else source_known
                     self._insert_immutable(con, "registry_components", "kind=? AND identity=?", (kind, key),
                                            (kind, key, content_hash(component), canonical_json(component), component_known, received_at), content_hash(component))
+                    con.execute("INSERT INTO cross_asset_admissions VALUES (?,?,?,?,?)",
+                                ("registry:" + kind, key, component_known, received_at, original_hash))
                     if kind == "listings":
                         stable = {field: component.get(field) for field in ("instrument_id", "native_currency", "venue_mic", "venue_id")}
                         self._insert_immutable(con, "registry_components", "kind=? AND identity=?", ("listing_identity", component["id"]),
@@ -235,6 +245,8 @@ class CrossAssetStore:
                                        (key[0], key[1], content_hash(original), calendar["known_at"], received_at,
                                         max(calendar["known_at"], received_at) if live else calendar["known_at"],
                                         canonical_json(original)), content_hash(original))
+                con.execute("INSERT INTO cross_asset_admissions VALUES (?,?,?,?,?)",
+                            ("calendar", canonical_json(list(key)), max(calendar["known_at"], received_at) if live else calendar["known_at"], received_at, original_hash))
             for original, item in zip(bundle["series"], series, strict=True):
                 descriptor = item["descriptor"]
                 if len(canonical_json(original["descriptor"]).encode()) > 64 * 1024:
@@ -259,7 +271,10 @@ class CrossAssetStore:
                 clocks.extend(action["observed_at"] for action in item.get("actions", []))
                 declared = min(clocks, default=received_at)
                 known = max(declared, received_at) if descriptor["data_mode"] == "live" else declared
-                known = max(known, calendar["known_at"], registry_known)
+                source_calendar_known = calendar_map[key]["known_at"]
+                if descriptor["data_mode"] == "live":
+                    source_calendar_known = max(source_calendar_known, received_at)
+                known = max(known, source_calendar_known, registry_known)
                 desc_hash = content_hash(original["descriptor"])
                 dimensions = tuple(descriptor[name] for name in (
                     "id", "instrument_id", "listing_id", "provider", "native_currency", "unit",
@@ -319,9 +334,11 @@ class CrossAssetStore:
     def registry(self, as_of: int) -> dict | None:
         _epoch(as_of, "as_of")
         with self._connection() as con:
-            if con is None or not con.execute("SELECT 1 FROM cross_asset_registries WHERE known_at<=? LIMIT 1", (as_of,)).fetchone():
+            if con is None or not con.execute("SELECT 1 FROM cross_asset_admissions WHERE kind LIKE 'registry:%' AND known_at<=? LIMIT 1", (as_of,)).fetchone():
                 return None
-            rows = con.execute("SELECT kind,payload FROM cross_asset_registry_components WHERE known_at<=? AND kind<>'listing_identity' ORDER BY kind,identity LIMIT 150001", (as_of,))
+            rows = con.execute("SELECT kind,payload FROM cross_asset_registry_components c WHERE kind<>'listing_identity' AND EXISTS "
+                               "(SELECT 1 FROM cross_asset_admissions a WHERE a.kind='registry:'||c.kind AND a.identity=c.identity AND a.known_at<=?) "
+                               "ORDER BY kind,identity LIMIT 150001", (as_of,))
             return _registry_components(rows)
 
     def calendar(self, calendar_id: str, version: str | None = None, *, as_of: int) -> dict | None:
@@ -332,11 +349,12 @@ class CrossAssetStore:
         if version is not None and (not isinstance(version, str) or not version or len(version) > 256):
             raise ValueError("version must be a bounded nonempty string.")
         with self._connection() as con:
-            conditions, values = ["id=?", "known_at<=?"], [calendar_id, as_of]
+            conditions, values = ["id=?", "EXISTS (SELECT 1 FROM cross_asset_admissions a WHERE a.kind='calendar' "
+                                   "AND a.identity=json_array(c.id,c.version) AND a.known_at<=?)"], [calendar_id, as_of]
             if version is not None:
                 conditions.append("version=?")
                 values.append(version)
-            row = con.execute("SELECT payload FROM cross_asset_calendars WHERE " + " AND ".join(conditions) + " ORDER BY known_at DESC,version DESC LIMIT 1", values).fetchone() if con else None
+            row = con.execute("SELECT payload FROM cross_asset_calendars c WHERE " + " AND ".join(conditions) + " ORDER BY declared_at DESC,version DESC LIMIT 1", values).fetchone() if con else None
             return _bounded(json.loads(row[0])) if row else None
 
     def list_series(self, *, as_of: int, data_mode: str, limit: int = 100, cursor: str | None = None) -> dict:
