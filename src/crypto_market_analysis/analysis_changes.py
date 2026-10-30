@@ -6,7 +6,7 @@ import json
 from collections import Counter
 from decimal import Decimal, InvalidOperation
 
-from .analysis_dossier import MAX_CANDLES, _build_analysis_dossier, validate_dossier_request
+from .analysis_dossier import MAX_CANDLES, capture_analysis_dossier, validate_dossier_request
 from .derivatives_context import derivative_dimension
 from .evidence import canonical_json, content_hash
 from .freshness import assess_freshness
@@ -335,8 +335,8 @@ def build_analysis_changes(store: Store, request: dict, as_of: int | None = None
         # compact evidence presentation. Keep the detached trees in this request
         # instead of round-tripping both large dossiers through JSON.
         full = {**dossier, "evidence_mode": "full"} if "evidence_mode" in dossier else dossier
-        before = _build_analysis_dossier(session, full, previous, detach=False)
-        after = _build_analysis_dossier(session, full, current, detach=False)
+        before = capture_analysis_dossier(session, full, previous).result
+        after = capture_analysis_dossier(session, full, current).result
         raw_count = sum(len(section.get("stored_inputs", {}).get("consumed_records", []))
                         for snapshot in (before, after) for market in snapshot["markets"]
                         for section in market.values() if isinstance(section, dict))

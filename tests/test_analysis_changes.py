@@ -65,8 +65,8 @@ def test_nested_sessions_reuse_connection_and_expire(store, monkeypatch):
 
 def test_both_dossiers_share_watermark_despite_concurrent_correction(store, monkeypatch):
     store.put_candles([candle()])
-    from crypto_market_analysis.analysis_dossier import _build_analysis_dossier
-    original = _build_analysis_dossier
+    from crypto_market_analysis.analysis_dossier import capture_analysis_dossier
+    original = capture_analysis_dossier
     called = 0
 
     def between(session, selection, cutoff, **kwargs):
@@ -81,7 +81,7 @@ def test_both_dossiers_share_watermark_despite_concurrent_correction(store, monk
                 pool.submit(writer).result(timeout=5)
         return result
 
-    monkeypatch.setattr("crypto_market_analysis.analysis_changes._build_analysis_dossier", between)
+    monkeypatch.setattr("crypto_market_analysis.analysis_changes.capture_analysis_dossier", between)
     result = build_analysis_changes(store, request(), NOW)
     assert result["watermark"]["candles"] == 1
     assert result["summary"]["market_movements"] == 0

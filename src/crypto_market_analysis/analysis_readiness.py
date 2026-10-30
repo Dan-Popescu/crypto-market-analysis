@@ -11,7 +11,7 @@ import shlex
 from copy import deepcopy
 from datetime import datetime
 
-from .analysis_dossier import MAX_RESULT_BYTES, _build_analysis_dossier, validate_dossier_request
+from .analysis_dossier import MAX_RESULT_BYTES, capture_analysis_dossier, validate_dossier_request
 from .evidence import canonical_json, content_hash, validate_evidence_mode
 from .purchase_windows import analyze_windows
 from .qualification import normalize_qualification_request, qualify_sources
@@ -300,24 +300,24 @@ def build_analysis_readiness(store: Store, request: dict, as_of: int | None = No
                         "next_actions": [{"kind": "request_specific_analysis", "command": "crypto-market-analysis sources",
                                           "arguments": {}, "required_user_inputs": ["Select and initialize the intended evidence store explicitly"],
                                           "reasons": ["configured_database_missing"], "execute": False}]})
-    captured = [] if "windows" in request else None
     dossier_request = dict(request["dossier"])
     if "evidence_mode" in request:
         dossier_request["evidence_mode"] = request["evidence_mode"]
     with store.read_session() as session:
-        dossier = _build_analysis_dossier(session, dossier_request, cutoff, captured=captured, detach=False)
+        captured = capture_analysis_dossier(session, dossier_request, cutoff)
+        dossier = captured.result
         qualification = qualify_sources(session, qualification_request, cutoff)
         watermark = deepcopy(session.watermark_at_start)
     # All inputs are detached from the same snapshot. Pure window calculations
     # and presentation must not keep a read transaction open.
     markets = []
-    for index, market in enumerate(dossier["markets"]):
+    for market in dossier["markets"]:
         selection = market["selection"]
         empirical = next(row for row in qualification["markets"] if all(
             row[key] == selection[key] for key in ("asset", "quote", "source")))
         windows = None
         if "windows" in request:
-            windows = analyze_windows(captured[index], cutoff, **request["windows"])
+            windows = analyze_windows(captured.candles_for(selection), cutoff, **request["windows"])
         claims = _market_claims(market, empirical, windows, mode == "demo", cutoff, request["freshness_seconds"])
         markets.append({"selection": selection, "claims": claims, "windows": windows,
                         "claim_statuses": {row["claim"]: row["status"] for row in claims}})

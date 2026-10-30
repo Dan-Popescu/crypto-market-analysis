@@ -6,12 +6,15 @@ It never calls MCP, collects data, changes a shared Store, or guesses missing fe
 
 from __future__ import annotations
 
-import json
+from collections.abc import Mapping
 from copy import deepcopy
+from dataclasses import dataclass
+from types import MappingProxyType
 
 from .asset_universe import validate_asset
 from .context import market_context
 from .evidence import canonical_json, content_hash, reference_manifest, validate_evidence_mode
+from .models import Candle
 from .operational_reads import upcoming_calendar_snapshot
 from .reporting import bounded_as_of, bounded_integers, bounded_object
 from .storage import Store
@@ -19,6 +22,25 @@ from .stored_analysis import analyze_stored_derivatives, analyze_stored_quotes, 
 
 MAX_CANDLES = 100_000
 MAX_RESULT_BYTES = 32 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class DossierCapture:
+    """Caller-owned calculations and exact native candles from one physical view.
+
+    Result detail follows the requested evidence mode. Immutable Candle tuples
+    remain available to composing calculations even when record detail is omitted
+    from the result. No connection, cursor or later database read is retained.
+    Native identities are (asset, source, quote, data_mode).
+    """
+
+    result: dict
+    candles_by_native: Mapping[tuple[str, str, str, str], tuple[Candle, ...]]
+
+    def candles_for(self, selection: Mapping[str, str]) -> tuple[Candle, ...]:
+        """Return only the exact selected native series; absence never falls back."""
+        identity = tuple(selection[key] for key in ("asset", "source", "quote", "data_mode"))
+        return self.candles_by_native[identity]
 
 
 def _fields(value, allowed, name):
@@ -117,7 +139,7 @@ def _pin(result, cutoff, watermark):
     return result
 
 
-def _market(session, market, mode, cutoff, remaining, evidence_mode="full", captured=None):
+def _market(session, market, mode, cutoff, remaining, evidence_mode="full"):
     selection = {key: market[key] for key in ("asset", "source", "quote")}
     native = {**selection, "data_mode": mode}
     raw = session.capture(market["asset"], cutoff, mode, source=market["source"], quote=market["quote"],
@@ -128,8 +150,6 @@ def _market(session, market, mode, cutoff, remaining, evidence_mode="full", capt
     # Candle is an immutable dataclass of scalar JSON fields. asdict would
     # recursively deepcopy each of those scalars for every hourly record.
     records = [vars(row).copy() for row in candles]
-    if captured is not None:
-        captured.append(candles)
     context = market_context(candles, cutoff, market.get("lookbacks"))
     context["stored_inputs"] = _evidence(records, {**native, "lookbacks": market.get("lookbacks")},
                                         cutoff, session.watermark_at_start, evidence_mode)
@@ -161,7 +181,7 @@ def _market(session, market, mode, cutoff, remaining, evidence_mode="full", capt
         for name, section in result.items():
             if name != "market_context" and isinstance(section, dict) and "stored_inputs" in section:
                 section["stored_inputs"] = reference_manifest(section["stored_inputs"])
-    return result, len(candles)
+    return result, tuple(candles)
 
 
 def build_analysis_dossier(store: Store, request: dict, as_of: int | None = None) -> dict:
@@ -170,10 +190,10 @@ def build_analysis_dossier(store: Store, request: dict, as_of: int | None = None
     Full evidence is the compatibility default. references retains the same
     calculations and exact consumed-input digests while omitting record detail.
     """
-    return _build_analysis_dossier(store, request, as_of)
+    return capture_analysis_dossier(store, request, as_of).result
 
 
-def _build_analysis_dossier(store, request, as_of=None, *, captured=None, detach=True):
+def capture_analysis_dossier(store: Store, request: dict, as_of: int | None = None) -> DossierCapture:
     """Freeze 1–4 explicit native EUR/USD contexts plus requested stored sections.
 
     Derivatives declare an independent native source/quote. Venue costs require
@@ -193,14 +213,16 @@ def _build_analysis_dossier(store, request, as_of=None, *, captured=None, detach
             value = bounded_as_of(request["calendar"][key])
             if value > 253402300799:
                 raise ValueError("Dossier calendar bounds are outside the supported UTC range.")
-    markets = []
+    markets, captured = [], {}
     candle_count = 0
     with store.read_session() as session:
         for market in request["markets"]:
-            result, count = _market(session, market, request["data_mode"], cutoff, MAX_CANDLES - candle_count,
-                                    request.get("evidence_mode", "full"), captured)
+            result, candles = _market(session, market, request["data_mode"], cutoff, MAX_CANDLES - candle_count,
+                                      request.get("evidence_mode", "full"))
             markets.append(result)
-            candle_count += count
+            identity = tuple(result["selection"][key] for key in ("asset", "source", "quote", "data_mode"))
+            captured[identity] = candles
+            candle_count += len(candles)
         with session.connection() as con:
             calendar = upcoming_calendar_snapshot(con, request["data_mode"], as_of=cutoff,
                                                   limit=100, **request.get("calendar", {}))
@@ -228,5 +250,6 @@ def _build_analysis_dossier(store, request, as_of=None, *, captured=None, detach
         encoded = canonical_json(frozen)
         if len(encoded.encode()) > MAX_RESULT_BYTES:
             raise ValueError("Analysis dossier exceeds its 32 MiB complete-result budget; narrow the request.")
-    # Return only plain detached JSON; callers can retain every detail for paging.
-    return json.loads(encoded) if detach else frozen
+    # Every field was built from detached JSON/scalar inputs. The canonical
+    # encoding above validates the result without copying the entire JSON tree.
+    return DossierCapture(frozen, MappingProxyType(captured))
