@@ -1,0 +1,154 @@
+{
+  "schema": "continuous-futures-request.v1",
+  "descriptor": {
+    "id": "series:continuous",
+    "instrument_id": "derived:continuous",
+    "listing_id": null,
+    "provider": "synthetic",
+    "provider_symbol": "TEST",
+    "native_currency": "USD",
+    "unit": "barrel",
+    "price_basis": "continuous",
+    "data_mode": "demo",
+    "calendar_id": "calendar:test",
+    "calendar_version": "v1",
+    "interval": "session",
+    "revision_semantics": "point_in_time"
+  },
+  "method": "unadjusted",
+  "version": "v1",
+  "contracts": [
+    {
+      "instrument_id": "future:one",
+      "available_at": -20,
+      "contract": {
+        "expiry": 20,
+        "multiplier": 1000,
+        "unit": "barrel",
+        "settlement": "cash"
+      },
+      "series": {
+        "schema": "market-series.v1",
+        "descriptor": {
+          "id": "series:future:one",
+          "instrument_id": "future:one",
+          "listing_id": "listing:test",
+          "provider": "synthetic",
+          "provider_symbol": "TEST",
+          "native_currency": "USD",
+          "unit": "barrel",
+          "price_basis": "raw",
+          "data_mode": "demo",
+          "calendar_id": "calendar:test",
+          "calendar_version": "v1",
+          "interval": "session",
+          "revision_semantics": "point_in_time"
+        },
+        "bars": [
+          {
+            "start": 0,
+            "end": 10,
+            "open": 10,
+            "high": 10,
+            "low": 10,
+            "close": 10,
+            "observed_at": 10
+          },
+          {
+            "start": 10,
+            "end": 20,
+            "open": 11,
+            "high": 11,
+            "low": 11,
+            "close": 11,
+            "observed_at": 20
+          },
+          {
+            "start": 20,
+            "end": 30,
+            "open": 12,
+            "high": 12,
+            "low": 12,
+            "close": 12,
+            "observed_at": 30
+          }
+        ],
+        "actions": []
+      }
+    },
+    {
+      "instrument_id": "future:two",
+      "available_at": -10,
+      "contract": {
+        "expiry": 50,
+        "multiplier": 1000,
+        "unit": "barrel",
+        "settlement": "cash"
+      },
+      "series": {
+        "schema": "market-series.v1",
+        "descriptor": {
+          "id": "series:future:two",
+          "instrument_id": "future:two",
+          "listing_id": "listing:test",
+          "provider": "synthetic",
+          "provider_symbol": "TEST",
+          "native_currency": "USD",
+          "unit": "barrel",
+          "price_basis": "raw",
+          "data_mode": "demo",
+          "calendar_id": "calendar:test",
+          "calendar_version": "v1",
+          "interval": "session",
+          "revision_semantics": "point_in_time"
+        },
+        "bars": [
+          {
+            "start": 0,
+            "end": 10,
+            "open": 20,
+            "high": 20,
+            "low": 20,
+            "close": 20,
+            "observed_at": 10
+          },
+          {
+            "start": 10,
+            "end": 20,
+            "open": 21,
+            "high": 21,
+            "low": 21,
+            "close": 21,
+            "observed_at": 20
+          },
+          {
+            "start": 20,
+            "end": 30,
+            "open": 22,
+            "high": 22,
+            "low": 22,
+            "close": 22,
+            "observed_at": 30
+          }
+        ],
+        "actions": []
+      }
+    }
+  ],
+  "rolls": [
+    {
+      "effective_at": 0,
+      "known_at": -10,
+      "instrument_id": "future:one",
+      "reason": "initial sourced contract",
+      "source_url": "https://example.test/chain"
+    },
+    {
+      "effective_at": 20,
+      "known_at": 15,
+      "instrument_id": "future:two",
+      "reason": "declared pre-expiry roll",
+      "source_url": "https://example.test/chain"
+    }
+  ]
+}

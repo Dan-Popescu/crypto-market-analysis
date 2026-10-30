@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+from .market_requests import contracts as _market_contracts
 from .plans import RULE_VERSION as _PLAN_RULE_VERSION
 from .validation_protocol import freeze_validation_protocol as _freeze_validation_protocol
 
@@ -357,6 +358,9 @@ _VALIDATION_EXAMPLE = {
                              "time_anchor": "issuance", "horizon_days": 1, "threshold": None}]}]}
 REGISTRY["get_prospective_validation"]["examples"] = [{"request": {
     "protocol": _freeze_validation_protocol(_VALIDATION_EXAMPLE, frozen_at=AS_OF-1), "page_size": 1}, "as_of": AS_OF}]
+
+
+REGISTRY.update(_market_contracts(obj, integer, enum, array))
 
 
 def get_request_schema(tool_name: str) -> dict:

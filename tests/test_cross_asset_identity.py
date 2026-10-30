@@ -6,9 +6,11 @@ import json
 
 import pytest
 
+from crypto_market_analysis.cross_asset import identity
 from crypto_market_analysis.cross_asset.identity import (
     AmbiguousAliasError,
     IdentityError,
+    RegistryResolver,
     UnknownAliasError,
     legacy_crypto_identity,
     registry_view,
@@ -187,3 +189,70 @@ def test_legacy_projection_preserves_original_selectors_and_hashes():
     assert projection["legacy_key_sha256"] != legacy_crypto_identity("BTC", "USD", "other")["legacy_key_sha256"]
     assert projection["instrument_id"] != legacy_crypto_identity("btc", "EUR", "aggregate:publisher")["instrument_id"]
     assert hashlib.sha256(json.dumps(original, sort_keys=True).encode()).hexdigest() == before_hash
+
+
+def test_indexed_resolver_preserves_historical_view_results_across_a_thousand_instruments():
+    document = {"schema": "market-registry.v1", "instruments": [], "listings": [], "aliases": []}
+    for index in range(1000):
+        instrument_id, listing_id, symbol = f"equity:{index}", f"listing:{index}", f"SYMBOL{index}"
+        document["instruments"].append(instrument(instrument_id))
+        document["listings"].append(listing(listing_id, instrument_id=instrument_id))
+        document["aliases"].append(alias(symbol, instrument_id, listing_id))
+        if index % 100 == 0:
+            document["listings"].append(listing(listing_id, instrument_id=instrument_id, active_until=30, known_at=50))
+        if index % 100 == 1:
+            document["aliases"].append(alias(symbol, instrument_id, listing_id, effective_until=25, known_at=50))
+    resolver = RegistryResolver(document)
+    for cutoff, at in ((20, 20), (49, 40), (50, 20), (50, 28), (50, 40)):
+        view = registry_view(document, as_of=cutoff, effective_at=at)
+        expected_aliases = {row["symbol"]: row for row in view["aliases"]}
+        expected_listings = {row["id"]: row for row in view["listings"]}
+        for index in range(1000):
+            symbol = f"SYMBOL{index}"
+            query = {"provider": "test", "symbol": symbol, "as_of": cutoff, "effective_at": at}
+            if symbol not in expected_aliases:
+                with pytest.raises(UnknownAliasError):
+                    resolver.resolve_alias(**query)
+                continue
+            result = resolver.resolve_alias(**query)
+            assert result["alias"] == expected_aliases[symbol]
+            assert result["listing"] == expected_listings[f"listing:{index}"]
+            assert result["instrument"]["id"] == f"equity:{index}"
+            if index % 200 == 0:
+                assert result == resolve_alias(document, **query)
+
+
+def test_indexed_resolver_validates_once_and_isolates_all_mutable_outputs(monkeypatch):
+    original_validator, calls = identity.validate_registry, []
+
+    def counted(document):
+        calls.append(1)
+        return original_validator(document)
+
+    monkeypatch.setattr(identity, "validate_registry", counted)
+    document = registry()
+    resolver = RegistryResolver(document)
+    document["aliases"][0]["symbol"] = "mutated input"
+    detached = resolver.registry
+    detached["listings"][0]["native_currency"] = "EUR"
+    for _ in range(1000):
+        result = resolver.resolve_alias(provider="test", symbol="ABC", as_of=20, effective_at=20)
+        assert result["listing"]["native_currency"] == "USD"
+        assert result["instrument"]["name"] == "equity:abc"
+        result["instrument"]["name"] = "mutated output"
+        result["alias"]["symbol"] = "mutated output"
+    assert calls == [1]
+
+
+def test_indexed_resolver_keeps_ambiguity_and_publication_reference_semantics():
+    document = registry()
+    document["instruments"].append(instrument("reference:abc", "commodity", "reference"))
+    document["aliases"].append(alias(identifier="reference:abc", listing_id=None))
+    resolver = RegistryResolver(document)
+    with pytest.raises(AmbiguousAliasError):
+        resolver.resolve_alias(provider="test", symbol="ABC", as_of=20, effective_at=20)
+    assert resolver.resolve_alias(provider="test", symbol="ABC", as_of=20, effective_at=20,
+                                  listing_id="listing:usd")["instrument"]["id"] == "equity:abc"
+    document["aliases"] = [alias(identifier="reference:abc", listing_id=None)]
+    reference = RegistryResolver(document).resolve_alias(provider="test", symbol="ABC", as_of=20, effective_at=20)
+    assert reference["instrument"]["form"] == "reference" and reference["listing"] is None

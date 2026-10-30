@@ -102,7 +102,7 @@ def test_registered_scalability_examples_and_thousand_asset_fleet_are_read_only(
 
     async def check():
         tools = {tool.name: tool for tool in await server.list_tools()}
-        assert len(tools) == 53 and TOOLS <= tools.keys()
+        assert len(tools) == 64 and TOOLS <= tools.keys()
         assert all(tool.annotations.readOnlyHint for tool in tools.values())
         for name in TOOLS:
             contract = get_request_schema(name)

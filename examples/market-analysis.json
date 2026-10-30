@@ -1,0 +1,11 @@
+{
+  "series_id": "synthetic:series:0",
+  "data_mode": "demo",
+  "currency": "USD",
+  "start": 1704153600,
+  "end": 1705017600,
+  "annualization": {
+    "periods_per_year": 252,
+    "convention": "declared synthetic daily trading sessions; not a universal calendar"
+  }
+}

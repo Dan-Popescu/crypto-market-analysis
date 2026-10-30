@@ -2,17 +2,20 @@
 
 A local, read-only cryptocurrency research tool with BTC/ETH defaults for gradual spot purchases over weeks and months. It provides historical context, experimental purchase windows, hypothetical purchase-plan comparisons, chronological evaluation and optional 4/8-hour vigilance. CLI and MCP share the same calculations. It never executes orders, signs wallet operations or transfers funds. Collection, calculations and charts require no language model or paid data API.
 
-The long-term scope includes equities, commodities and other asset classes.
-[Cross-asset design requirements](docs/CROSS_ASSET_DESIGN.md) define instrument
-identity, sessions, corporate actions and contract semantics before new classes
-are activated. Version 0.9.0 supports multiple cryptocurrency codes; it does not
-yet implement equity or commodity feeds or their class-specific calculations.
+Version 0.10.0 adds an experimental [native instrument research path](docs/CROSS_ASSET_RUNTIME.md)
+for equities, commodity references/listed funds and explicit futures research.
+It implements stable identities, sourced sessions/publications, split/dividend
+cash plans, receipt versions, frozen native-calendar forecasts and immutable
+mixed-class snapshots. The server exposes **64 read-only MCP tools**. Public feed
+access and reuse remain source-specific qualification gates; implemented imports
+and offline tests do not establish licensed live equity/futures coverage.
+The legacy cryptocurrency workflows below retain their original meaning.
 
 Version 0.9.0 adds [bounded multi-asset operation](docs/SCALABILITY.md) for an explicit
 100-asset universe, extensible to 1,000: fair collection continuation, per-source
 cost/health evidence, frozen prospective validation, compact evidence and verified
 partitioned Parquet/DuckDB fleet research. BTC/ETH remain defaults. The server now
-exposes 53 read-only MCP tools. [Measured storage trade-offs](docs/adr/0001-storage-for-scaled-research.md)
+exposed 53 read-only MCP tools. [Measured storage trade-offs](docs/adr/0001-storage-for-scaled-research.md)
 retain SQLite for the local write/journal role after an actual Docker PostgreSQL comparison.
 See [verified delivery, 1,000-asset measurements and remaining live acceptance](docs/SCALABILITY_STATUS.md).
 

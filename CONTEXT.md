@@ -1,7 +1,9 @@
 # Market research and accumulation
 
 The product studies market evidence and hypothetical accumulation across asset classes.
-Cryptocurrencies are the currently implemented market profile; BTC and ETH are its defaults.
+Legacy cryptocurrency workflows use BTC and ETH defaults. Versioned instrument
+research additionally implements experimental equity, commodity-reference/fund
+and explicit futures kernels; live source qualification remains independent.
 Ledgerly remains authoritative for actual transactions, holdings and acquisition costs.
 
 ## Market scope

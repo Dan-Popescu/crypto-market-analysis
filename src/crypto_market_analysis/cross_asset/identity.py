@@ -236,24 +236,69 @@ def registry_view(registry: dict, *, as_of: int, effective_at: int, universe: st
 def resolve_alias(registry: dict, *, provider: str, symbol: str, effective_at: int,
                   as_of: int, listing_id: str | None = None) -> dict:
     """Resolve one provider alias, with explicit ambiguity and no latest-data leak."""
-    _text(provider, "provider")
-    _text(symbol, "symbol")
-    if listing_id is not None:
-        _text(listing_id, "listing_id")
-    view = registry_view(registry, as_of=as_of, effective_at=effective_at)
-    candidates = [row for row in view["aliases"] if row["provider"] == provider and row["symbol"] == symbol
-                  and (listing_id is None or row["listing_id"] == listing_id)]
-    identities = {(row["instrument_id"], row["listing_id"]) for row in candidates}
-    if not identities:
-        raise UnknownAliasError(f"no known effective alias for {provider}:{symbol}")
-    if len(identities) > 1:
-        raise AmbiguousAliasError(f"ambiguous alias {provider}:{symbol}; specify a listing or provider symbol")
-    alias = max(candidates, key=lambda row: (row["known_at"], row["effective_from"]))
-    return {
-        "instrument": next(row for row in view["instruments"] if row["id"] == alias["instrument_id"]),
-        "listing": next((row for row in view["listings"] if row["id"] == alias["listing_id"]), None),
-        "alias": alias,
-    }
+    return RegistryResolver(registry).resolve_alias(provider=provider, symbol=symbol, effective_at=effective_at,
+                                                    as_of=as_of, listing_id=listing_id)
+
+
+class RegistryResolver:
+    """Validate once and index identity revisions for repeated native lookups.
+
+    Metadata is isolated from callers. Each lookup scans only the requested
+    provider symbol and its candidate listings. Domain owners retain their own
+    price-basis, currency/unit and capability checks after resolving identity.
+    """
+
+    def __init__(self, registry: dict):
+        self._registry = validate_registry(registry)
+        self._instruments = {row["id"]: row for row in self._registry["instruments"]}
+        self._listings: dict[str, list[dict]] = {}
+        self._aliases: dict[tuple[str, str], list[dict]] = {}
+        for row in self._registry["listings"]:
+            self._listings.setdefault(row["id"], []).append(row)
+        for row in self._registry["aliases"]:
+            self._aliases.setdefault((row["provider"], row["symbol"]), []).append(row)
+
+    @property
+    def registry(self) -> dict:
+        """Return the validated document without exposing mutable index state."""
+        return copy.deepcopy(self._registry)
+
+    def resolve_alias(self, *, provider: str, symbol: str, effective_at: int,
+                      as_of: int, listing_id: str | None = None) -> dict:
+        """Resolve effective identity using only revisions known by ``as_of``."""
+        _text(provider, "provider")
+        _text(symbol, "symbol")
+        _clock(effective_at, "effective_at")
+        _clock(as_of, "as_of")
+        if listing_id is not None:
+            _text(listing_id, "listing_id")
+        # Select corrections before effective filtering: a later-known end date
+        # must close the earlier open-ended version rather than reopen it.
+        aliases = _latest(self._aliases.get((provider, symbol), []),
+                          ("instrument_id", "listing_id", "effective_from"), as_of)
+        candidates, listings = [], {}
+        for row in aliases:
+            if not _effective(row, effective_at, "effective_from", "effective_until"):
+                continue
+            candidate_listing = row["listing_id"]
+            if listing_id is not None and candidate_listing != listing_id:
+                continue
+            listing = None
+            if candidate_listing is not None:
+                if candidate_listing not in listings:
+                    known = [item for item in self._listings[candidate_listing] if item["known_at"] <= as_of]
+                    listings[candidate_listing] = max(known, key=lambda item: item["known_at"], default=None)
+                listing = listings[candidate_listing]
+                if listing is None or not _effective(listing, effective_at, "active_from", "active_until"):
+                    continue
+            candidates.append((row, listing))
+        identities = {(row["instrument_id"], row["listing_id"]) for row, _ in candidates}
+        if not identities:
+            raise UnknownAliasError(f"no known effective alias for {provider}:{symbol}")
+        if len(identities) > 1:
+            raise AmbiguousAliasError(f"ambiguous alias {provider}:{symbol}; specify a listing or provider symbol")
+        alias, listing = max(candidates, key=lambda pair: (pair[0]["known_at"], pair[0]["effective_from"]))
+        return copy.deepcopy({"instrument": self._instruments[alias["instrument_id"]], "listing": listing, "alias": alias})
 
 
 def legacy_crypto_identity(asset: str, quote: str, source: str) -> dict:

@@ -1,0 +1,12 @@
+{
+  "series_ids": [
+    "synthetic:series:0",
+    "synthetic:series:1",
+    "synthetic:series:2",
+    "synthetic:series:3",
+    "synthetic:series:4"
+  ],
+  "data_mode": "demo",
+  "start": 1704153600,
+  "end": 1705017600
+}

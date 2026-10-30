@@ -1,5 +1,23 @@
 # Architecture and invariant ownership
 
+Version 0.10.0 adds `cross_asset` as a separate versioned native-instrument path.
+`identity` owns stable instruments/listings, aliases and membership clocks;
+`sessions` owns sourced schedules and expected observations; `prices` owns native
+bases, action and receipt contracts; `research` owns mathematically admissible
+statistics and hypothetical cash accounting. `contracts` owns explicit isolated
+futures valuation and derived unadjusted chains, without executable fills.
+`storage` owns atomic append-only SQLite admission and coherent read sessions;
+`snapshots` owns the independent market-v1 immutable Parquet contract and native
+DuckDB aggregation. The public analytical query context shares existing process
+memory/concurrency/deadline limits. `prospective` owns frozen native-calendar
+issuance/outcomes; `recovery` verifies originals at the backup boundary.
+`application` composes these owners, checking identities/calendars and unsupported
+forms before calculation. `queries` owns shared bounded series/snapshot/fleet
+reads; metadata-only capture preflight does not invent observations. `market_cli`
+and `market_mcp` own independent transport dispatch;
+MCP never fetches or writes. Existing crypto owners and snapshot formats retain
+their contracts. See [runtime and acceptance](CROSS_ASSET_RUNTIME.md).
+
 Version 0.8.0 adds `analysis_changes` and `analysis_readiness` as read-only
 compositions of the existing dossier, qualification, market and window owners.
 Nested `Store.read_session` calls on a live read view reuse its exact transaction,

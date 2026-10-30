@@ -29,8 +29,11 @@ capabilities require separate evidence. Preserve named archive dataset scope.
 
 For equities, commodities, other asset classes, instrument identity, trading
 sessions or adjusted prices, read `docs/CROSS_ASSET_DESIGN.md` and
-`docs/adr/0002-cross-asset-instrument-and-session-semantics.md`. Current runtime
-support is cryptocurrency-focused; class support requires its own acceptance.
+`docs/adr/0002-cross-asset-instrument-and-session-semantics.md`. The implemented
+versioned path is documented in `docs/CROSS_ASSET_RUNTIME.md`. Keep its contracts
+separate from legacy cryptocurrency keys. Synthetic/imported acceptance does not
+establish licensed live class coverage; inspect explicit capabilities and receipt
+evidence. Preserve original payloads and use coherent read sessions for workflows.
 
 ## Verification and pull requests
 

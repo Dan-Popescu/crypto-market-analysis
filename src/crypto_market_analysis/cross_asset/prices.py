@@ -299,7 +299,12 @@ def effective_known_at(series: dict, row: dict, field: str, *, receipt_index: di
 
 
 def bars_as_of(series: Any, as_of: int, *, start: int | None = None, end: int | None = None) -> list[dict]:
-    """Latest receipt per closed native interval entirely within [start, end]."""
+    """Latest receipt per closed native interval entirely within [start, end].
+
+    Receipt-version order is (effective_known_at, declared observed_at), matching
+    persisted snapshot selection. A newly received revision can carry an older
+    publisher clock; its actual known clock still determines version precedence.
+    """
     return _bars_as_of_validated(validate_series(series), as_of, start=start, end=end)
 
 
@@ -312,6 +317,7 @@ def _bars_as_of_validated(series: dict, as_of: int, *, start: int | None = None,
     if start is not None and end is not None and start >= end:
         raise ValueError("end must follow start")
     selected: dict[tuple, dict] = {}
+    ranks: dict[tuple, tuple[int, int]] = {}
     clocks = receipt_clocks(series, "bars")
     for bar in series["bars"]:
         known_at = effective_known_at(series, bar, "bars", receipt_index=clocks)
@@ -321,21 +327,28 @@ def _bars_as_of_validated(series: dict, as_of: int, *, start: int | None = None,
             continue
         if end is not None and bar["end"] > end:
             continue
-        selected[(bar["start"], bar["end"])] = bar
+        key = (bar["start"], bar["end"])
+        rank = (known_at, bar["observed_at"])
+        if key not in ranks or rank > ranks[key]:
+            ranks[key] = rank
+            selected[key] = bar
     return list(selected.values())
 
 
 def actions_as_of(series: Any, as_of: int) -> list[dict]:
-    """Latest known revision per action; future-effective actions remain explicit."""
+    """Latest receipt-version per action; future-effective actions stay explicit."""
     return _actions_as_of_validated(validate_series(series), as_of)
 
 
 def _actions_as_of_validated(series: dict, as_of: int) -> list[dict]:
     timestamp(as_of, "as_of")
     selected: dict[str, dict] = {}
+    ranks: dict[str, tuple[int, int]] = {}
     clocks = receipt_clocks(series, "actions")
     for action in series["actions"]:
         known_at = effective_known_at(series, action, "actions", receipt_index=clocks)
-        if known_at <= as_of:
+        rank = (known_at, action["observed_at"])
+        if known_at <= as_of and (action["id"] not in ranks or rank > ranks[action["id"]]):
+            ranks[action["id"]] = rank
             selected[action["id"]] = action
     return sorted(selected.values(), key=lambda a: (a["effective_at"], a["id"]))

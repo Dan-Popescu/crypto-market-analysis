@@ -3,8 +3,10 @@
 The product's long-term scope includes cryptocurrencies, equities, commodities
 and further asset classes. Version 0.9.0 implements multiple cryptocurrency asset
 codes; accepting a ticker does not establish equity, commodity or futures support.
-This document records design requirements and implementation gates, not delivered
-non-crypto connectors or validated cross-asset financial models.
+This document records the original design requirements and implementation gates.
+Version 0.10.0 implements the bounded experimental path described in
+[CROSS_ASSET_RUNTIME.md](CROSS_ASSET_RUNTIME.md); consult its capability matrix
+and source qualification rather than interpreting this design as live acceptance.
 
 ## Instrument identity precedes broader collection
 

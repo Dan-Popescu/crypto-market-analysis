@@ -1,0 +1,21 @@
+{
+  "series_id": "synthetic:series:0",
+  "data_mode": "demo",
+  "currency": "USD",
+  "start": 1704153600,
+  "end": 1705017600,
+  "plan": {
+    "currency": "USD",
+    "initial_cash": 1000,
+    "deposits": [],
+    "purchases": [
+      {
+        "at": 1704211200,
+        "cash_amount": 500
+      }
+    ],
+    "fee_per_trade": 1,
+    "distributions": "cash",
+    "actions_complete": false
+  }
+}
