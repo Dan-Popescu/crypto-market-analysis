@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from dataclasses import asdict
 
+from .asset_universe import validate_asset
 from .context import market_context
-from .evidence import canonical_json, content_hash
+from .evidence import canonical_json, content_hash, reference_manifest, validate_evidence_mode
 from .operational_reads import upcoming_calendar_snapshot
 from .reporting import bounded_as_of, bounded_integers, bounded_object
 from .storage import Store
@@ -45,7 +45,8 @@ def validate_dossier_request(request):
     if len(canonical_json(request).encode()) > 65536:
         raise ValueError("Analysis dossier request exceeds the 64 KiB limit.")
     request = deepcopy(request)
-    _fields(request, {"data_mode", "markets", "calendar"}, "dossier")
+    _fields(request, {"data_mode", "markets", "calendar", "evidence_mode"}, "dossier")
+    validate_evidence_mode(request.get("evidence_mode", "full"))
     if request.get("data_mode") not in ("live", "import", "demo"):
         raise ValueError("Analysis dossier requires explicit data_mode live, import or demo.")
     markets = request.get("markets")
@@ -54,8 +55,9 @@ def validate_dossier_request(request):
     identities = set()
     for market in markets:
         _fields(market, {"asset", "source", "quote", "lookbacks", "venues", "derivatives", "quotes"}, "market")
-        if market.get("asset") not in ("BTC", "ETH") or market.get("quote") not in ("EUR", "USD"):
-            raise ValueError("Dossier markets require BTC or ETH and separate native EUR or USD quotes.")
+        validate_asset(market.get("asset"))
+        if market.get("quote") not in ("EUR", "USD"):
+            raise ValueError("Dossier markets require separate native EUR or USD quotes.")
         _source(market.get("source"))
         identity = (market["asset"], market["source"], market["quote"])
         if identity in identities:
@@ -95,13 +97,16 @@ def validate_dossier_request(request):
     return request
 
 
-def _evidence(records, selection, cutoff, watermark):
-    return {"as_of": cutoff, "watermark": deepcopy(watermark), "selection": selection,
+def _evidence(records, selection, cutoff, watermark, mode="full"):
+    result = {"as_of": cutoff, "watermark": deepcopy(watermark), "selection": selection,
             "input_hash": content_hash({"selection": selection, "as_of": cutoff, "records": records}),
             "hash_scope": "canonical selection, cutoff and exact consumed records",
-            "input_references": ["sha256:" + content_hash(row) for row in records],
             "consumed_records": records, "unknown_inputs": [], "read_only": True,
             "truncation": {"truncated": False, "captured": len(records)}}
+    if mode == "references":
+        return reference_manifest(result)
+    result["input_references"] = ["sha256:" + content_hash(row) for row in records]
+    return result
 
 
 def _pin(result, cutoff, watermark):
@@ -112,7 +117,7 @@ def _pin(result, cutoff, watermark):
     return result
 
 
-def _market(session, market, mode, cutoff, remaining):
+def _market(session, market, mode, cutoff, remaining, evidence_mode="full", captured=None):
     selection = {key: market[key] for key in ("asset", "source", "quote")}
     native = {**selection, "data_mode": mode}
     raw = session.capture(market["asset"], cutoff, mode, source=market["source"], quote=market["quote"],
@@ -120,10 +125,14 @@ def _market(session, market, mode, cutoff, remaining):
     candles = raw["candles"]
     if len(candles) > remaining:
         raise ValueError("Analysis dossier exceeds its shared 100000-candle budget.")
-    records = [asdict(row) for row in candles]
+    # Candle is an immutable dataclass of scalar JSON fields. asdict would
+    # recursively deepcopy each of those scalars for every hourly record.
+    records = [vars(row).copy() for row in candles]
+    if captured is not None:
+        captured.append(candles)
     context = market_context(candles, cutoff, market.get("lookbacks"))
     context["stored_inputs"] = _evidence(records, {**native, "lookbacks": market.get("lookbacks")},
-                                        cutoff, session.watermark_at_start)
+                                        cutoff, session.watermark_at_start, evidence_mode)
     context["input_truncation"] = raw["truncation"]
     missing = {"status": "not_requested"}
     result = {"selection": native, "market_context": context,
@@ -148,11 +157,24 @@ def _market(session, market, mode, cutoff, remaining):
     if "quotes" in market:
         request = {"asset": market["asset"], "quote": market["quote"], "data_mode": mode, **market["quotes"]}
         result["quotes"] = _pin(analyze_stored_quotes(session, request, cutoff), cutoff, session.watermark_at_start)
+    if evidence_mode == "references":
+        for name, section in result.items():
+            if name != "market_context" and isinstance(section, dict) and "stored_inputs" in section:
+                section["stored_inputs"] = reference_manifest(section["stored_inputs"])
     return result, len(candles)
 
 
 def build_analysis_dossier(store: Store, request: dict, as_of: int | None = None) -> dict:
-    """Freeze 1–4 explicit BTC/ETH EUR/USD contexts plus requested stored sections.
+    """Freeze selected native markets in one bounded, read-only physical snapshot.
+
+    Full evidence is the compatibility default. references retains the same
+    calculations and exact consumed-input digests while omitting record detail.
+    """
+    return _build_analysis_dossier(store, request, as_of)
+
+
+def _build_analysis_dossier(store, request, as_of=None, *, captured=None, detach=True):
+    """Freeze 1–4 explicit native EUR/USD contexts plus requested stored sections.
 
     Derivatives declare an independent native source/quote. Venue costs require
     an explicit budget; absent fee/product/eligibility assumptions remain unknown.
@@ -175,7 +197,8 @@ def build_analysis_dossier(store: Store, request: dict, as_of: int | None = None
     candle_count = 0
     with store.read_session() as session:
         for market in request["markets"]:
-            result, count = _market(session, market, request["data_mode"], cutoff, MAX_CANDLES - candle_count)
+            result, count = _market(session, market, request["data_mode"], cutoff, MAX_CANDLES - candle_count,
+                                    request.get("evidence_mode", "full"), captured)
             markets.append(result)
             candle_count += count
         with session.connection() as con:
@@ -185,7 +208,7 @@ def build_analysis_dossier(store: Store, request: dict, as_of: int | None = None
             raise ValueError("Analysis dossier calendar exceeds 100 rows; narrow its source or date range.")
         calendar["status"] = "available" if calendar["rows"] else "missing"
         calendar["stored_inputs"] = _evidence(calendar["rows"], calendar["selection"], cutoff,
-                                               session.watermark_at_start)
+                                               session.watermark_at_start, request.get("evidence_mode", "full"))
         frozen = {"schema_version": 1, "as_of": cutoff, "data_mode": request["data_mode"],
                   "request": request, "watermark": deepcopy(session.watermark_at_start),
                   "markets": markets, "calendar": calendar, "read_only": True,
@@ -206,4 +229,4 @@ def build_analysis_dossier(store: Store, request: dict, as_of: int | None = None
         if len(encoded.encode()) > MAX_RESULT_BYTES:
             raise ValueError("Analysis dossier exceeds its 32 MiB complete-result budget; narrow the request.")
     # Return only plain detached JSON; callers can retain every detail for paging.
-    return json.loads(encoded)
+    return json.loads(encoded) if detach else frozen

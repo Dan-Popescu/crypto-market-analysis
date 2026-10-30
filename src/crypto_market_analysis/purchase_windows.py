@@ -18,7 +18,7 @@ from .context import (
     _timestamp,
 )
 from .models import Candle
-from .research import forecast
+from .research import forecast_thresholds
 
 _DAY = 86400
 _EVENT_NAMES = {"red": "endpoint_below_anchor", "down_barrier": "below_anchor_touch"}
@@ -262,8 +262,8 @@ def analyze_windows(
     windows = {str(h): {} for h in horizons}
     coverage = {"eligible_hours": len(eligible), "complete_days": 0, "start": None, "end": None}
     any_support = False
-    for threshold in thresholds:
-        historical = forecast(eligible, horizons=horizons, threshold=threshold, as_of=as_of)
+    historical_scenarios = forecast_thresholds(eligible, horizons=horizons, thresholds=thresholds, as_of=as_of)
+    for threshold, historical in zip(thresholds, historical_scenarios, strict=True):
         coverage.update(historical["coverage"])
         estimate_anchor_time = historical["anchor_time"]
         estimate_anchor_epoch = (

@@ -11,9 +11,8 @@ import shlex
 from copy import deepcopy
 from datetime import datetime
 
-from .analysis_dossier import MAX_RESULT_BYTES, build_analysis_dossier, validate_dossier_request
-from .evidence import canonical_json, content_hash
-from .models import Candle
+from .analysis_dossier import MAX_RESULT_BYTES, _build_analysis_dossier, validate_dossier_request
+from .evidence import canonical_json, content_hash, validate_evidence_mode
 from .purchase_windows import analyze_windows
 from .qualification import normalize_qualification_request, qualify_sources
 from .reporting import bounded_as_of, bounded_object
@@ -29,9 +28,10 @@ def _request(request, cutoff):
     bounded_object(request, "analysis readiness request")
     if len(canonical_json(request).encode()) > 65536:
         raise ValueError("Analysis readiness request exceeds the 64 KiB limit.")
-    if set(request) - {"dossier", "windows", "qualification", "freshness_seconds"} or "dossier" not in request:
+    if set(request) - {"dossier", "windows", "qualification", "freshness_seconds", "evidence_mode"} or "dossier" not in request:
         raise ValueError("Readiness requires dossier and only optional windows, qualification and freshness_seconds.")
     request = deepcopy(request)
+    validate_evidence_mode(request.get("evidence_mode", "full"))
     request["dossier"] = validate_dossier_request(request["dossier"])
     freshness = request.get("freshness_seconds", 7200)
     if type(freshness) is not int or not 0 <= freshness <= 604800:
@@ -300,21 +300,24 @@ def build_analysis_readiness(store: Store, request: dict, as_of: int | None = No
                         "next_actions": [{"kind": "request_specific_analysis", "command": "crypto-market-analysis sources",
                                           "arguments": {}, "required_user_inputs": ["Select and initialize the intended evidence store explicitly"],
                                           "reasons": ["configured_database_missing"], "execute": False}]})
+    captured = [] if "windows" in request else None
+    dossier_request = dict(request["dossier"])
+    if "evidence_mode" in request:
+        dossier_request["evidence_mode"] = request["evidence_mode"]
     with store.read_session() as session:
-        dossier = build_analysis_dossier(session, request["dossier"], cutoff)
+        dossier = _build_analysis_dossier(session, dossier_request, cutoff, captured=captured, detach=False)
         qualification = qualify_sources(session, qualification_request, cutoff)
         watermark = deepcopy(session.watermark_at_start)
     # All inputs are detached from the same snapshot. Pure window calculations
     # and presentation must not keep a read transaction open.
     markets = []
-    for market in dossier["markets"]:
+    for index, market in enumerate(dossier["markets"]):
         selection = market["selection"]
         empirical = next(row for row in qualification["markets"] if all(
             row[key] == selection[key] for key in ("asset", "quote", "source")))
         windows = None
         if "windows" in request:
-            captured = market["market_context"]["stored_inputs"]["consumed_records"]
-            windows = analyze_windows([Candle(**row) for row in captured], cutoff, **request["windows"])
+            windows = analyze_windows(captured[index], cutoff, **request["windows"])
         claims = _market_claims(market, empirical, windows, mode == "demo", cutoff, request["freshness_seconds"])
         markets.append({"selection": selection, "claims": claims, "windows": windows,
                         "claim_statuses": {row["claim"]: row["status"] for row in claims}})

@@ -6,7 +6,7 @@ import json
 from collections import Counter
 from decimal import Decimal, InvalidOperation
 
-from .analysis_dossier import MAX_CANDLES, build_analysis_dossier, validate_dossier_request
+from .analysis_dossier import MAX_CANDLES, _build_analysis_dossier, validate_dossier_request
 from .derivatives_context import derivative_dimension
 from .evidence import canonical_json, content_hash
 from .freshness import assess_freshness
@@ -50,7 +50,8 @@ def _context_metric_facts(context, records, native, prefix):
         days.setdefault(row["open_time"] // 86400 * 86400, []).append(row)
     days = {day: rows for day, rows in days.items() if len(rows) == 24
             and sorted(row["open_time"] for row in rows) == list(range(day, day + 86400, 3600))}
-    references = {row["open_time"]: "sha256:" + content_hash(row) for rows in days.values() for row in rows}
+    references = dict(zip((row["open_time"] for row in records),
+                          context["stored_inputs"]["input_references"], strict=True))
     evidence = {}
     facts = {}
     for family in ("lookbacks", "calendar"):
@@ -99,7 +100,7 @@ def _facts(snapshot):
         context = market["market_context"]
         records = context["stored_inputs"]["consumed_records"]
         last = max(records, key=lambda row: row["open_time"], default=None)
-        reference = ["sha256:" + content_hash(last)] if last else []
+        reference = ([context["stored_inputs"]["input_references"][records.index(last)]] if last else [])
         event = last["close_time"] if last else None
         known = last["observed_at"] if last else None
         prefix = f"markets/{index}"
@@ -330,8 +331,12 @@ def build_analysis_changes(store: Store, request: dict, as_of: int | None = None
         raise ValueError("max_changes must be an integer from 1 to 500.")
     with store.read_session() as session:
         candles = _preflight(session, dossier, (previous, current))
-        before = build_analysis_dossier(session, dossier, previous)
-        after = build_analysis_dossier(session, dossier, current)
+        # Changes require exact inputs internally even when the caller selects
+        # compact evidence presentation. Keep the detached trees in this request
+        # instead of round-tripping both large dossiers through JSON.
+        full = {**dossier, "evidence_mode": "full"} if "evidence_mode" in dossier else dossier
+        before = _build_analysis_dossier(session, full, previous, detach=False)
+        after = _build_analysis_dossier(session, full, current, detach=False)
         raw_count = sum(len(section.get("stored_inputs", {}).get("consumed_records", []))
                         for snapshot in (before, after) for market in snapshot["markets"]
                         for section in market.values() if isinstance(section, dict))

@@ -31,6 +31,30 @@ def content_hash(value: object) -> str:
     return hashlib.sha256(canonical_json(value).encode()).hexdigest()
 
 
+def validate_evidence_mode(value: object) -> str:
+    if value not in ("full", "references"):
+        raise ValueError("evidence_mode must be full or references.")
+    return value
+
+
+def reference_manifest(evidence: dict, *, count: int | None = None) -> dict:
+    """Bind omitted detail to the exact consumed input, without a retrieval claim.
+
+    This is a presentation choice, never a smaller analytical sample. Callers
+    calculate and hash every consumed record before discarding the detail.
+    """
+    records = evidence.get("consumed_records", [])
+    references = evidence.get("input_references", [])
+    return {**{key: value for key, value in evidence.items()
+               if key not in ("consumed_records", "input_references")},
+            "evidence_mode": "references",
+            "manifest": {"input_hash": evidence["input_hash"],
+                         "consumed_records": len(records) if count is None else count,
+                         "retained_records": 0, "retained_input_references": 0,
+                         "omitted_input_references": len(references) if "input_references" in evidence else len(records),
+                         "detail_availability": "Detail is omitted from this response; no retrieval or durable retention is promised."}}
+
+
 def funding_period_seconds(metadata: dict) -> int | float | None:
     """Normalize published unit-bearing aliases; conflicting or unitless periods stay unknown."""
     values = []
