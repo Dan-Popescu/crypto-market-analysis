@@ -11,9 +11,9 @@ from .config import Settings
 from .engine import Engine
 from .http_limits import bounded_http
 from .pipeline import collect
+from .qualification import NATIVE_MARKETS, normalize_native_markets
 from .venues import VENUES
 
-NATIVE_MARKETS = ("BTC/EUR", "ETH/EUR", "BTC/USD", "ETH/USD")
 _FIELDS = {
     "refresh", "data_mode", "as_of", "sources", "markets", "market_sources",
     "required_history_days", "freshness_seconds", "max_gap_hours", "max_gap_details",
@@ -173,7 +173,7 @@ def normalize_local_workflow_request(settings, request):
     if normalized["refresh"] and set(sources) - set(VENUES):
         raise ValueError("Refresh sources must be supported public venues.")
     normalized["sources"] = sources
-    normalized["markets"] = _selection(request, "markets", NATIVE_MARKETS, NATIVE_MARKETS)
+    normalized["markets"] = normalize_native_markets(request.get("markets", NATIVE_MARKETS))
     for name, default, low, high in (
         ("required_history_days", 730, 1, 3650),
         ("freshness_seconds", 10800, 0, 31536000),

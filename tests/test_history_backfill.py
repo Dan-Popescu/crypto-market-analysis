@@ -446,3 +446,19 @@ def test_invalid_retry_metadata_is_bounded_and_cannot_shorten_backoff(value):
         headers = {"Retry-After": value}
 
     assert backfill._retry_deadline(Invalid(), NOW, 60) == (NOW + 60, "local_exponential_backoff")
+
+
+def test_third_asset_backfill_resolves_native_catalogue_and_never_aliases_quote(tmp_path):
+    database = tmp_path / "market.sqlite"
+    catalogue = {"SOL/EUR": {"symbol": "SOL/EUR", "base": "SOL", "quote": "EUR", "spot": True, "active": True}}
+    pool = Pool(markets=catalogue)
+    req = request(markets=[{"asset": "SOL", "quote": "EUR"}])
+    assert apply(database, req, pool)["status"] == "complete"
+    assert {call[0] for call in pool.adapter.calls} == {"SOL/EUR"}
+    stored = Store(database).candles("SOL", source="coinbase", quote="EUR", mode="import")
+    assert len(stored) == 4 and {row.observed_at for row in stored} == {NOW}
+    usd = request(markets=[{"asset": "SOL", "quote": "USD"}])
+    unsupported_database = tmp_path / "unsupported.sqlite"
+    apply(unsupported_database, usd, pool)
+    assert backfill.history_backfill_status(unsupported_database)["jobs"][0]["markets"]["SOL/USD"]["status"] == "unsupported"
+    assert Store(database).candles("SOL", source="coinbase", quote="USD", mode="import") == []

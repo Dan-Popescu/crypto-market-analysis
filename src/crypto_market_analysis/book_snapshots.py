@@ -13,6 +13,8 @@ from copy import deepcopy
 from decimal import Context, Decimal, InvalidOperation, localcontext
 from typing import TYPE_CHECKING
 
+from .asset_universe import validate_asset
+
 if TYPE_CHECKING:
     from .storage import Store
 
@@ -42,8 +44,9 @@ def _selectors(sources: list[str], asset: str, quote: str, data_mode: str, as_of
         raise ValueError("sources requires 1 to 32 unique source identifiers.")
     for source in sources:
         _label(source, "source")
-    if asset not in ("BTC", "ETH") or quote not in ("EUR", "USD", "USDT", "USDC"):
-        raise ValueError("Select BTC/ETH and an explicit native EUR/USD/USDT/USDC quote.")
+    validate_asset(asset)
+    if quote not in ("EUR", "USD", "USDT", "USDC"):
+        raise ValueError("Select an explicit native EUR/USD/USDT/USDC quote.")
     if data_mode not in ("live", "import", "demo"):
         raise ValueError("Select an explicit live, import or demo mode.")
     _clock(as_of, "as_of")

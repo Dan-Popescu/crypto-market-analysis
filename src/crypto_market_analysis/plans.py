@@ -17,6 +17,7 @@ from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 from decimal import ROUND_CEILING, ROUND_DOWN, Decimal, InvalidOperation, localcontext
 
+from .asset_universe import validate_asset
 from .models import Candle
 
 DAY = 86400
@@ -60,8 +61,9 @@ def validate_config(config: dict) -> dict:
     if set(config) - {'schema_version', 'asset', 'quote', 'source', 'data_mode', 'start_time',
                       'contributions', 'schedule', 'starting_holdings', 'fees', 'execution', 'plans'}:
         raise ValueError('Unsupported configuration fields')
-    if config.get('asset') not in ('BTC', 'ETH') or config.get('quote') not in ('EUR', 'USD'):
-        raise ValueError('Only BTC/ETH and native EUR/USD quotes are supported')
+    validate_asset(config.get('asset'))
+    if config.get('quote') not in ('EUR', 'USD'):
+        raise ValueError('Only native EUR/USD quotes are supported')
     if not isinstance(config.get('source'), str) or not 1 <= len(config['source']) <= 100:
         raise ValueError('source must be explicit and bounded')
     mode = config.get('data_mode', 'live')

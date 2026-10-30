@@ -14,6 +14,7 @@ from dataclasses import replace
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
+from .asset_universe import validate_asset
 from .collectors import ExchangeClients, parse_candles, select_market
 from .dataset_lock import DatasetBusy, store_writer_lock
 from .http_accounting import accounting_scope, instrument_exchange, merge_measurements, public_error
@@ -113,8 +114,9 @@ def normalize_backfill_request(request):
     for market in markets:
         if not isinstance(market, dict) or set(market) != {"asset", "quote"}:
             raise ValueError("Each market requires only asset and quote.")
-        if market["asset"] not in ("BTC", "ETH") or market["quote"] not in ("EUR", "USD"):
-            raise ValueError("Select native BTC/ETH EUR/USD spot markets.")
+        validate_asset(market["asset"])
+        if market["quote"] not in ("EUR", "USD"):
+            raise ValueError("Select native EUR/USD spot markets.")
         if market in normalized:
             raise ValueError("Duplicate native markets are not allowed.")
         normalized.append(dict(market))

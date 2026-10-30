@@ -284,7 +284,7 @@ def test_scope_selectors_keep_modes_and_native_quotes_separate_without_fx():
 
 
 @pytest.mark.parametrize('change', [
-    lambda cfg: cfg.update(schema_version=True), lambda cfg: cfg.update(asset='SOL'),
+    lambda cfg: cfg.update(schema_version=True), lambda cfg: cfg.update(asset='SOL/USDT'),
     lambda cfg: cfg.pop('data_mode'), lambda cfg: cfg.update(policy={'endpoint_tolerance_seconds': -1}),
     lambda cfg: cfg.update(policy={'endpoint_tolerance_seconds': 3601}),
     lambda cfg: cfg.update(policy={'max_point_age_seconds': True}),

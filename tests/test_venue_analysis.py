@@ -305,7 +305,7 @@ def test_unknown_spread_does_not_invent_zero_and_locked_book_can_have_zero_sprea
 
 
 @pytest.mark.parametrize("function,make", [(analyze_purchase_costs, request), (analyze_venue_disagreement, diagnostic)])
-@pytest.mark.parametrize("field,value", [("quote", "USDT"), ("quote", "USDC"), ("asset", "SOL"),
+@pytest.mark.parametrize("field,value", [("quote", "USDT"), ("quote", "USDC"), ("asset", "SOL/EUR"),
                                           ("data_mode", "synthetic"), ("data_mode", None)])
 def test_native_market_and_existing_modes_are_explicit(function, make, field, value):
     with pytest.raises(ValueError):

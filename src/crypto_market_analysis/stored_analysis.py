@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+from .asset_universe import validate_asset
 from .derivatives_context import analyze_derivatives_context
 from .evidence import content_hash
 from .quote_context import analyze_quote_context
@@ -22,8 +23,8 @@ def _request(request: dict, allowed: set[str], *, asset: bool = False) -> dict:
         raise ValueError("Stored analysis requires explicit data_mode live, import or demo.")
     if not isinstance(request.get("quote"), str) or not request["quote"]:
         raise ValueError("Stored analysis requires an explicit native quote.")
-    if asset and request.get("asset") not in ("BTC", "ETH"):
-        raise ValueError("Stored analysis requires BTC or ETH asset.")
+    if asset:
+        validate_asset(request.get("asset"))
     return deepcopy(request)
 
 
@@ -74,8 +75,8 @@ def build_stored_quote_inputs(store: Store, request: dict, as_of: int) -> dict:
     selected FX reference is ambiguous and requires narrower source selection.
     """
     request = _request(request, {"asset", "sources", "quote", "data_mode", "max_age_seconds", "max_endpoint_skew_seconds"})
-    if request.get("asset") is not None and request["asset"] not in ("BTC", "ETH"):
-        raise ValueError("Optional quote context asset must be BTC or ETH.")
+    if request.get("asset") is not None:
+        validate_asset(request["asset"])
     if request["quote"] not in ("EUR", "USD"):
         raise ValueError("Stored quote context requires native EUR or USD.")
     snapshot = store.stored_analysis_snapshot(

@@ -11,11 +11,28 @@ import hashlib
 import json
 from dataclasses import asdict
 
+from .asset_universe import validate_asset
 from .evidence import canonical_json, content_hash
 from .source_catalog import SOURCE_PROFILES
 from .storage import Store
 
 NATIVE_MARKETS = ("BTC/EUR", "ETH/EUR", "BTC/USD", "ETH/USD")
+
+
+def normalize_native_markets(markets):
+    """Validate one bounded selection; catalogue support remains unverified."""
+    if not isinstance(markets, (list, tuple)) or not 1 <= len(markets) <= 4:
+        raise ValueError("Select one to four distinct native EUR/USD markets.")
+    for market in markets:
+        if not isinstance(market, str) or market.count("/") != 1:
+            raise ValueError("Markets require a canonical asset/native quote pair.")
+        asset, quote = market.split("/")
+        validate_asset(asset)
+        if quote not in ("EUR", "USD"):
+            raise ValueError("Select native EUR/USD markets.")
+    if len(set(markets)) != len(markets):
+        raise ValueError("Select distinct native markets.")
+    return list(markets)
 
 
 class _ReferenceHash:
@@ -82,10 +99,7 @@ def normalize_qualification_request(request, as_of):
     mode = request.get("data_mode", "live")
     if mode not in ("live", "import", "demo"):
         raise ValueError("Select live, import or demo data explicitly.")
-    markets = request.get("markets", list(NATIVE_MARKETS))
-    if (not isinstance(markets, list) or not markets or len(markets) > 4
-            or any(m not in NATIVE_MARKETS for m in markets) or len(set(markets)) != len(markets)):
-        raise ValueError("Select distinct native BTC/EUR, ETH/EUR, BTC/USD or ETH/USD markets.")
+    markets = normalize_native_markets(request.get("markets", list(NATIVE_MARKETS)))
     sources = request.get("sources", [])
     if (not isinstance(sources, list) or len(sources) > 16
             or any(not isinstance(s, str) or not s or len(s) > 64 for s in sources)

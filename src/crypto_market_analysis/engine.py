@@ -10,6 +10,7 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .asset_universe import validate_asset
 from .config import Settings
 from .evidence import CapturedInputs, metric_identity
 from .freshness import metric_freshness
@@ -65,8 +66,7 @@ class Engine:
 
     def selected_candles(self, asset: str, source: str | None = None, quote: str | None = None,
                          as_of: int | None = None, watermark: dict | None = None) -> tuple[list[Candle], list[dict]]:
-        if asset not in ("BTC", "ETH"):
-            raise ValueError("Choose BTC or ETH.")
+        asset = validate_asset(asset)
         now = int(time.time()) if as_of is None else as_of
         candles = self.store.candles(asset, source, quote, now, self.mode,
                                      max_id=watermark["candles"] if watermark else None)
@@ -97,6 +97,7 @@ class Engine:
                        quote: str | None = None, as_of: int | None = None, *,
                        profile: str = "bundle", vigilance_policy: dict | None = None,
                        include_candle_versions: bool = False) -> CapturedInputs:
+        asset = validate_asset(asset)
         now = int(time.time()) if as_of is None else as_of
         raw = self.store.capture(asset, now, self.mode, source=source, quote=quote,
                                  profile=profile, vigilance_policy=vigilance_policy,

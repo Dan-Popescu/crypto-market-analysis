@@ -11,6 +11,7 @@ import json
 import math
 from dataclasses import asdict
 
+from .asset_universe import validate_asset
 from .evidence import canonical_json, funding_period_seconds, metric_dimension
 from .models import Observation
 
@@ -19,7 +20,17 @@ MAX_SERIES = 64
 METRICS = {'funding_rate_actual', 'funding_rate_projected', 'open_interest_amount', 'open_interest_value'}
 DEFAULT_POLICY = {'max_point_age_seconds': 3600, 'endpoint_tolerance_seconds': 900}
 _UNKNOWN = {'', 'unknown', 'unspecified', 'none', 'contracts_unknown'}
-_CURRENCIES = {'EUR', 'USD', 'USDT', 'USDC', 'BTC', 'ETH'}
+
+
+def _native_currency(value):
+    """Recognize explicit native codes without asserting provider support."""
+    if value in ('EUR', 'USD'):
+        return True
+    try:
+        validate_asset(value)
+    except ValueError:
+        return False
+    return True
 
 
 def _time(value, name):
@@ -56,8 +67,9 @@ def _validate(request):
     if (not isinstance(request, dict) or type(request.get('schema_version')) is not int
             or request['schema_version'] != 1 or set(request) - allowed):
         raise ValueError('A derivatives context request requires schema_version 1 and supported fields')
-    if request.get('asset') not in ('BTC', 'ETH') or request.get('data_mode') not in ('live', 'import', 'demo'):
-        raise ValueError('Explicit BTC/ETH asset and live, import or demo data_mode are required')
+    validate_asset(request.get('asset'))
+    if request.get('data_mode') not in ('live', 'import', 'demo'):
+        raise ValueError('Explicit live, import or demo data_mode is required')
     selectors = {key: _text(request.get(key), key, nullable=True) for key in ('source', 'quote')}
     policy = request.get('policy', {})
     if not isinstance(policy, dict) or set(policy) - DEFAULT_POLICY.keys():
@@ -131,9 +143,9 @@ def _native_status(observation):
         if observation.unit == 'contracts':
             size = metadata.get('contract_size')
             if (not _number(size) or size <= 0
-                    or metadata.get('contract_size_unit') not in _CURRENCIES):
+                    or not _native_currency(metadata.get('contract_size_unit'))):
                 return 'unknown_native_convention'
-        elif observation.unit not in _CURRENCIES:
+        elif not _native_currency(observation.unit):
             return 'unknown_native_convention'
         elif 'value_currency' in metadata and metadata['value_currency'] != observation.unit:
             return 'unknown_native_convention'
