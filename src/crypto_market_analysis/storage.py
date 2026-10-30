@@ -758,11 +758,16 @@ class Store:
                 con.execute("BEGIN")
             watermark = {table: con.execute(f"SELECT COALESCE(MAX(rowid),0) FROM {table}").fetchone()[0]
                          for table in ("candles", "observations", "events", "runs", "local_records")}
-            cte = f"""WITH versions AS (SELECT *,
+            # Candle-only captures consume every latest bar. Ranking that history
+            # again for vigilance's recent-series selection wastes shared VM work
+            # in both the coverage and payload queries of multi-cutoff analyses.
+            series_rank = (""", ROW_NUMBER() OVER(PARTITION BY source,asset,quote,data_mode
+                ORDER BY open_time DESC) series_rank""" if profile != "candles" else "")
+            columns = "source,quote,open_time,close_time,payload" if profile == "candles" else "*"
+            cte = f"""WITH versions AS (SELECT {columns},
                 ROW_NUMBER() OVER(PARTITION BY source,asset,quote,timeframe,open_time,data_mode
                     ORDER BY observed_at DESC,id DESC) version_rank FROM candles
-                WHERE {' AND '.join(conditions)}), latest AS (SELECT *,
-                ROW_NUMBER() OVER(PARTITION BY source,asset,quote,data_mode ORDER BY open_time DESC) series_rank
+                WHERE {' AND '.join(conditions)}), latest AS (SELECT *{series_rank}
                 FROM versions WHERE version_rank=1) """
             candle_coverage = con.execute(cte + """SELECT source,quote,COUNT(*),MIN(open_time),MAX(close_time)
                 FROM latest GROUP BY source,quote""", values).fetchall()

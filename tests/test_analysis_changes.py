@@ -152,6 +152,27 @@ def test_all_four_native_markets_remain_separate(store):
     assert moves[0]["after"]["identity"]["quote"] == "EUR"
 
 
+def test_two_dense_four_market_snapshots_fit_the_shared_sqlite_budget(store):
+    cutoff = 800 * 86400
+    markets = [{"asset": asset, "source": "venue", "quote": quote, "lookbacks": [7, 30, 365, 730]}
+               for asset in ("BTC", "ETH") for quote in ("EUR", "USD")]
+    for market in markets:
+        store.put_candles([replace(candle(event=event), asset=market["asset"], quote=market["quote"])
+                           for event in range(3600, cutoff + 1, 3600)])
+    # Both cutoffs need all 76800 bars: this exercises the actual shared read
+    # session rather than independently resetting its VM budget per snapshot.
+    result = build_analysis_changes(store, {"dossier": {"data_mode": "import", "markets": markets},
+                                            "previous_as_of": cutoff}, cutoff + 1)
+    assert result["resource_limits"]["consumed_candles"] == 153600
+    assert result["resource_limits"]["sqlite_vm_steps"] == 50_000_000
+    assert result["watermark"]["candles"] == 76800
+    assert result["read_only"] is True
+    assert result["summary"]["total_changes"] == 0
+    assert result["changes"] == []
+    assert len(result["markets"]) == 4
+    assert all(market["before"] == market["after"] for market in result["markets"])
+
+
 def test_calendar_cancellation_and_revision_use_known_at_and_sequence(store):
     wanted = request()
     wanted["dossier"]["calendar"] = {"source": "calendar", "start": PREVIOUS, "end": NOW + 86400}
