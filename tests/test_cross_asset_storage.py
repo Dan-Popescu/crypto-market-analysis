@@ -400,3 +400,71 @@ def test_all_vintages_include_action_revisions_and_obey_combined_row_budget(tmp_
         reader.read_series("reference-raw", as_of=200, data_mode="import", all_vintages=True, max_rows=3)
     with pytest.raises(ValueError, match="boolean"):
         reader.read_series("reference-raw", as_of=200, data_mode="import", all_vintages="true")
+
+
+def test_read_session_pins_series_and_metadata_across_actual_wal_commit(tmp_path):
+    store = writer(tmp_path)
+    original = bundle()
+    store.import_bundle(original, received_at=200)
+    with store.read_session() as reader:
+        assert reader is not store and reader.writable is False
+        assert reader.read_series("reference-raw", as_of=500, data_mode="import")["bars"][0]["close"] == -15
+        changed = deepcopy(original)
+        changed["registry"]["aliases"].append({**changed["registry"]["aliases"][0], "symbol": "ADDED"})
+        changed["series"][0]["bars"][0].update(close=-12, observed_at=240)
+        changed["calendars"].append({**changed["calendars"][0], "version": "v2", "known_at": 10})
+        store.import_bundle(changed, received_at=300)
+        assert {row["symbol"] for row in reader.registry(500)["aliases"]} == {"REF"}
+        assert reader.calendar("synthetic-calendar", as_of=500)["version"] == "v1"
+        with reader.read_session() as nested:
+            assert nested is reader
+            assert nested.read_series("reference-raw", as_of=500, data_mode="import")["bars"][0]["close"] == -15
+        assert {row["symbol"] for row in store.registry(500)["aliases"]} == {"REF", "ADDED"}
+        assert store.calendar("synthetic-calendar", as_of=500)["version"] == "v2"
+        assert store.read_series("reference-raw", as_of=500, data_mode="import")["bars"][0]["close"] == -12
+        assert not getattr(store, "_session_bound", False)
+        with pytest.raises(ValueError, match="forbid writes"):
+            reader.import_bundle(original, received_at=400)
+    with pytest.raises(ValueError, match="expired"):
+        reader.registry(500)
+    with pytest.raises(ValueError, match="expired"):
+        with reader.read_session():
+            pass
+    assert store.writable is True
+    assert store.registry(500) is not None
+
+
+def test_missing_read_session_stays_missing_and_expires_without_creating_files(tmp_path):
+    path = tmp_path / "missing" / "observer.sqlite"
+    source = CrossAssetStore(path)
+    with source.read_session() as reader:
+        assert reader.registry(500) is None
+        with reader.read_session() as nested:
+            assert nested is reader
+            assert nested.read_series("missing", as_of=500, data_mode="import") is None
+        assert not path.parent.exists()
+        new_writer = CrossAssetStore(path, initialize=True)
+        new_writer.import_bundle(bundle(), received_at=200)
+        assert reader.registry(500) is None
+        assert source.registry(500) is not None
+    with pytest.raises(ValueError, match="expired"):
+        reader.registry(500)
+
+
+def test_nested_read_sessions_share_deadline_without_resetting_budget(tmp_path, monkeypatch):
+    import crypto_market_analysis.cross_asset.storage as storage_module
+
+    store = writer(tmp_path)
+    store.import_bundle(bundle(), received_at=200)
+    clock = [100.0]
+    monkeypatch.setattr(storage_module.time, "monotonic", lambda: clock[0])
+    with store.read_session() as reader:
+        clock[0] += storage_module.QUERY_SECONDS - 1
+        with reader.read_session() as nested:
+            assert nested.registry(500) is not None
+        clock[0] += 2
+        with pytest.raises(ValueError, match="shared query budget"):
+            reader.registry(500)
+        with pytest.raises(ValueError, match="shared query budget"):
+            with reader.read_session():
+                pass

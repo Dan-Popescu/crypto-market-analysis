@@ -131,7 +131,16 @@ class CrossAssetStore:
                                     f"BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT, 'append-only journal'); END")
 
     @contextmanager
-    def _connection(self, *, write=False):
+    def _connection(self, *, write=False, deadline=None):
+        if getattr(self, "_session_bound", False):
+            if self._session_expired:
+                raise ValueError("Cross-asset read session has expired.")
+            if write:
+                raise ValueError("Cross-asset read sessions forbid writes.")
+            if time.monotonic() > self._session_deadline:
+                raise ValueError("Cross-asset read session exceeded its shared query budget.")
+            yield self._session_connection
+            return
         if write and not self.writable:
             raise ValueError("Cross-asset writes require explicit initialize=True.")
         if not self.path.is_file():
@@ -142,7 +151,7 @@ class CrossAssetStore:
         uri = self.path.absolute().as_uri() + ("?mode=rw" if write else "?mode=ro")
         con = sqlite3.connect(uri, uri=True, timeout=5)
         con.row_factory = sqlite3.Row
-        deadline = time.monotonic() + QUERY_SECONDS
+        deadline = time.monotonic() + QUERY_SECONDS if deadline is None else deadline
         con.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
         try:
             con.execute("BEGIN IMMEDIATE" if write else "BEGIN")
@@ -164,6 +173,31 @@ class CrossAssetStore:
         """Yield one bounded consistent journal view for explicit export owners."""
         with self._connection() as con:
             yield con
+
+    @contextmanager
+    def read_session(self):
+        """Yield an isolated readonly facade pinned to one bounded WAL snapshot.
+
+        Related series/registry/calendar reads share the same transaction and
+        deadline. Nested sessions reuse that reader. The scoped reader expires
+        on exit; the original store never acquires mutable session state.
+        """
+        if getattr(self, "_session_bound", False):
+            with self._connection():
+                yield self
+            return
+        deadline = time.monotonic() + QUERY_SECONDS
+        with self._connection(deadline=deadline) as con:
+            reader = CrossAssetStore(self.path)
+            reader._session_bound = True
+            reader._session_expired = False
+            reader._session_connection = con
+            reader._session_deadline = deadline
+            try:
+                yield reader
+            finally:
+                reader._session_expired = True
+                reader._session_connection = None
 
     def import_bundle(self, bundle: dict, *, received_at: int) -> dict:
         """Validate then atomically append components; identical replay is a no-op.
