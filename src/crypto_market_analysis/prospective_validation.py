@@ -6,14 +6,12 @@ when their frozen origin, deadline and event exactly match the evaluated event.
 
 from __future__ import annotations
 
-import json
 import math
 from copy import deepcopy
 
-from .evidence import canonical_json
+from .journal import AssessmentJournal
 from .prospective import DAY, _clock, assessment_chronology, select_outcomes
 from .scorecards import build_scorecard
-from .storage import database_table_names, read_database_if_present
 from .validation_protocol import (
     EVENT_FIELDS,
     MARKET_FIELDS,
@@ -97,7 +95,7 @@ def _reasons(protocol, record, cohort):
 
 
 def _prediction(protocol, record, cohort, event):
-    for prediction in record["payload"].get("validation_predictions", []):
+    for prediction in record["payload"].get("validation_predictions") or []:
         if all(prediction.get(key) == event[key] for key in EVENT_FIELDS):
             if (prediction.get("protocol_hash") != protocol["protocol_hash"]
                     or prediction.get("model_version") != cohort["model_version"]
@@ -322,43 +320,24 @@ def evaluate_stored_validation(store, protocol, *, as_of, cohort_page=0, page_si
         raise ValueError("Use a nonnegative cohort page and bounded page size, origin and record budgets")
     cohorts = protocol["declaration"]["cohorts"]
     page = cohorts[cohort_page * page_size:(cohort_page + 1) * page_size]
-    records, outcomes, truncated, truncated_outcomes = [], {}, [], []
-    with read_database_if_present(store.path) as con:
-        if {"assessment_journal", "assessment_outcomes"} <= database_table_names(con):
-            for cohort in page:
-                filters = " AND ".join(f"json_extract(record,'$.payload.input_reference.{key}')=?"
-                                       for key in MARKET_FIELDS)
-                rows = con.execute(
-                    "SELECT json_remove(record,'$.evidence') FROM assessment_journal "
-                    f"WHERE issued_at>=? AND issued_at<? AND issued_at<=? AND {filters} "
-                    "AND json_extract(record,'$.payload.input_reference.dataset_lineage') IS json_extract(?,'$') "
-                    "ORDER BY issued_at,assessment_id LIMIT ?",
-                    (protocol["declaration"]["starts_at"], protocol["declaration"]["ends_at"], as_of,
-                     *(cohort[key] for key in MARKET_FIELDS), canonical_json(cohort["dataset_lineage"]),
-                     origins_per_cohort + 1),
-                ).fetchall()
-                if len(rows) > origins_per_cohort:
-                    truncated.append(cohort["cohort_id"])
-                for row in rows[:origins_per_cohort]:
-                    record = json.loads(row[0])
-                    records.append(record)
-                    identity = record["assessment_id"]
-                    appends = con.execute(
-                        "SELECT json_remove(record,'$.evidence') FROM assessment_outcomes WHERE assessment_id=? "
-                        "AND json_extract(record,'$.observed_at')<=? "
-                        "ORDER BY json_extract(record,'$.observed_at'),content_hash LIMIT ?",
-                        (identity, as_of, MAX_OUTCOMES + 1),
-                    ).fetchall()
-                    # Retain one sentinel append so the pure reducer reports truncation.
-                    outcomes[identity] = [json.loads(append[0]) for append in appends]
-                    if len(appends) > MAX_OUTCOMES:
-                        truncated_outcomes.append(identity)
-    result = evaluate_validation(protocol, records, outcomes, as_of=as_of,
-                                 cohort_ids=[cohort["cohort_id"] for cohort in page], truncated_cohorts=truncated)
-    result["selection"] = {"cohort_page": cohort_page, "page_size": page_size, "total_cohorts": len(cohorts),
-                           "next_cohort_page": cohort_page + 1 if (cohort_page + 1) * page_size < len(cohorts) else None,
-                           "origins_per_cohort": origins_per_cohort, "record_budget": record_budget,
-                           "selected_records": len(records), "origins_truncated": truncated,
-                           "outcomes_truncated": truncated_outcomes,
-                           "origin_order": "earliest_issued_at_then_assessment_id", "evidence_loaded": False}
+    snapshot = AssessmentJournal.open_existing(store).validation_records(
+        page, starts_at=protocol["declaration"]["starts_at"], ends_at=protocol["declaration"]["ends_at"],
+        as_of=as_of, origins_per_cohort=origins_per_cohort, record_budget=record_budget)
+    result = evaluate_validation(protocol, snapshot.records, snapshot.outcomes, as_of=snapshot.as_of,
+                                 cohort_ids=[cohort["cohort_id"] for cohort in page],
+                                 truncated_cohorts=snapshot.selection["origins_truncated"])
+    result["selection"] = {**snapshot.selection, "cohort_page": cohort_page, "page_size": page_size,
+                           "total_cohorts": len(cohorts),
+                           "next_cohort_page": cohort_page + 1 if (cohort_page + 1) * page_size < len(cohorts) else None}
     return result
+
+
+def evaluate_validation_request(store, request, as_of):
+    """Interpret the shared CLI/MCP request using the same read-only evaluator."""
+    allowed = {"protocol", "cohort_page", "page_size", "origins_per_cohort", "record_budget"}
+    if not isinstance(request, dict) or set(request) - allowed:
+        raise ValueError("Expected protocol and optional cohort paging/budget fields")
+    if "protocol" not in request:
+        raise ValueError("Prospective validation requires the frozen protocol artifact")
+    values = {key: value for key, value in request.items() if key != "protocol"}
+    return evaluate_stored_validation(store, request["protocol"], as_of=as_of, **values)

@@ -125,7 +125,8 @@ def _declaration(value):
                     or not 1 <= event["horizon_days"] <= 365):
                 raise ValueError("Unsupported event convention, issuance anchor or horizon")
             if event["event"] == "below_anchor_touch":
-                if not 0 < fraction(event["threshold"], "threshold") < 1:
+                event["threshold"] = fraction(event["threshold"], "threshold")
+                if not 0 < event["threshold"] < 1:
                     raise ValueError("Touch threshold must be strictly between zero and one")
             elif event["threshold"] is not None:
                 raise ValueError("Endpoint threshold must be null")

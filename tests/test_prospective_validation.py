@@ -318,3 +318,90 @@ def test_shareable_example_freezes_without_claiming_any_elapsed_evidence():
     assert protocol["declaration"]["starts_at"] == 1798761600
     assert report["cohorts"][0]["assessment_count"] == 0
     assert all(row["criterion"]["status"] == "not_met" for row in report["cohorts"][0]["events"])
+
+
+def test_string_and_numeric_touch_thresholds_freeze_identically_and_score_same_event():
+    config = declaration()
+    config["cohorts"][0]["events"] = [
+        {"event": "below_anchor_touch", "convention": "fully_contained_hourly_bars_v1", "time_anchor": "issuance",
+         "horizon_days": 1, "threshold": "0.05"}]
+    from_string = freeze_validation_protocol(config, frozen_at=0)
+    config["cohorts"][0]["events"][0]["threshold"] = 0.05
+    from_number = freeze_validation_protocol(config, frozen_at=0)
+    assert from_string == from_number
+    assert validate_validation_protocol(from_string) == from_string
+    record = original(from_string)
+    windows = {"schema_version": 1, "issued_at": DAY, "anchor_time": DAY, "anchor_price": 10, "stale": False,
+               "windows": {"1": {"0.05": {"status": "experimental", "threshold": 0.05,
+                   "historical_alignment": "anchor_relative_complete_24h_bars", "issuance_alignment_matches": True,
+                   "estimate_anchor_time": DAY, "estimate_window_end": 2 * DAY, "purchase_window_end": 2 * DAY,
+                   "conditional_frequencies": {"below_anchor_touch": 0.6}}}}}
+    predictions = build_validation_predictions(from_string, record["payload"]["input_reference"], windows,
+                                                record["payload"]["rules"], DAY)
+    assert predictions[0]["threshold"] == 0.05
+    record["payload"]["validation_predictions"] = predictions
+    appended = outcome(record)
+    appended["payload"]["windows"][0].update(threshold=0.05, below_anchor_touch={"state": "known_true"})
+    report = evaluate_validation(from_string, [record], {"a": [appended]}, as_of=3 * DAY)
+    assert event(report)["counts"]["resolved"] == 1
+    assert event(report)["calibration"]["brier_score"] == pytest.approx(0.16)
+
+
+def test_duplicate_threshold_encodings_cannot_create_distinct_event_denominators():
+    config = declaration()
+    event = {"event": "below_anchor_touch", "convention": "fully_contained_hourly_bars_v1", "time_anchor": "issuance",
+             "horizon_days": 1, "threshold": "0.05"}
+    config["cohorts"][0]["events"] = [event, {**event, "threshold": 0.05}]
+    with pytest.raises(ValueError, match="Duplicate event"):
+        freeze_validation_protocol(config, frozen_at=0)
+
+
+def test_shared_request_wrapper_validates_fields_and_uses_same_readonly_path(tmp_path):
+    from crypto_market_analysis.prospective_validation import evaluate_validation_request
+
+    protocol = frozen()
+    store = Store(tmp_path / "missing.sqlite", initialize=False)
+    assert evaluate_validation_request(store, {"protocol": protocol}, 3 * DAY) == evaluate_stored_validation(
+        store, protocol, as_of=3 * DAY)
+    with pytest.raises(ValueError, match="paging/budget"):
+        evaluate_validation_request(store, {"protocol": protocol, "write": True}, 3 * DAY)
+    with pytest.raises(ValueError, match="requires the frozen protocol"):
+        evaluate_validation_request(store, {}, 3 * DAY)
+
+
+def test_stored_slim_plan_projection_preserves_full_paired_execution_scorecard(tmp_path):
+    from test_scorecards import appended
+    from test_scorecards import original as plan_original
+
+    protocol = frozen()
+    record = plan_original()
+    record["payload"]["validation_protocol_hash"] = protocol["protocol_hash"]
+    store = Store(tmp_path / "plan.sqlite")
+    journal = AssessmentJournal(store)
+    issued = journal.issue("plan", record["payload"], {"archive": "x" * (3 * 1024 * 1024)}, DAY)
+    observed = appended(issued, days=182, rise_after_first=True)
+    observed["payload"]["unused_archive"] = "y" * (3 * 1024 * 1024)
+    saved = journal.append_outcome(issued["assessment_id"], "observed", observed["payload"], observed["observed_at"])
+    expected = evaluate_validation(protocol, [issued], {issued["assessment_id"]: [saved]}, as_of=183 * DAY)
+    actual = evaluate_stored_validation(store, protocol, as_of=183 * DAY)
+    assert actual["cohorts"] == expected["cohorts"]
+    assert actual["cohorts"][0]["plan_cohorts"][0]["counts"]["180"]["sample_size"] == 1
+    wealth = actual["cohorts"][0]["plan_cohorts"][0]["metrics"]["180"]["deferred"]["terminal_wealth_difference"]
+    assert wealth["mean"] == "-100"
+
+
+def test_persisted_journal_indexes_keep_thousand_native_asset_cohorts_separate(tmp_path):
+    assets = tuple(f"ASSET{index}" for index in range(1000))
+    protocol = frozen(assets)
+    store = Store(tmp_path / "thousand.sqlite")
+    journal = AssessmentJournal(store)
+    for asset in assets:
+        journal.issue(asset, original(protocol, asset, asset=asset)["payload"], {}, DAY)
+    first = evaluate_stored_validation(store, protocol, as_of=3 * DAY, cohort_page=0)
+    last = evaluate_stored_validation(store, protocol, as_of=3 * DAY, cohort_page=99)
+    assert first["selection"]["projection_mode"] == last["selection"]["projection_mode"] == "persisted"
+    assert first["selection"]["selected_records"] == last["selection"]["selected_records"] == 10
+    assert last["selection"]["next_cohort_page"] is None
+    assert [row["identity"]["asset"] for row in first["cohorts"]] == list(assets[:10])
+    assert [row["identity"]["asset"] for row in last["cohorts"]] == list(assets[-10:])
+    assert all(row["assessment_count"] == 1 for row in first["cohorts"] + last["cohorts"])
