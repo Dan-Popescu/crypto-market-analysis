@@ -300,7 +300,7 @@ def evaluate_market_assessment(database, request, *, as_of):
         _identity(registry, declaration["series"], target["end"] - 1, as_of)
     except ValueError as exc:
         return {**result, "status": "excluded", "reason": str(exc)}
-    if any(assessment["anchor"]["end"] < action["effective_at"] <= target["end"] and action["kind"] == "split"
+    if any(assessment["anchor"]["end"] <= action["effective_at"] <= target["end"] and action["kind"] == "split"
            for action in series["actions"]):
         return {**result, "status": "excluded", "reason": "split crosses raw price-only outcome"}
     bars = [bar for bar in series["bars"] if (bar["start"], bar["end"]) == (target["start"], target["end"])

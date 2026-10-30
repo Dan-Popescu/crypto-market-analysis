@@ -133,6 +133,24 @@ def test_split_crossing_raw_price_window_excludes_score(setup):
     assert "split" in result["reason"]
 
 
+@pytest.mark.parametrize("boundary", ["anchor_end", "target_end"])
+def test_split_exactly_at_either_raw_price_boundary_excludes_score(setup, boundary):
+    database, bundle, request = setup
+    assessment = issue_market_assessment(database, request, issued_at=NOW)
+    action_bundle = copy.deepcopy(bundle)
+    effective_at = assessment["anchor"]["end"] if boundary == "anchor_end" else MONDAY_CLOSE
+    observed_at = NOW if boundary == "anchor_end" else MONDAY_CLOSE + 60
+    action_bundle["series"][0]["actions"] = [{"id": f"split:{boundary}", "kind": "split", "ratio": 2.0,
+                                              "effective_at": effective_at, "announced_at": NOW,
+                                              "observed_at": observed_at}]
+    CrossAssetStore(database, initialize=True).import_bundle(action_bundle, received_at=observed_at)
+    append_target(database, bundle, close=50)
+    result = evaluate_market_assessment(database, {"assessment_id": assessment["assessment_id"]}, as_of=MONDAY_CLOSE + 60)
+    assert result["status"] == "excluded"
+    assert result["brier_score"] is None
+    assert "split" in result["reason"]
+
+
 def test_issuance_is_idempotent_and_original_row_is_append_only(setup):
     database, _, request = setup
     assessment = issue_market_assessment(database, request, issued_at=NOW)
