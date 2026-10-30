@@ -214,6 +214,15 @@ def test_archive_corruption_is_rejected_even_if_journal_is_rehashed(issued, tmp_
         con.executescript("""CREATE TRIGGER assessment_journal_no_update BEFORE UPDATE ON assessment_journal
                             BEGIN SELECT RAISE(ABORT,'Immutable assessment'); END;""")
     destination = tmp_path / "backup"
+    # The new slim projection detects this changed identity before archive decoding.
+    with pytest.raises(ValueError, match="foreign key check failed"):
+        recovery.create_backup(engine.store.path, destination)
+    assert not destination.exists()
+    # Legacy journals have no derived projection: the original archive guard must
+    # still detect corruption even when the outer record is self-consistently rehashed.
+    with engine.store.connection() as con:
+        con.execute("DROP TABLE assessment_validation_outcomes")
+        con.execute("DROP TABLE assessment_validation_issues")
     with pytest.raises(ValueError, match="checksum or size mismatch"):
         recovery.create_backup(engine.store.path, destination)
     assert not destination.exists()

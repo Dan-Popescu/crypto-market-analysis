@@ -74,7 +74,7 @@ def test_cli_help_report_and_errors_are_english(tmp_path, capsys):
     from crypto_market_analysis.engine import render_brief
 
     help_text = parser().format_help()
-    assert "BTC/ETH analysis using free public data." in help_text
+    assert "Multi-asset analysis using bounded free public data." in help_text
     assert "English report or structured dossier for AI." in help_text
     engine = Engine(Settings(data_dir=tmp_path))
     report = render_brief(engine.bundle("BTC", as_of=1793145600))

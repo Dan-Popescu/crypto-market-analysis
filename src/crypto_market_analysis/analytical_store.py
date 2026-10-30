@@ -505,4 +505,16 @@ def analytical_fleet(settings, name, request):
     values = dict(request)
     if not {"assets", "start", "end", "as_of"} <= values.keys():
         raise ValueError("Analytical fleet requires assets, start, end and as_of.")
-    return open_analytical_snapshot(snapshot_path(settings, name)).fleet_summary(**values)
+    from .asset_universe import validate_assets
+
+    validate_assets(values["assets"])
+    if (any(type(values[key]) is not int for key in ("start", "end", "as_of"))
+            or not 0 <= values["start"] < values["end"] <= values["as_of"]
+            or values["start"] % 3600 or values["end"] % 3600):
+        raise ValueError("Fleet bounds must be aligned UTC hours satisfying start < end <= as_of.")
+    target = snapshot_path(settings, name)
+    if not target.exists():
+        return {"status": "missing", "read_only": True, "snapshot_name": name,
+                "assets": values["assets"], "selected_points": None, "series": [],
+                "reason": "Export an explicit immutable analytical snapshot before requesting fleet data."}
+    return open_analytical_snapshot(target).fleet_summary(**values)

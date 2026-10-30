@@ -45,7 +45,7 @@ def test_mixed_repair_outcomes_keep_accounting_run_links_and_unknown_totals_in_m
     async def check():
         server = create_server(Settings(data_dir=tmp_path), "import")
         tools = await server.list_tools()
-        assert len(tools) == 46 and all(tool.annotations.readOnlyHint for tool in tools)
+        assert len(tools) == 53 and all(tool.annotations.readOnlyHint for tool in tools)
         with dataset_writer_lock(ds.store.path):
             for name, arguments in (("get_http_accounting", {"task": "history_rest", "end": NOW}),
                                     ("get_auto_repair_status", {})):
