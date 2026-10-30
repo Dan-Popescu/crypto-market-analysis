@@ -74,10 +74,19 @@ def test_reference_readiness_reuses_exact_candles_for_windows(tmp_path, monkeypa
 def test_four_dense_800_day_readiness_fits_unchanged_limits(tmp_path):
     store = Store(tmp_path / "db.sqlite")
     markets = [selection(asset, quote) for asset in ("BTC", "ETH") for quote in ("EUR", "USD")]
-    store.put_candles([row for market in markets for row in history(800, market["asset"], market["quote"])])
-    result = build_analysis_readiness(store, {
+    # Precise prices and native volumes reproduce the large real-data envelope;
+    # integer-only candles materially understate the retained proof size.
+    store.put_candles([replace(row, open=100.12345678901234, high=102.12345678901234,
+                              low=98.12345678901234, close=101.12345678901234,
+                              volume=123.12345678901234, quote_volume=12345.123456789012,
+                              taker_buy_quote_volume=6789.1234567890123)
+                       for market in markets for row in history(800, market["asset"], market["quote"])])
+    request = {
         "dossier": {"data_mode": "import", "markets": markets},
-        "evidence_mode": "references", "qualification": {"required_history_days": 800}}, NOW)
+        "qualification": {"required_history_days": 800}}
+    with pytest.raises(ValueError, match="32 MiB"):
+        build_analysis_readiness(store, request, NOW)
+    result = build_analysis_readiness(store, {**request, "evidence_mode": "references"}, NOW)
     assert len(canonical_json(result).encode()) < MAX_RESULT_BYTES
     assert result["dossier"]["resource_limits"]["sqlite_vm_steps"] == 50_000_000
     assert result["dossier"]["resource_limits"]["sqlite_returned_bytes"] == 64 * 1024 * 1024

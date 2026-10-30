@@ -865,10 +865,10 @@ class Store:
         This does not scan payloads or open one connection per market.
         """
         assets = validate_assets(assets)
-        if (mode not in ("live", "demo", "import") or not isinstance(source, str) or not source
+        if (mode not in ("live", "demo", "import") or not isinstance(source, str) or not source or len(source) > 256
                 or not isinstance(quotes, list) or not 1 <= len(quotes) <= 16
-                or len(set(quotes)) != len(quotes)
-                or any(not isinstance(quote, str) or not quote or len(quote) > 120 for quote in quotes)):
+                or any(not isinstance(quote, str) or not quote or len(quote) > 120 for quote in quotes)
+                or len(set(quotes)) != len(quotes)):
             raise ValueError("Latest candle times require bounded native source, quote and mode selectors.")
         asset_slots, quote_slots = ",".join("?" for _ in assets), ",".join("?" for _ in quotes)
         with self.connection() as con:
