@@ -5,6 +5,7 @@ import math
 
 import pytest
 
+from crypto_market_analysis.cross_asset.contracts import build_continuous_series, value_futures_position
 from crypto_market_analysis.cross_asset.prices import actions_as_of, bars_as_of, validate_series
 from crypto_market_analysis.cross_asset.research import analyze_series, simulate_cash_plan
 from crypto_market_analysis.evidence import content_hash
@@ -303,3 +304,113 @@ def test_native_vintages_and_plan_events_are_bounded_before_expensive_work():
         validate_series({**document, "actions": [split()] * 1_001})
     with pytest.raises(ValueError, match="2000 entry limit"):
         simulate(document, plan(purchases=[{"at": 10, "cash_amount": 0}] * 2_001))
+
+
+def contract(expiry=100):
+    return {"expiry": expiry, "multiplier": 1000, "unit": "barrel", "settlement": "cash"}
+
+
+def futures_request(**changes):
+    return {
+        "currency": "USD", "quantity": 1, "entry_price": 10, "entry_at": 1,
+        "mark_price": -37.63, "mark_at": 20, "mark_observed_at": 21, "collateral": 10000,
+        "initial_margin_per_contract": 10000, "maintenance_margin_per_contract": 5000, "fees": 0,
+        **changes,
+    }
+
+
+def test_negative_futures_mark_uses_signed_multiplier_and_explicit_cash_margin():
+    result = value_futures_position(contract(), futures_request(), as_of=30, native_currency="USD")
+    assert result["entry_to_mark_pnl"] == pytest.approx(-47630)
+    assert result["collateral_equity"] == pytest.approx(-37630)
+    assert result["margin_status"] == "below_maintenance"
+    assert result["cash_top_up_to_initial"] == pytest.approx(47630)
+    assert result["executable"] is False
+    short = value_futures_position(contract(), futures_request(quantity=-1), as_of=30, native_currency="USD")
+    assert short["entry_to_mark_pnl"] == pytest.approx(47630)
+
+
+@pytest.mark.parametrize("changes,match", [
+    ({"currency": "EUR"}, "native listing"), ({"quantity": True}, "signed integer"),
+    ({"collateral": 9999}, "initial margin"), ({"mark_observed_at": 31}, "clocks"),
+    ({"entry_at": 25}, "clocks"), ({"maintenance_margin_per_contract": 11000}, "maintenance margin"),
+])
+def test_futures_margin_currency_and_clock_contracts(changes, match):
+    with pytest.raises(ValueError, match=match):
+        value_futures_position(contract(), futures_request(**changes), as_of=30, native_currency="USD")
+
+
+def test_futures_expiry_settlement_is_not_silently_spot_valuation():
+    with pytest.raises(ValueError, match="post-expiry"):
+        value_futures_position(contract(expiry=30), futures_request(), as_of=30, native_currency="USD")
+
+
+def continuous_request():
+    first = series((10, 11, 12))
+    second = series((20, 21, 22))
+    for identifier, source in (("future:one", first), ("future:two", second)):
+        source["descriptor"].update(id=f"series:{identifier}", instrument_id=identifier, unit="barrel")
+    descriptor = {**first["descriptor"], "id": "series:continuous", "instrument_id": "derived:continuous",
+                  "listing_id": None, "price_basis": "continuous"}
+    return {
+        "schema": "continuous-futures-request.v1", "descriptor": descriptor, "method": "unadjusted", "version": "v1",
+        "contracts": [
+            {"instrument_id": "future:one", "available_at": -20, "contract": contract(expiry=20), "series": first},
+            {"instrument_id": "future:two", "available_at": -10, "contract": contract(expiry=50), "series": second},
+        ],
+        "rolls": [
+            {"effective_at": 0, "known_at": -10, "instrument_id": "future:one", "reason": "initial sourced contract",
+             "source_url": "https://example.test/chain"},
+            {"effective_at": 20, "known_at": 15, "instrument_id": "future:two", "reason": "declared pre-expiry roll",
+             "source_url": "https://example.test/chain"},
+        ],
+    }
+
+
+def test_continuous_futures_retains_separate_identity_chain_and_unadjusted_roll_gap():
+    result = build_continuous_series(continuous_request(), as_of=30)
+    assert [bar["close"] for bar in result["series"]["bars"]] == [10, 11, 22]
+    assert [row["instrument_id"] for row in result["derivation"]["source_bars"]] == ["future:one", "future:one", "future:two"]
+    assert result["series"]["descriptor"]["instrument_id"] == "derived:continuous"
+    assert result["executable"] is False
+    with pytest.raises(ValueError, match="identity|raw traded"):
+        simulate(result["series"])
+
+
+def test_continuous_roll_cannot_use_future_chain_or_later_known_decision():
+    request = continuous_request()
+    request["contracts"][1]["available_at"] = 16
+    with pytest.raises(ValueError, match="chain information"):
+        build_continuous_series(request, as_of=30)
+    request = continuous_request()
+    request["rolls"][1]["known_at"] = 21
+    # At cutoff 20 the unreceived decision is unavailable, and cannot replace the chain.
+    earlier = build_continuous_series(request, as_of=20)
+    assert len(earlier["derivation"]["rolls"]) == 1
+    with pytest.raises(ValueError, match="chain information"):
+        build_continuous_series(request, as_of=30)
+
+
+def test_continuous_roll_inside_bar_and_expired_source_are_explicitly_unsupported():
+    request = continuous_request()
+    request["rolls"][1]["effective_at"] = 19
+    with pytest.raises(ValueError, match="inside a native"):
+        build_continuous_series(request, as_of=30)
+    request = continuous_request()
+    request["rolls"] = request["rolls"][:1]
+    with pytest.raises(ValueError, match="beyond contract expiry"):
+        build_continuous_series(request, as_of=30)
+
+
+def test_derived_series_preserves_actual_receipt_gate_and_weakest_evidence():
+    request = continuous_request()
+    request["contracts"][0]["series"] = with_receipts(request["contracts"][0]["series"], received_at=25)
+    result = build_continuous_series(request, as_of=30)
+    assert len(bars_as_of(result["series"], 20)) == 0
+    request["contracts"][0]["series"] = with_receipts(series(), witnessed=False)
+    # Restore source instrument/unit identity after making a new synthetic source.
+    source = request["contracts"][0]["series"]
+    source["descriptor"].update(id="series:future:one", instrument_id="future:one", unit="barrel")
+    source["storage_provenance"]["descriptor_hash"] = content_hash(source["descriptor"])
+    result = build_continuous_series(request, as_of=30)
+    assert result["series"]["descriptor"]["revision_semantics"] == "captured_history"
