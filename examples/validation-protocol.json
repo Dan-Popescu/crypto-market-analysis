@@ -1,0 +1,69 @@
+{
+  "name": "Example only: prospective Kraken BTC/EUR protocol for 2027",
+  "mode": "prospective",
+  "starts_at": 1798761600,
+  "ends_at": 1830297600,
+  "criterion": {
+    "minimum_resolved_nonoverlapping": 30,
+    "maximum_missing_fraction": "0.1"
+  },
+  "baseline": {
+    "family": "regular",
+    "reserve_yield": "0",
+    "rule_version": "accumulation-v2",
+    "fees": {
+      "rate": "0",
+      "fixed": "0",
+      "asset": "quote"
+    },
+    "execution": {
+      "timeframe": "1d",
+      "max_price_age_seconds": 86400,
+      "spread_bps": "0",
+      "slippage_bps": "0",
+      "quantity_step": "0.00000001",
+      "price_step": "0.00000001",
+      "assumption": "historical_configured_costs"
+    }
+  },
+  "cohorts": [
+    {
+      "cohort_id": "kraken-BTC-EUR-live",
+      "source": "kraken",
+      "asset": "BTC",
+      "quote": "EUR",
+      "data_mode": "live",
+      "dataset_lineage": null,
+      "model_version": "purchase_windows_v1",
+      "rule_version": "issuance_hourly_v1",
+      "rules": {
+        "context": 1,
+        "purchase_windows": 1,
+        "outcome_protocol": 1
+      },
+      "events": [
+        {
+          "event": "endpoint_below_anchor",
+          "convention": "exact_deadline_v1",
+          "time_anchor": "issuance",
+          "horizon_days": 1,
+          "threshold": null
+        },
+        {
+          "event": "below_anchor_touch",
+          "convention": "fully_contained_hourly_bars_v1",
+          "time_anchor": "issuance",
+          "horizon_days": 90,
+          "threshold": 0.05
+        },
+        {
+          "event": "observable_endpoint",
+          "convention": "hourly_after_deadline_v1",
+          "time_anchor": "issuance",
+          "horizon_days": 180,
+          "threshold": null
+        }
+      ]
+    }
+  ]
+}
