@@ -216,3 +216,26 @@ def test_receipt_provenance_reaches_research_and_prevents_earlier_historical_fil
     assert result["series"]["storage_provenance"] == result["storage_provenance"]
     plan = application.market_plan(store, plan_request(), as_of=100000)
     assert plan["status"] == "invalid_request", plan
+
+
+def test_point_publication_reference_includes_final_event_and_stays_nonexecutable():
+    document = bundle()
+    instrument = document["registry"]["instruments"][0]
+    instrument.update(asset_class="commodity", form="reference")
+    document["registry"]["listings"] = []
+    document["registry"]["aliases"][0]["listing_id"] = None
+    document["series"][0]["descriptor"].update(listing_id=None, interval="reference", unit="troy ounce")
+    for session, bar in zip(document["calendars"][0]["sessions"], document["series"][0]["bars"], strict=True):
+        session["publication_at"] = bar["end"]
+        session["segments"] = []
+        bar["start"] = bar["end"]
+    assert len(application.validate_bundle(document)["series"][0]["bars"]) == 2
+    store = MemoryStore(document)
+    analysis = application.market_analysis(store, request(), as_of=100000)
+    assert analysis["status"] == "ok", analysis
+    assert analysis["analysis"]["bar_count"] == 2
+    assert analysis["coverage"]["counts"]["observed"] == 2
+    assert application.market_plan(store, plan_request(), as_of=100000)["status"] == "unsupported"
+    # A single point also needs a nonempty half-open grid lookup window.
+    document["series"][0]["bars"].pop()
+    assert len(application.validate_bundle(document)["series"][0]["bars"]) == 1

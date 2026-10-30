@@ -179,7 +179,11 @@ def validate_bundle(bundle: dict) -> dict:
             raise ValueError("Series instrument is absent from the registry.")
         if not series["bars"]:
             raise ValueError("Imported series requires at least one observation to resolve its identity.")
-        bounds = (min(bar["start"] for bar in series["bars"]), max(bar["end"] for bar in series["bars"]))
+        grid_end = max(bar["end"] for bar in series["bars"])
+        if descriptor["interval"] == "reference" and any(bar["start"] == bar["end"] == grid_end for bar in series["bars"]):
+            # Publication events are points on a half-open calendar query grid.
+            grid_end += 1
+        bounds = (min(bar["start"] for bar in series["bars"]), grid_end)
         grid_key = (descriptor["calendar_id"], descriptor["calendar_version"], descriptor["interval"], *bounds)
         if grid_key not in grids:
             grid = sessions.expected_observations(calendar, start=bounds[0], end=bounds[1],
