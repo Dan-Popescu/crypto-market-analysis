@@ -303,3 +303,10 @@ def test_native_vintages_and_plan_events_are_bounded_before_expensive_work():
         validate_series({**document, "actions": [split()] * 1_001})
     with pytest.raises(ValueError, match="2000 entry limit"):
         simulate(document, plan(purchases=[{"at": 10, "cash_amount": 0}] * 2_001))
+
+
+def test_purchase_exactly_on_split_effective_boundary_requires_post_split_basis():
+    document = series((100, 50, 50))
+    document["actions"] = [split(at=10, observed=9)]
+    with pytest.raises(ValueError, match="post-split price basis"):
+        simulate(document)
