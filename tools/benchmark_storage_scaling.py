@@ -1,7 +1,7 @@
 """Measure real SQLite and DuckDB engines on bounded synthetic candle vintages.
 
-This bypasses the product's BTC/ETH admission solely to measure storage capacity.
-It does not establish asset support, HTTP capacity or production throughput. Each
+Synthetic symbols bypass collectors and market admission to measure storage.
+This does not establish venue support, HTTP capacity or production throughput. Each
 asset scale runs in a fresh subprocess; Parquet retains every received version.
 """
 
@@ -258,7 +258,7 @@ def main():
     except (OSError, subprocess.TimeoutExpired) as exc:
         postgres = {"status": "unavailable", "reason": str(exc)}
     report = {"schema": "observer-storage-scaling-v1", "synthetic": True,
-              "scope": "Real local engines; storage capacity only, beyond product BTC/ETH admission. No HTTP, concurrency, cold-cache or production throughput claim.",
+              "scope": "Real local engines; synthetic storage capacity with collectors and market admission bypassed. No venue-support, HTTP, concurrency, cold-cache or production throughput claim.",
               "measurement": "Fresh subprocess per scale; engine order SQLite then DuckDB; timings include decoding; peak RSS covers both engines and export.",
               "postgresql": {"status": "measured", "container": args.postgres_container} if args.postgres_container else postgres,
               "results": results}
