@@ -287,10 +287,13 @@ def collect_exchange(
             client = clients.client(venue)
             instrument_exchange(client, venue)
             markets = clients.markets(venue, client)
-            if markets:
+            project = getattr(clients, "markets_for_assets", None)
+            if markets and callable(project):
+                # Pool wrappers may expose only client/markets/venue locks.
+                # Catalogue projection is optional on that existing protocol.
                 # A nonempty catalogue with no requested base is an unsupported
                 # pair, not an outage; retain a sentinel for the empty projection.
-                markets = clients.markets_for_assets(venue, assets, markets) or {"_unsupported": {}}
+                markets = project(venue, assets, markets) or {"_unsupported": {}}
         except Exception as exc:
             return CollectionResult(venue, errors=[f"{venue} client/catalogue: {public_error(exc)}"])
         return _collect_exchange(
