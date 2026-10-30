@@ -16,17 +16,19 @@ from typing import Literal
 from pydantic import StrictInt
 
 from .reporting import bounded_as_of
-from .storage import _LOCAL_RECORD_VERSION_ORDER
+from .storage import LOCAL_RECORD_VERSION_ORDER
 from .storage import database_table_names as _tables
 from .storage import read_database_if_present as _read
 
 
-def _source(source):
+def validate_source_identifier(source):
+    """Validate an optional bounded source/task identifier for operational reads."""
     if source is not None and (not isinstance(source, str) or not 1 <= len(source) <= 100):
         raise ValueError("source must contain 1–100 characters.")
 
 
-def _page(con, table, selection, as_of, limit, cursor):
+def read_page_state(con, table, selection, as_of, limit, cursor):
+    """Freeze a bounded page selection, receipt cutoff and insertion high-water."""
     if type(limit) is not int or not 1 <= limit <= 100:
         raise ValueError("limit must be an integer from 1 to 100.")
     scope = hashlib.sha256(json.dumps(selection, sort_keys=True).encode()).hexdigest()
@@ -48,7 +50,8 @@ def _page(con, table, selection, as_of, limit, cursor):
     return state
 
 
-def _result(state, rows, limit, selection):
+def read_page_result(state, rows, limit, selection):
+    """Project at most ``limit`` rows and a selection-bound continuation cursor."""
     more = len(rows) > limit
     rows = rows[:limit]
     next_state = {**state, "offset": state["offset"] + len(rows)}
@@ -56,6 +59,12 @@ def _result(state, rows, limit, selection):
     return {"as_of": state["as_of"], "selection": selection, "rows": rows,
             "pagination": {"limit": limit, "returned": len(rows), "next_cursor": cursor,
                            "high_water_rowid": state["high"]}, "read_only": True}
+
+
+# Existing local call sites retain their names; cross-module callers use the public seam.
+_source = validate_source_identifier
+_page = read_page_state
+_result = read_page_result
 
 
 def dataset_status(database, mode, *, section="summary", source=None, as_of=None, limit=20, cursor=None):
@@ -187,7 +196,7 @@ def upcoming_calendar_snapshot(con, mode, *, source=None, as_of=None, start=None
         # Rank every known revision before source/range/status filtering so a
         # moved or cancelled event cannot resurrect an earlier version.
         sql = f"""WITH versions AS (SELECT id,payload,ROW_NUMBER() OVER(PARTITION BY identity
-            ORDER BY {_LOCAL_RECORD_VERSION_ORDER}) rn FROM local_records
+            ORDER BY {LOCAL_RECORD_VERSION_ORDER}) rn FROM local_records
             WHERE kind='calendar' AND observed_at<=? AND id<=?), latest AS
             (SELECT id,payload FROM versions WHERE rn=1)
             SELECT payload FROM latest WHERE (? IS NULL OR json_extract(payload,'$.source')=?)

@@ -11,12 +11,13 @@ import sqlite3
 import time
 from functools import wraps
 
-from .operational_reads import _page, _result, _source
+from .operational_reads import read_page_result, read_page_state, validate_source_identifier
 from .reporting import bounded_as_of
 from .storage import database_table_names, read_database_if_present
 
 
-def _bounded_read_report(function):
+def bounded_database_report(function):
+    """Turn interrupted/unavailable SQLite report reads into explicit unknown evidence."""
     @wraps(function)
     def bounded(*args, **kwargs):
         try:
@@ -28,10 +29,13 @@ def _bounded_read_report(function):
     return bounded
 
 
-def _limit_read(con):
+def limit_database_read(con, *, query_seconds=5):
     """Bound aggregate scans even when retention has left a very large store."""
-    deadline = time.monotonic() + 5
+    if type(query_seconds) not in (int, float) or not math.isfinite(query_seconds) or not 0 < query_seconds <= 5:
+        raise ValueError("query_seconds must be finite, positive and at most five seconds.")
+    deadline = time.monotonic() + query_seconds
     if con is not None:
+        con.execute(f"PRAGMA busy_timeout={max(1, int(query_seconds * 1000))}")
         con.set_progress_handler(lambda: int(time.monotonic() >= deadline), 10_000)
 
 
@@ -49,7 +53,7 @@ def _prices(prices):
     return dict(prices)
 
 
-@_bounded_read_report
+@bounded_database_report
 def operating_cost_report(database, mode="live", *, source=None, task=None, start=None,
                           as_of=None, limit=20, cursor=None, prices=None):
     """Aggregate all matching retained runs, returning at most 100 groups per page.
@@ -58,8 +62,8 @@ def operating_cost_report(database, mode="live", *, source=None, task=None, star
     cutoff; retention may still remove rows. Missing stores remain missing.
     CPU, RSS, resource prices and actual invoices are unavailable in run payloads.
     """
-    _source(source)
-    _source(task)
+    validate_source_identifier(source)
+    validate_source_identifier(task)
     if mode not in ("live", "demo", "import", "unknown", "all"):
         raise ValueError("Select live, demo, import, unknown or all mode.")
     if start is not None:
@@ -68,9 +72,9 @@ def operating_cost_report(database, mode="live", *, source=None, task=None, star
     selection = {"kind": "operating_cost", "mode": mode, "source": source, "task": task,
                  "start": start, "prices": prices}
     with read_database_if_present(database) as con:
-        _limit_read(con)
+        limit_database_read(con)
         available = "runs" in database_table_names(con)
-        state = _page(con if available else None, "runs", selection, as_of, limit, cursor)
+        state = read_page_state(con if available else None, "runs", selection, as_of, limit, cursor)
         if start is not None and start > state["as_of"]:
             raise ValueError("start must be <= as_of.")
         rows = []
@@ -120,7 +124,7 @@ def operating_cost_report(database, mode="live", *, source=None, task=None, star
                     if "per_gib_decoded_bytes" in prices and row["decoded_body_bytes"] is not None:
                         estimate["decoded_body_cost"] = row["decoded_body_bytes"] / 1024**3 * prices["per_gib_decoded_bytes"]
                 row["estimated_network_cost"] = estimate
-        return {**_result(state, rows, limit, selection),
+        return {**read_page_result(state, rows, limit, selection),
                 "status": "available" if available else "database_unavailable",
                 "generated_at": int(time.time()), "actual_bill": None, "estimated_resource_cost": None,
                 "cpu_seconds": None, "peak_rss_bytes": None,

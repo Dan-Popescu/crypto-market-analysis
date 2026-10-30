@@ -11,31 +11,35 @@ import json
 import math
 import os
 import re
+import sqlite3
 import time
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import asdict, replace
+from importlib.metadata import version
+from pathlib import Path
 from threading import Event
 
+from . import __version__
 from .collectors import ExchangeClients
-from .cost_report import _bounded_read_report, _limit_read, operating_cost_report
+from .cost_report import bounded_database_report, limit_database_read, operating_cost_report
 from .http_accounting import public_error
 from .http_limits import HTTPPolicy, http_budget_scope
-from .operational_reads import _page, _result, _source
+from .operational_reads import read_page_result, read_page_state, validate_source_identifier
 from .pipeline import collect
 from .storage import Store, database_table_names, read_database_if_present
 from .storage_policy import physical_storage
 
 
-@_bounded_read_report
+@bounded_database_report
 def operating_health(database, mode="live", *, source=None, as_of=None, limit=20, cursor=None,
                      required_history_hours=24, freshness_seconds=10800, max_gap_hours=0,
-                     max_query_rows=250_000):
+                     max_query_rows=250_000, query_seconds=5):
     """Return bounded known-at hourly coverage per stored native source/market.
 
     Missing configured markets cannot appear here; the acceptance runner emits
     explicit unknown rows for its configured markets. No record body is loaded.
     """
-    _source(source)
+    validate_source_identifier(source)
     if mode not in ("live", "import", "demo"):
         raise ValueError("Select live, import or demo mode.")
     for name, value, low, high in (("required_history_hours", required_history_hours, 1, 8760),
@@ -47,9 +51,9 @@ def operating_health(database, mode="live", *, source=None, as_of=None, limit=20
                  "required_history_hours": required_history_hours, "freshness_seconds": freshness_seconds,
                  "max_gap_hours": max_gap_hours, "max_query_rows": max_query_rows}
     with read_database_if_present(database) as con:
-        _limit_read(con)
+        limit_database_read(con, query_seconds=query_seconds)
         available = "candles" in database_table_names(con)
-        state = _page(con if available else None, "candles", selection, as_of, limit, cursor)
+        state = read_page_state(con if available else None, "candles", selection, as_of, limit, cursor)
         end = state["as_of"] // 3600 * 3600
         start = max(0, end - required_history_hours * 3600)
         rows = []
@@ -87,9 +91,9 @@ def operating_health(database, mode="live", *, source=None, as_of=None, limit=20
                                   "status": "unknown" if age is None else "fresh" if age <= freshness_seconds else "stale"},
                     "availability": {"latest_receipt": receipt, "max_receipt_lag_seconds": lag},
                     "first_closed_hour_open": first})
-        return {**_result(state, rows, limit, selection), "status": "available" if available else "database_unavailable",
+        return {**read_page_result(state, rows, limit, selection), "status": "available" if available else "database_unavailable",
                 "required_range": {"start": start, "end": end},
-                "query_budget": {"sqlite_seconds": 5, "progress_check_vm_instructions": 10000,
+                "query_budget": {"sqlite_seconds": query_seconds, "progress_check_vm_instructions": 10000,
                                  "max_versions_per_market": max_query_rows, "market_page_limit": 100},
                 "knowledge_basis": "observed_at <= cutoff; latest received version per native hourly record",
                 "missing_market_basis": "Unlisted markets are unknown, not unsupported or covered."}
@@ -181,13 +185,17 @@ def _usage():
         return {"cpu_seconds": None, "peak_rss_bytes": None}
 
 
-def _cycle_health(settings, request, as_of):
+def _cycle_health(settings, request, as_of, *, deadline):
     rows, cursor = [], None
-    inspection_deadline = time.monotonic() + 5
+    inspection_deadline = min(time.monotonic() + 5, deadline)
     inspection_limited = False
     # Explicit upper bound: 1000 assets x 16 venues x 4 quotes, returned by page.
     for _ in range(640):
-        report = operating_health(settings.database, as_of=as_of, limit=100, cursor=cursor,
+        remaining = inspection_deadline - time.monotonic()
+        if remaining <= 0:
+            inspection_limited = True
+            break
+        report = operating_health(settings.database, as_of=as_of, limit=100, cursor=cursor, query_seconds=remaining,
             **{k: request[k] for k in ("required_history_hours", "freshness_seconds", "max_gap_hours")})
         if "pagination" not in report:
             return {"as_of": as_of, "status": "unknown", "markets": [], "reason": report["status"]}
@@ -209,11 +217,25 @@ def _cycle_health(settings, request, as_of):
             "provider_support": "Coverage never establishes capability, rights or purchase eligibility."}
 
 
-def _row_counts(database):
-    with read_database_if_present(database) as con:
-        tables = database_table_names(con)
-        return {table: con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                for table in ("candles", "observations", "runs") if table in tables}
+def _row_counts(database, *, query_seconds=5):
+    """Count one optional read snapshot; interruption keeps every count unknown."""
+    unknown = {table: None for table in ("candles", "observations", "runs")}
+    if query_seconds <= 0:
+        return unknown
+    try:
+        with read_database_if_present(database) as con:
+            limit_database_read(con, query_seconds=min(5, query_seconds))
+            tables = database_table_names(con)
+            return {table: con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                    if table in tables else None for table in unknown}
+    except sqlite3.DatabaseError:
+        return unknown
+
+
+def operating_acceptance_exit_code(report):
+    """Project capture outcome independently of how many cycles completed."""
+    status = (report.get("last_cycle") or {}).get("status", report.get("status"))
+    return int(status in {"error", "partial", "budget_exhausted", "blocked"})
 
 
 def run_operating_acceptance(settings, request, *, clients=None, stop=None):
@@ -248,8 +270,20 @@ def _run(settings, request, clients, directory, manifest_path, stop, injected):
     identity = {k: v for k, v in request.items() if k not in ("refresh", "max_cycles", "max_duration_seconds")}
     identity.update(assets=settings.assets, venues=settings.venues, quote_currencies=settings.quote_currencies,
                     injected_clients=injected)
-    fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    settings_snapshot = asdict(settings)
+    settings_snapshot["data_dir"] = str(settings.data_dir.expanduser().resolve())
+    source_directory = Path(__file__).parent
+    workload_modules = ("operating_acceptance", "pipeline", "collectors", "providers", "config",
+                        "asset_universe", "storage", "http_limits", "http_accounting")
+    identity.update(settings=settings_snapshot, software={
+        "application_version": __version__, "ccxt_version": version("ccxt"),
+        "httpx_version": version("httpx"), "requests_version": version("requests"),
+        "source_sha256": {name: hashlib.sha256((source_directory / f"{name}.py").read_bytes()).hexdigest()
+                          for name in workload_modules},
+    })
+    fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True, allow_nan=False).encode()).hexdigest()
     started = time.monotonic()
+    invocation_deadline = started + request["max_duration_seconds"]
     with _session_lock(directory):
         manifest = (_read_json(manifest_path) if manifest_path.is_file() else
                     {"schema_version": 1, "session_id": request["session_id"], "first_started_at": time.time(),
@@ -261,7 +295,7 @@ def _run(settings, request, clients, directory, manifest_path, stop, injected):
         completed = 0
         last = None
         while completed < request["max_cycles"] and not stop.is_set():
-            remaining = request["max_duration_seconds"] - (time.monotonic()-started)
+            remaining = invocation_deadline - time.monotonic()
             if remaining <= 0:
                 break
             delay = max(0, manifest["next_due"] - time.time())
@@ -269,6 +303,7 @@ def _run(settings, request, clients, directory, manifest_path, stop, injected):
                 stop.wait(min(delay, remaining, 30))
                 continue
             now = time.time()
+            cycle_start = time.monotonic()
             manifest["attempted_cycles"] += 1
             sequence = manifest["attempted_cycles"]
             manifest["next_due"] = now + request["interval_seconds"]
@@ -276,24 +311,29 @@ def _run(settings, request, clients, directory, manifest_path, stop, injected):
             _write(path, {"status": "interrupted_or_in_progress", "started_at": now, "sequence": sequence})
             _write(manifest_path, manifest)
             before, usage = physical_storage(settings.database), _usage()
-            before_rows = _row_counts(settings.database)
-            cycle_start = time.monotonic()
-            scoped = replace(settings, http_max_requests=request["cycle_http_requests"],
-                http_deadline_seconds=min(request["cycle_deadline_seconds"], remaining))
-            try:
-                with http_budget_scope(HTTPPolicy.from_settings(scoped)):
-                    collection = collect(scoped, store, tasks=tuple(request["tasks"]), clients=clients)
-            except Exception as exc:
-                collection = {"status": "error", "reports": [], "errors": [public_error(exc, include_message=False)]}
+            before_rows = _row_counts(settings.database, query_seconds=invocation_deadline-time.monotonic())
+            capture_start = time.monotonic()
+            remaining = invocation_deadline - time.monotonic()
+            if remaining <= 0:
+                collection = {"status": "budget_exhausted", "reports": [],
+                              "http_limits": {"exceeded": "invocation_deadline", "used_requests": 0}}
+            else:
+                scoped = replace(settings, http_max_requests=request["cycle_http_requests"],
+                    http_deadline_seconds=min(request["cycle_deadline_seconds"], remaining))
+                try:
+                    with http_budget_scope(HTTPPolicy.from_settings(scoped)):
+                        collection = collect(scoped, store, tasks=tuple(request["tasks"]), clients=clients)
+                except Exception as exc:
+                    collection = {"status": "error", "reports": [], "errors": [public_error(exc, include_message=False)]}
             known_at = int(time.time())
-            capture_elapsed = time.monotonic() - cycle_start
+            capture_elapsed = time.monotonic() - capture_start
             try:
-                quality = _cycle_health(settings, request, known_at)
+                quality = _cycle_health(settings, request, known_at, deadline=invocation_deadline)
             except (ValueError, OSError) as exc:
                 quality = {"as_of": known_at, "status": "unknown", "error": public_error(exc, include_message=False)}
+            after_rows = _row_counts(settings.database, query_seconds=invocation_deadline-time.monotonic())
             elapsed = time.monotonic() - cycle_start
             after_usage = _usage()
-            after_rows = _row_counts(settings.database)
             observed_http = [r.get("http_accounting") or {} for r in collection.get("reports", [])]
             observed_response = any((m.get("totals") or {}).get("responses", 0) > 0 for m in observed_http)
             cycle_status = ("budget_exhausted" if collection.get("http_limits", {}).get("exceeded")
@@ -307,7 +347,9 @@ def _run(settings, request, clients, directory, manifest_path, stop, injected):
                 "quality": quality,
                 "resources": {"before": before, "after": physical_storage(settings.database),
                     "rows_before": before_rows, "rows_after": after_rows,
-                    "row_growth": {k: v-before_rows.get(k, 0) for k, v in after_rows.items()},
+                    "row_growth": {k: v-before_rows[k] if v is not None and before_rows[k] is not None
+                                   else None for k, v in after_rows.items()},
+                    "row_count_basis": "single read-only snapshot per before/after sample; five-second ceiling and remaining invocation budget; unavailable counts remain null",
                     "cpu_seconds": (after_usage["cpu_seconds"]-usage["cpu_seconds"]
                         if usage["cpu_seconds"] is not None else None),
                     "process_peak_rss_bytes": after_usage["peak_rss_bytes"],
@@ -322,8 +364,10 @@ def _run(settings, request, clients, directory, manifest_path, stop, injected):
             _write(manifest_path, manifest)
         return {"kind": "operating_acceptance", "status": "completed" if completed else "no_cycle_due",
                 "network_requested": completed > 0, "completed_this_invocation": completed,
+                "invocation_elapsed_seconds": time.monotonic()-started,
+                "max_duration_seconds": request["max_duration_seconds"],
                 "manifest": manifest, "last_cycle": last,
                 "report_directory": str(directory),
                 "duration_basis": "actual UTC wall span includes downtime; measured active seconds exclude downtime",
                 "qualification": "prospective_evidence_only; no multiweek acceptance before actual elapsed observation",
-                "limits_basis": "finite cycles and invocation duration; cooperative shared per-cycle HTTP deadline, not process termination"}
+                "limits_basis": "finite cycles; remaining monotonic invocation budget caps each HTTP/SQLite scope; cooperative transport and VM deadlines, not process termination"}

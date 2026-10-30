@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
+from types import SimpleNamespace
 
 import ccxt
 import pytest
@@ -15,6 +16,7 @@ from crypto_market_analysis.config import Settings
 from crypto_market_analysis.cost_report import operating_cost_report
 from crypto_market_analysis.models import Candle, CollectionResult
 from crypto_market_analysis.operating_acceptance import (
+    operating_acceptance_exit_code,
     operating_health,
     run_operating_acceptance,
 )
@@ -176,3 +178,104 @@ def test_invalid_requests_do_not_initialize(tmp_path, value):
     with pytest.raises(ValueError):
         run_operating_acceptance(settings, value)
     assert not settings.data_dir.exists()
+
+
+@pytest.mark.parametrize("changes", [
+    {"liquidity_assets": ["BTC"]}, {"liquidity_venues": []}, {"history_days": 90}, {"max_pages": 2},
+    {"options": True}, {"context": True}, {"workers": 4}, {"collection_batch_size": 11},
+    {"collection_work_limit": 100}, {"http_max_requests": 999}, {"http_deadline_seconds": 90},
+    {"market_interval": 7200}, {"liquidity_interval": 600}, {"storage_run_keep_days": 10},
+])
+def test_session_fingerprint_freezes_complete_workload_settings(tmp_path, monkeypatch, changes):
+    from crypto_market_analysis import operating_acceptance as operation
+
+    settings = settings_for(tmp_path)
+    calls = []
+    def collect(scoped, *_args, **_kwargs):
+        calls.append(scoped)
+        return {"status": "ok", "reports": []}
+    monkeypatch.setattr(operation, "collect", collect)
+    first = run_operating_acceptance(settings, {"refresh": True}, clients=object())
+    manifest = first["manifest"]
+    assert manifest["selection"]["settings"]["max_pages"] == settings.max_pages
+    assert manifest["selection"]["software"]["source_sha256"]["pipeline"]
+    with pytest.raises(ValueError, match="selection changed"):
+        run_operating_acceptance(replace(settings, **changes), {"refresh": True}, clients=object())
+    assert len(calls) == 1
+    persisted = json.loads((settings.data_dir/"operating_acceptance/default/manifest.json").read_text())
+    assert persisted["completed_cycles"] == 1
+    assert persisted["request_sha256"] == manifest["request_sha256"]
+
+
+def test_row_counts_are_snapshot_bounded_and_unknown_after_sql_interruption(tmp_path, monkeypatch):
+    from crypto_market_analysis import operating_acceptance as operation
+
+    missing = tmp_path / "missing/observer.sqlite"
+    assert operation._row_counts(missing) == {"candles": None, "observations": None, "runs": None}
+    assert not missing.parent.exists()
+    store = Store(tmp_path/"observer.sqlite")
+    real_limit = operation.limit_database_read
+    def interrupt(con, *, query_seconds):
+        assert con.in_transaction
+        real_limit(con, query_seconds=query_seconds)
+        con.set_progress_handler(lambda: 1, 1)
+    monkeypatch.setattr(operation, "limit_database_read", interrupt)
+    assert operation._row_counts(store.path) == {"candles": None, "observations": None, "runs": None}
+
+
+def test_setup_read_time_reduces_http_allowance_and_exhausted_reads_stay_unknown(tmp_path, monkeypatch):
+    from crypto_market_analysis import operating_acceptance as operation
+
+    clock = [1000.0]
+    monkeypatch.setattr(operation, "time", SimpleNamespace(monotonic=lambda: clock[0], time=time.time))
+    budgets, deadlines = [], []
+    def counts(_database, *, query_seconds):
+        budgets.append(query_seconds)
+        if query_seconds <= 0:
+            return {"candles": None, "observations": None, "runs": None}
+        clock[0] += 0.9
+        return {"candles": 0, "observations": 0, "runs": 0}
+    def collect(scoped, *_args, **_kwargs):
+        deadlines.append(scoped.http_deadline_seconds)
+        assert 0 < scoped.http_deadline_seconds <= 0.101
+        return {"status": "ok", "reports": []}
+    def health(_settings, _request, _as_of, *, deadline):
+        assert deadline == 1001
+        clock[0] = deadline
+        return {"status": "unknown", "reason": "inspection_budget_exhausted"}
+    monkeypatch.setattr(operation, "_row_counts", counts)
+    monkeypatch.setattr(operation, "collect", collect)
+    monkeypatch.setattr(operation, "_cycle_health", health)
+    result = run_operating_acceptance(settings_for(tmp_path), {"refresh": True, "max_duration_seconds": 1}, clients=object())
+    assert len(deadlines) == 1
+    assert budgets[-1] <= 0
+    assert all(value is None for value in result["last_cycle"]["resources"]["row_growth"].values())
+    assert result["invocation_elapsed_seconds"] == 1
+    assert result["last_cycle"]["elapsed_seconds"] == 1
+
+
+def test_restart_keeps_durable_cooldown_within_finite_invocation(tmp_path, monkeypatch):
+    from crypto_market_analysis import operating_acceptance as operation
+
+    calls = []
+    def collect(*_args, **_kwargs):
+        calls.append(True)
+        return {"status": "ok", "reports": []}
+    monkeypatch.setattr(operation, "collect", collect)
+    settings = settings_for(tmp_path)
+    first = run_operating_acceptance(settings, {"refresh": True}, clients=object())
+    next_due = first["manifest"]["next_due"]
+    second = run_operating_acceptance(settings, {"refresh": True, "max_duration_seconds": 1}, clients=object())
+    assert second["status"] == "no_cycle_due"
+    assert second["completed_this_invocation"] == 0
+    assert second["manifest"]["next_due"] == next_due
+    assert second["manifest"]["completed_cycles"] == 1
+    assert 0.9 <= second["invocation_elapsed_seconds"] < 2
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(("status", "code"), [("budget_exhausted", 1), ("error", 1), ("partial", 1),
+    ("blocked", 1), ("ok", 0)])
+def test_completed_cycle_count_does_not_mask_failed_capture_exit_status(status, code):
+    assert operating_acceptance_exit_code({"status": "completed", "completed_this_invocation": 1,
+                                          "last_cycle": {"status": status}}) == code
