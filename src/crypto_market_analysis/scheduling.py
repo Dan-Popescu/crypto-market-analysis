@@ -79,14 +79,18 @@ class Schedule:
                 return
             errors = report.get("errors", [])
             failures = (previous["failures"] if previous else 0) + 1 if errors else 0
-            last_success = (max(previous["last_success"], report.get("last_success", 0)) if previous else report.get("last_success", 0))
-            last_success = last_success if errors else completed
+            pending_work = "pending_collection_work" in report.get("warnings", [])
+            reported_success = 0 if pending_work else report.get("last_success", 0)
+            last_success = max(previous["last_success"] if previous else 0, reported_success)
+            last_success = last_success if errors or pending_work else completed
             kind, delay = "cadence", self.intervals[task]
             if errors:
                 transient = any(_TRANSIENT.search(error) for error in errors)
                 kind = "transient" if transient else "permanent_or_unknown"
                 delay = min(60 * 2 ** min(failures - 1, 9), 21600) if transient else max(delay, 21600)
             deadlines = [float(value) for error in errors for value in _DEADLINE.findall(error)]
+            if pending_work and (not errors or kind == "permanent_or_unknown"):
+                kind, delay = "pending_collection_work", min(delay, 5)
             if task == "retention" and "pending_backlog" in report.get("warnings", []):
                 delay = 60
             next_due = max(completed + delay, *deadlines) if deadlines else completed + delay
