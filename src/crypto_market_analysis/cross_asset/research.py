@@ -164,7 +164,9 @@ def _cash_instrument(instrument: Any, descriptor: dict) -> None:
     if instrument.get("id") != descriptor["instrument_id"]:
         raise ValueError("cash plan instrument identity does not match series")
     pair = (instrument.get("asset_class"), instrument.get("form"))
-    if pair not in {("equity", "share"), ("equity", "fund"), ("commodity", "fund"), ("crypto", "spot")}:
+    if any(not isinstance(value, str) for value in pair) or pair not in {
+        ("equity", "share"), ("equity", "fund"), ("commodity", "fund"), ("crypto", "spot"),
+    }:
         raise ValueError("cash plan requires an accepted share, listed fund or spot cryptocurrency; futures and references are unsupported")
     if descriptor["price_basis"] != "raw" or descriptor["interval"] == "reference":
         raise ValueError("cash plan requires raw traded prices, not adjusted, reference or continuous paths")
@@ -222,6 +224,7 @@ def simulate_cash_plan(series: Any, request: Any, *, as_of: int, instrument: dic
     events: list[tuple[int, int, str, dict]] = []
     action_kinds: dict[int, set[str]] = {}
     applied_action_times: list[int] = []
+    split_effective_times: set[int] = set()
     bar_clocks = receipt_clocks(series, "bars")
     action_clocks = receipt_clocks(series, "actions")
     fill_bars: dict[int, dict] = {}
@@ -240,6 +243,8 @@ def simulate_cash_plan(series: Any, request: Any, *, as_of: int, instrument: dic
         if action["effective_at"] <= as_of:
             events.append((action["effective_at"], 1, "action", action))
             action_kinds.setdefault(action["effective_at"], set()).add(action["kind"])
+            if action["kind"] == "split":
+                split_effective_times.add(action["effective_at"])
             if action["kind"] == "cash_dividend" and "pay_at" in action and action["pay_at"] <= as_of:
                 events.append((action["pay_at"], 2, "payment", action))
     # Stable order by explicit identity avoids input order affecting same-time actions.
@@ -249,6 +254,8 @@ def simulate_cash_plan(series: Any, request: Any, *, as_of: int, instrument: dic
             cash += event["amount"]
             contributed += event["amount"]
         elif kind == "purchase":
+            if at in split_effective_times:
+                raise ValueError("purchase at the exact split-effective instant requires an explicit post-split price basis")
             eligible = fill_bars.get(at)
             if eligible is None:
                 raise ValueError("purchase must match a closed bar end with a vintage already received at that instant")
