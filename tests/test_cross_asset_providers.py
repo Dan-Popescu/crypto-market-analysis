@@ -125,6 +125,15 @@ def test_network_optin_and_reference_identity_required_before_connection():
         fetch_series(request)
 
 
+def test_fred_publication_points_preserve_exact_calendar_bounds():
+    request = fred()
+    request["publication_grid"] = [{"session_date": "1970-01-01", "start": 12345, "end": 12345}]
+    result = fetch_series(request, received_at=200000, transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, text="DATE,DCOILWTICO\n1970-01-01,4\n")))
+    assert result["status"] == "ok"
+    assert result["series"]["bars"][0]["start"] == result["series"]["bars"][0]["end"] == 12345
+
+
 @pytest.mark.parametrize("code,attempts,status", [(503, 2, "unavailable"), (429, 1, "deferred"), (302, 1, "unavailable")])
 def test_bounded_retry_no_redirects_or_rate_limit_loop(code, attempts, status):
     calls = []

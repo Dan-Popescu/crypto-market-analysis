@@ -106,6 +106,8 @@ Select provider `fred_graph`, symbol `DCOILWTICO`, currency `USD`, unit
 untransformed published reference observations; it does not mean raw traded fills.
 Supply `opt_in_network: true` and a bounded `publication_grid` from the calendar
 owner, containing `{session_date, start, end}` for each reference observation date.
+Publication-only reference points preserve equal `start` and `end` clocks exactly;
+reference intervals can instead have a positive duration declared by the calendar.
 The adapter does not invent exchange sessions, publication times or midnight
 bounds. Grid endpoints must precede receipt. `observation_date`/legacy `DATE`
 identifies the source's observation date, not proof of the actual release time.

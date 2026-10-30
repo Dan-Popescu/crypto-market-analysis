@@ -187,7 +187,7 @@ def _reference_grid(request, limits):
         except (ValueError, TypeError) as exc:
             raise ValueError("Grid session_date requires ISO date.") from exc
         start, end = _epoch(row.get("start"), "grid start"), _epoch(row.get("end"), "grid end")
-        if label in result or not request["start"] <= start < end <= request["end"]:
+        if label in result or not request["start"] <= start <= end <= request["end"]:
             raise ValueError("Publication grid contains duplicate dates or out-of-window bounds.")
         result[label] = (start, end)
     return result
