@@ -303,37 +303,40 @@ def build_analysis_readiness(store: Store, request: dict, as_of: int | None = No
     with store.read_session() as session:
         dossier = build_analysis_dossier(session, request["dossier"], cutoff)
         qualification = qualify_sources(session, qualification_request, cutoff)
-        markets = []
-        for market in dossier["markets"]:
-            selection = market["selection"]
-            empirical = next(row for row in qualification["markets"] if all(
-                row[key] == selection[key] for key in ("asset", "quote", "source")))
-            windows = None
-            if "windows" in request:
-                captured = market["market_context"]["stored_inputs"]["consumed_records"]
-                windows = analyze_windows([Candle(**row) for row in captured], cutoff, **request["windows"])
-            claims = _market_claims(market, empirical, windows, mode == "demo", cutoff, request["freshness_seconds"])
-            markets.append({"selection": selection, "claims": claims, "windows": windows,
-                            "claim_statuses": {row["claim"]: row["status"] for row in claims}})
-        calendar = dossier["calendar"]
-        calendar_claim = _claim("upcoming_calendar", calendar, _refs(calendar), demo=mode == "demo",
-                                reasons=["Rows describe known schedules; empty rows do not establish that no events exist"],
-                                needed=["Explicit source/date-range coverage and known release clocks"],
-                                details={"selection": calendar["selection"], "rows": calendar["rows"],
-                                         "coverage_status": "not_established_by_event_rows"})
-        # A finite event list is useful but does not certify complete calendar coverage.
-        if calendar_claim["status"] == "available":
-            calendar_claim["status"] = "incomplete"
-        data_statuses = [claim["status"] for market in markets for claim in market["claims"]
-                         if claim["claim"] not in ("data_reuse_permission", "france_purchase_entity_service", "source_runtime_access")
-                         and claim["status"] != "not_requested"]
-        if "calendar" in request["dossier"]:
-            data_statuses.append(calendar_claim["status"])
-        status = "demo_only" if mode == "demo" else "available" if all(s == "available" for s in data_statuses) else "incomplete"
-        result = {**base, "status": status, "watermark": deepcopy(session.watermark_at_start),
-                  "snapshot_basis": dossier["snapshot_basis"], "dossier": dossier, "qualification": qualification,
-                  "markets": markets, "calendar": calendar_claim, "next_actions": _actions(markets, mode)}
-        return _finish(result)
+        watermark = deepcopy(session.watermark_at_start)
+    # All inputs are detached from the same snapshot. Pure window calculations
+    # and presentation must not keep a read transaction open.
+    markets = []
+    for market in dossier["markets"]:
+        selection = market["selection"]
+        empirical = next(row for row in qualification["markets"] if all(
+            row[key] == selection[key] for key in ("asset", "quote", "source")))
+        windows = None
+        if "windows" in request:
+            captured = market["market_context"]["stored_inputs"]["consumed_records"]
+            windows = analyze_windows([Candle(**row) for row in captured], cutoff, **request["windows"])
+        claims = _market_claims(market, empirical, windows, mode == "demo", cutoff, request["freshness_seconds"])
+        markets.append({"selection": selection, "claims": claims, "windows": windows,
+                        "claim_statuses": {row["claim"]: row["status"] for row in claims}})
+    calendar = dossier["calendar"]
+    calendar_claim = _claim("upcoming_calendar", calendar, _refs(calendar), demo=mode == "demo",
+                            reasons=["Rows describe known schedules; empty rows do not establish that no events exist"],
+                            needed=["Explicit source/date-range coverage and known release clocks"],
+                            details={"selection": calendar["selection"], "rows": calendar["rows"],
+                                     "coverage_status": "not_established_by_event_rows"})
+    # A finite event list is useful but does not certify complete calendar coverage.
+    if calendar_claim["status"] == "available":
+        calendar_claim["status"] = "incomplete"
+    data_statuses = [claim["status"] for market in markets for claim in market["claims"]
+                     if claim["claim"] not in ("data_reuse_permission", "france_purchase_entity_service", "source_runtime_access")
+                     and claim["status"] != "not_requested"]
+    if "calendar" in request["dossier"]:
+        data_statuses.append(calendar_claim["status"])
+    status = "demo_only" if mode == "demo" else "available" if all(s == "available" for s in data_statuses) else "incomplete"
+    result = {**base, "status": status, "watermark": watermark,
+              "snapshot_basis": dossier["snapshot_basis"], "dossier": dossier, "qualification": qualification,
+              "markets": markets, "calendar": calendar_claim, "next_actions": _actions(markets, mode)}
+    return _finish(result)
 
 
 def render_analysis_readiness_markdown(result: dict) -> str:

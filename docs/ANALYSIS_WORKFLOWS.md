@@ -10,7 +10,7 @@ key or paid data source. No worker, deployment or order execution is activated.
 Create a separate synthetic fixture for these examples:
 
 ```bash
-uv run crypto-market-analysis demo --data-dir data/analysis-demo --days 800 --quotes EUR,USD --as-of 2026-10-29T00:00:00Z
+uv run crypto-market-analysis demo --data-dir data/analysis-demo --days 750 --quotes EUR,USD --as-of 2026-10-29T00:00:00Z
 uv run crypto-market-analysis analysis-changes --data-dir data/analysis-demo --request examples/analysis-changes.json --as-of 2026-10-29T00:00:00Z --format markdown
 ```
 
@@ -45,9 +45,10 @@ uv run crypto-market-analysis analysis-readiness --data-dir data/analysis-demo -
 cat examples/analysis-readiness.json | uv run crypto-market-analysis analysis-readiness --data-dir data/analysis-demo --request - --as-of 2026-10-29T00:00:00Z
 ```
 
-This reads the actual dossier, empirical qualification and optional purchase
-window calculations in one transaction. Window estimates consume the dossier's
-captured candles rather than fetching another history. Individual claims retain
+This captures the actual dossier and empirical qualification in one transaction.
+Optional window estimates consume the dossier's detached candles after that
+transaction closes, rather than fetching another history or keeping a SQLite
+reader open during pure calculations. Individual claims retain
 their actual support, coverage, freshness, reasons and required inputs. A context
 return needs its required complete daily closes; having many sparse rows is not
 enough. A supported short window does not imply support for longer windows.
@@ -64,6 +65,11 @@ required user inputs and `execute: false`. It does not collect or repair data.
 Missing stores return a useful missing report without creating directories.
 Reference source identifiers are limited to 64 characters by the reused
 qualification contract. Other section selectors retain dossier bounds.
+
+The four-market example uses 750 days, leaving room under the 32 MiB full-result
+ceiling while supporting 730-day context. An 800-day four-market dossier with
+all window claims can exceed that ceiling; reduce the selection or retained
+history for this combined report. No evidence is silently truncated.
 
 Optional windows use existing estimator parameters, with a shared maximum of 64
 market × horizon × threshold cells. Other bounds include 64 KiB requests, 32 MiB
@@ -123,7 +129,11 @@ An apply checkpoints intent before catalogue/page requests, then selects actual
 oldest missing closed hours. Committed candles survive an interruption before
 the final cursor update. Empty/partial/nonadvancing pages never advance over an
 unknown gap. Failures, unsupported pairs and retry cooldowns remain explicit;
-small budgets rotate markets. A fail-fast cooperative store lock serializes
+small budgets rotate markets. Catalogue and page failures persist the later of
+local exponential cooldown and usable Retry-After/retry-at evidence. A fallback
+to CCXT client headers is explicitly labelled unverified; no raw headers or
+provider error text are retained, and inspection never sleeps until a retry.
+A fail-fast cooperative store lock serializes
 participating backfill writers, without claiming control over arbitrary external
 writers. No daemon is started.
 

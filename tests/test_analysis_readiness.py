@@ -241,3 +241,43 @@ def test_equal_vintage_derivative_conflict_is_contradictory(tmp_path):
     assert found["derivatives.0.current"]["reasons"] == ["unknown_conflicting_versions"]
     assert found["derivatives.0.current"]["details"]["current"] is None
     assert len(result["dossier"]["markets"][0]["derivatives"]["stored_inputs"]["consumed_records"]) == 2
+
+
+def test_window_calculation_uses_detached_inputs_after_read_session_closes(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    from crypto_market_analysis import analysis_readiness
+
+    store = Store(tmp_path / "db.sqlite")
+    store.put_candles(candles())
+    original_session = store.read_session
+    original_windows = analysis_readiness.analyze_windows
+    active = False
+    calculated = False
+
+    @contextmanager
+    def tracked_session():
+        nonlocal active
+        with original_session() as session:
+            active = True
+            yield session
+        active = False
+
+    def detached_windows(rows, *args, **kwargs):
+        nonlocal calculated
+        if rows:  # Request validation also probes an empty input before reading.
+            assert not active
+            calculated = True
+            # A concurrent write after capture cannot change the detached inputs.
+            store.put_candles([replace(rows[-1], close=999, high=999)])
+        return original_windows(rows, *args, **kwargs)
+
+    monkeypatch.setattr(store, "read_session", tracked_session)
+    monkeypatch.setattr(analysis_readiness, "analyze_windows", detached_windows)
+    result = build_analysis_readiness(store, request(windows={"horizons": [1], "thresholds": [0.02]}), NOW)
+    assert calculated
+    captured = result["dossier"]["markets"][0]["market_context"]["stored_inputs"]["consumed_records"]
+    expected = original_windows([Candle(**row) for row in captured], NOW, horizons=[1], thresholds=[0.02])
+    assert result["markets"][0]["windows"] == expected
+    assert result["watermark"] == result["dossier"]["watermark"]
+    assert result["watermark"]["candles"] == result["qualification"]["watermark"]["candles"] == len(captured)
