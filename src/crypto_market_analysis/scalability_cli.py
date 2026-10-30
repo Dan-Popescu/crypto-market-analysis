@@ -140,7 +140,8 @@ def run_scalability_command(args, settings, request):
     if args.command == "analytics-snapshot":
         from .analytical_store import export_candle_snapshot
 
-        values = _fields(request, {"batch_rows", "max_rows"})
+        values = _fields(request, {"batch_rows", "max_rows", "rows_per_file", "assets", "source", "quote", "mode",
+                                     "start", "end", "max_bytes", "max_seconds"})
         if args.as_of is not None:
             raise ValueError("Snapshot export freezes the actual store; omit --as-of.")
         if not args.apply:

@@ -1,0 +1,14 @@
+{
+  "rows_per_file": 1000000,
+  "max_rows": 10000000,
+  "max_bytes": 8589934592,
+  "max_seconds": 120,
+  "assets": [
+    "BTC",
+    "ETH",
+    "SOL"
+  ],
+  "source": "kraken",
+  "quote": "EUR",
+  "mode": "live"
+}

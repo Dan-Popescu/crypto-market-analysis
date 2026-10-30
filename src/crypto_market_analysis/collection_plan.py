@@ -19,6 +19,10 @@ def collection_plan(settings, *, tasks=("market", "liquidity", "options", "conte
     market = pairs * len(settings.venues) if "market" in tasks else 0
     liquidity = len(books) * len(settings.quote_currencies) * len(book_venues) if "liquidity" in tasks else 0
     specialized = [asset for asset in assets if asset in SPECIALIZED_ASSETS]
+    total_pair_work = market + liquidity
+    minimum_invocations = (total_pair_work + settings.collection_work_limit - 1) // settings.collection_work_limit
+    daily_work = {"market": market * 86400 / settings.market_interval,
+                  "liquidity": liquidity * 86400 / settings.liquidity_interval}
     return {
         "assets": len(assets), "maximum_assets": 1000, "native_quotes": list(settings.quote_currencies),
         "requested_pairs_per_venue": pairs, "venues": len(settings.venues),
@@ -33,6 +37,10 @@ def collection_plan(settings, *, tasks=("market", "liquidity", "options", "conte
             "options": len(specialized) * 2 if settings.options and "options" in tasks else 0,
         },
         "actual_http_requests": None,
+        "minimum_pair_dispatch_invocations_per_rotation": minimum_invocations,
+        "requested_pair_work_units_per_day": daily_work,
+        "cadence_feasibility": "Unqualified until provider support, actual request weight, latency and rate limits are measured.",
+        "dispatch_policy": "serial bounded fair native-pair rotation for large universes; source-client-locked workers for small workloads",
         "estimate_basis": "Requested native pairs; catalogue support unknown. Logical calls exclude catalogue loads, transport retries and context provider requests; actual HTTP is measured at transport.",
         "specialized_options_assets": specialized,
         "specialized_options_unavailable_or_unknown": [asset for asset in assets if asset not in SPECIALIZED_ASSETS],
