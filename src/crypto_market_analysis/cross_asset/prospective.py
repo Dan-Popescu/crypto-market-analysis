@@ -217,11 +217,19 @@ def issue_market_assessment(database, request, *, issued_at):
         if prior["request_sha256"] != request_hash:
             raise ValueError("Idempotency key already binds a different request")
         return prior
+    with CrossAssetStore(database).read_session() as store:
+        payload = _prepare_assessment(store, protocol, issued_at=issued_at, key=key,
+                                      probability=probability, request_hash=request_hash)
+    # Release the read snapshot before committing the assessment. This also
+    # works after restoring a portable database using DELETE journal mode.
+    return _persist_assessment(database, key, request_hash, payload)
+
+
+def _prepare_assessment(store, protocol, *, issued_at, key, probability, request_hash):
     declaration = protocol["declaration"]
     if not declaration["eligibility"]["start"] <= issued_at < declaration["eligibility"]["end"]:
         raise ValueError("Issuance falls outside frozen protocol eligibility")
     descriptor, calendar = declaration["series"], declaration["calendar"]
-    store = CrossAssetStore(database)
     if store.calendar(calendar["id"], calendar["version"], as_of=issued_at) != calendar:
         raise ValueError("Stored calendar differs from frozen protocol or is not yet known")
     registry = store.registry(issued_at)
@@ -259,6 +267,10 @@ def issue_market_assessment(database, request, *, issued_at):
                "evidence_scope": "synthetic_demo" if descriptor["data_mode"] == "demo" else "locally_witnessed_live",
                "limitations": "Price-only directional outcome; declaration is not independent attestation or model validation."}
     payload["assessment_id"] = _hash(payload)
+    return payload
+
+
+def _persist_assessment(database, key, request_hash, payload):
     encoded = _canonical(payload)
     with _connection(database, write=True) as con:
         con.execute("BEGIN IMMEDIATE")
@@ -294,8 +306,13 @@ def evaluate_market_assessment(database, request, *, as_of):
     target = assessment["target"]
     if as_of < target["due_at"]:
         return result
+    with CrossAssetStore(database).read_session() as store:
+        return _evaluate_outcome(store, assessment, declaration, result, as_of)
+
+
+def _evaluate_outcome(store, assessment, declaration, result, as_of):
+    target = assessment["target"]
     try:
-        store = CrossAssetStore(database)
         series = _series(store, declaration["series"], as_of)
         registry = store.registry(as_of)
         if registry is None:

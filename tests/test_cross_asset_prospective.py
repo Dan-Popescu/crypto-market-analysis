@@ -3,6 +3,7 @@
 import copy
 import json
 import sqlite3
+from contextlib import closing
 from datetime import datetime
 
 import pytest
@@ -26,10 +27,10 @@ MONDAY_CLOSE = epoch("2026-03-09T20:00:00Z")
 
 def fixtures(mode="live"):
     sessions = []
-    for day, opening, closing in [("2026-03-05", "14:30", "21:00"), ("2026-03-06", "14:30", "21:00"),
+    for day, opening, close_time in [("2026-03-05", "14:30", "21:00"), ("2026-03-06", "14:30", "21:00"),
                                  ("2026-03-09", "13:30", "20:00"), ("2026-03-10", "13:30", "20:00")]:
         sessions.append({"date": day, "segments": [{"start": epoch(f"{day}T{opening}:00Z"),
-                                                    "end": epoch(f"{day}T{closing}:00Z")}]})
+                                                    "end": epoch(f"{day}T{close_time}:00Z")}]})
     calendar = {"schema": "market-calendar.v1", "id": "XNYS:fixture", "version": "test.v1",
                 "timezone": "America/New_York", "source_url": "https://example.test/calendar",
                 "known_at": epoch("2026-03-01T00:00:00Z"), "supported_start": epoch("2026-03-05T00:00:00Z"),
@@ -303,3 +304,68 @@ def test_target_vintage_priority_and_cutoffs_use_actual_receipt(setup):
     assert later["target"]["observed_at"] == MONDAY_CLOSE + 60
     assert later["target_receipt"]["effective_known_at"] == MONDAY_CLOSE + 100
     assert later["brier_score"] == pytest.approx(0.5625)
+
+
+def test_issuance_uses_one_snapshot_despite_concurrent_backdated_receipt(tmp_path, monkeypatch):
+    monkeypatch.setattr(prospective.time, "time", lambda: NOW)
+    bundle, declaration = fixtures()
+    bundle["series"][0]["bars"][0]["observed_at"] = NOW - 10
+    database = tmp_path / "concurrent.sqlite"
+    CrossAssetStore(database, initialize=True).import_bundle(bundle, received_at=NOW - 10)
+    correction = copy.deepcopy(bundle)
+    correction["series"][0]["bars"][0].update(observed_at=NOW - 20, open=120.0, high=120.0, low=120.0, close=120.0)
+    original_reader = prospective._series
+
+    def interleave_writer(reader, descriptor, cutoff):
+        CrossAssetStore(database, initialize=True).import_bundle(correction, received_at=NOW)
+        return original_reader(reader, descriptor, cutoff)
+
+    monkeypatch.setattr(prospective, "_series", interleave_writer)
+    request = {"schema": "market-assessment-request.v1", "probability_up": 0.75, "idempotency_key": "concurrent:1",
+               "protocol": freeze_market_protocol(declaration, frozen_at=NOW - 180)}
+    assessment = issue_market_assessment(database, request, issued_at=NOW)
+    assert assessment["anchor"]["close"] == 100
+    latest = CrossAssetStore(database).read_series("abc:raw", as_of=NOW, data_mode="live")
+    assert latest["bars"][0]["close"] == 120
+
+
+def test_evaluation_reuses_snapshot_for_receipt_window_fallback(setup, monkeypatch):
+    database, bundle, request = setup
+    assessment = issue_market_assessment(database, request, issued_at=NOW)
+    append_target(database, bundle, close=110)
+    late = copy.deepcopy(bundle)
+    segment = late["calendars"][0]["sessions"][2]["segments"][0]
+    late["series"][0]["bars"] = [{**segment, "open": 80.0, "high": 80.0, "low": 80.0, "close": 80.0,
+                                  "observed_at": MONDAY_CLOSE + 600, "session_date": "2026-03-09"}]
+    CrossAssetStore(database, initialize=True).import_bundle(late, received_at=MONDAY_CLOSE + 600)
+    correction = copy.deepcopy(late)
+    correction["series"][0]["bars"][0].update(observed_at=MONDAY_CLOSE + 50, open=90.0, high=90.0, low=90.0, close=90.0)
+    original_reader, inserted = prospective._series, False
+
+    def interleave_writer(reader, descriptor, cutoff):
+        nonlocal inserted
+        result = original_reader(reader, descriptor, cutoff)
+        if not inserted:
+            inserted = True
+            CrossAssetStore(database, initialize=True).import_bundle(correction, received_at=MONDAY_CLOSE + 100)
+        return result
+
+    monkeypatch.setattr(prospective, "_series", interleave_writer)
+    result = evaluate_market_assessment(database, {"assessment_id": assessment["assessment_id"]}, as_of=MONDAY_CLOSE + 600)
+    assert result["status"] == "scored" and result["outcome_up"] == 1
+    assert result["target"]["close"] == 110
+    latest = CrossAssetStore(database).read_series("abc:raw", as_of=MONDAY_CLOSE + 120, data_mode="live")
+    assert latest["bars"][-1]["close"] == 90
+
+
+def test_assessment_write_releases_read_snapshot_in_portable_delete_journal_mode(setup):
+    database, _, request = setup
+    portable = database.with_name("portable.sqlite")
+    with closing(sqlite3.connect(database)) as source, closing(sqlite3.connect(portable)) as destination:
+        source.backup(destination)
+        assert destination.execute("PRAGMA journal_mode=DELETE").fetchone()[0] == "delete"
+    assessment = issue_market_assessment(portable, request, issued_at=NOW)
+    assert assessment["anchor"]["close"] == 100
+    with closing(sqlite3.connect(portable)) as con:
+        assert con.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+        assert con.execute("SELECT COUNT(*) FROM cross_asset_assessments").fetchone()[0] == 1
