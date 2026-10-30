@@ -1,0 +1,6 @@
+{
+  "required_history_hours": 24,
+  "freshness_seconds": 10800,
+  "max_gap_hours": 0,
+  "limit": 20
+}

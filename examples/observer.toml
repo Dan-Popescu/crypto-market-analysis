@@ -12,6 +12,10 @@ liquidity_venues = ["kraken", "coinbase", "bitvavo"]
 history_days = 30
 max_pages = 20
 http_max_requests = 10000
+collection_batch_size = 10
+collection_work_limit = 256
+# Bound book work independently from the explicitly configured asset universe.
+# liquidity_assets = ["BTC", "ETH"]
 http_deadline_seconds = 300.0
 workers = 3
 options = true

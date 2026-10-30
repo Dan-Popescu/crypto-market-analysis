@@ -1,3 +1,3 @@
-"""BTC/ETH research using public data and explicit uncertainty."""
+"""Multi-asset research using public data and explicit uncertainty."""
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"

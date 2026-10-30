@@ -219,8 +219,9 @@ class Engine:
                        held_out_start=None, policy_frozen_at=None):
         return self.accumulation.evaluate_plans(config, as_of, origins, validation, held_out_start, policy_frozen_at)
 
-    def issue_assessment(self, idempotency_key, asset="BTC", source=None, quote=None, as_of=None, plan_config=None):
-        return self.accumulation.issue_assessment(idempotency_key, asset, source, quote, as_of, plan_config)
+    def issue_assessment(self, idempotency_key, asset="BTC", source=None, quote=None, as_of=None, plan_config=None,
+                         validation_protocol=None):
+        return self.accumulation.issue_assessment(idempotency_key, asset, source, quote, as_of, plan_config, validation_protocol)
 
     def assessment(self, assessment_id):
         return self.accumulation.assessment(assessment_id)

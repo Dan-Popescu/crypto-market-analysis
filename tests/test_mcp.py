@@ -28,7 +28,7 @@ def test_stdio_real_protocol_and_read_only_annotations(tmp_path):
         )
         async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
             initialization = await session.initialize()
-            assert "Analyze BTC/ETH over 1–60 days." in initialization.instructions
+            assert "Generic assets use explicit native identifiers; BTC/ETH remain defaults and provider capabilities vary." in initialization.instructions
             listed = await session.list_tools()
             names = {tool.name for tool in listed.tools}
             assert {"get_analysis_bundle", "get_source_status", "render_chart", "get_forecast"} <= names

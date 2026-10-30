@@ -1,0 +1,13 @@
+{
+  "assets": [
+    "BTC",
+    "ETH",
+    "SOL"
+  ],
+  "source": "kraken",
+  "quote": "EUR",
+  "mode": "live",
+  "start": 1793145600,
+  "end": 1793232000,
+  "as_of": 1793232000
+}

@@ -130,7 +130,7 @@ class AccumulationService:
         return AssessmentJournal.open_existing(self.store) if read else AssessmentJournal(self.store)
 
     def issue_assessment(self, idempotency_key, asset="BTC", source=None, quote=None,
-                         as_of=None, plan_config=None):
+                         as_of=None, plan_config=None, validation_protocol=None):
         from .context import market_context
         from .purchase_windows import analyze_windows
 
@@ -139,6 +139,13 @@ class AccumulationService:
             raise ValueError("An issued analysis cannot use a future as_of time.")
         request = {"asset": asset, "source": source, "quote": quote,
                    "as_of": as_of, "plan_config": plan_config, "data_mode": self.mode}
+        if validation_protocol is not None:
+            from .validation_protocol import validate_validation_protocol
+
+            validation_protocol = validate_validation_protocol(validation_protocol)
+            if validation_protocol["frozen_at"] > issued:
+                raise ValueError("The validation protocol cannot be frozen after actual issuance.")
+            request["validation_protocol_hash"] = validation_protocol["protocol_hash"]
         request_hash = content_hash(request)
         journal = self._journal()
         # Return the original on a retry, even if collection or wall time changed.
@@ -157,8 +164,23 @@ class AccumulationService:
         captured = self.capture(asset, source, quote, issued if as_of is None else as_of, profile="candles",
                                 include_candle_versions=plan_config is not None)
         context = market_context(list(captured.candles), captured.as_of)
+        window_parameters = {}
+        if validation_protocol is not None:
+            declaration = validation_protocol["declaration"]
+            cohorts = [row for row in declaration["cohorts"] if all(
+                row[key] == captured.reference.get(key) for key in ("asset", "source", "quote", "data_mode", "dataset_lineage"))]
+            if not cohorts:
+                raise ValueError("No declared validation cohort matches the captured native market and lineage.")
+            if declaration["mode"] == "prospective" and not declaration["starts_at"] <= issued < declaration["ends_at"]:
+                raise ValueError("Actual issuance is outside the declared prospective period.")
+            horizons = sorted({event["horizon_days"] for row in cohorts for event in row["events"]})
+            thresholds = sorted({event["threshold"] for row in cohorts for event in row["events"]
+                                 if event["threshold"] is not None})
+            if len(horizons) > 16 or len(thresholds) > 12 or len(horizons) * max(1, len(thresholds)) > 64:
+                raise ValueError("The selected validation cohort exceeds its 64-cell issuance window budget.")
+            window_parameters = {"horizons": horizons, "thresholds": thresholds or [0.05]}
         windows = analyze_windows(list(captured.candles), captured.as_of, issued_at=issued,
-                                  max_price_age=self.settings.market_interval * 2)
+                                  max_price_age=self.settings.market_interval * 2, **window_parameters)
         payload = {"kind": "accumulation_assessment", "request": request, "request_hash": request_hash,
                    "input_reference": captured.reference, "config": captured.configuration,
                    "rules": {"context": 1, "purchase_windows": 1, "outcome_protocol": 1}, "context": context,
@@ -167,6 +189,12 @@ class AccumulationService:
                                         "forecast_comparability": "not_established_for_anchor_relative_estimates"},
                    "windows": windows, "plan": None,
                    "historical_calculation": captured.as_of != issued}
+        if validation_protocol is not None:
+            from .prospective_validation import build_validation_predictions
+
+            payload["validation_protocol_hash"] = validation_protocol["protocol_hash"]
+            payload["validation_predictions"] = build_validation_predictions(
+                validation_protocol, captured.reference, windows, payload["rules"], issued)
         evidence = captured.evidence()
         if plan_config is not None:
             config, now, rows, reference = self._plan_inputs(plan_config, captured.as_of, captured=captured)

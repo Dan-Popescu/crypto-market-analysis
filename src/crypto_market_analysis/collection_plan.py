@@ -9,6 +9,9 @@ from .asset_universe import SPECIALIZED_ASSETS, validate_assets
 
 
 def collection_plan(settings, *, tasks=("market", "liquidity", "options", "context")) -> dict:
+    if (not isinstance(tasks, (list, tuple)) or not tasks or len(tasks) != len(set(tasks))
+            or set(tasks) - {"market", "liquidity", "options", "context"}):
+        raise ValueError("Select distinct market, liquidity, options or context tasks.")
     assets = validate_assets(settings.assets)
     pairs = len(assets) * len(settings.quote_currencies)
     books = assets if settings.liquidity_assets is None else settings.liquidity_assets

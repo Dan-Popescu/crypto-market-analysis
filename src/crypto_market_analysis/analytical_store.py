@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import stat
@@ -17,6 +18,7 @@ import time
 from functools import lru_cache
 from pathlib import Path
 
+from .evidence import canonical_json
 from .models import Candle
 from .storage import read_database_if_present
 
@@ -28,7 +30,7 @@ MAX_QUERY_ROWS = 100_000
 
 
 def _canonical(value):
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False, ensure_ascii=False)
+    return canonical_json(value)
 
 
 def _file_hash(path):
@@ -286,3 +288,35 @@ class AnalyticalCandleStore:
                 "snapshot": {key: self.manifest[key] for key in ("format", "created_at", "rows", "sqlite_max_id", "file_sha256", "content_sha256")},
                 "expires_at": None,
                 "coverage_note": "Missing hours refer to the requested interval; absent assets remain unknown. Immutable candle export, not live or full-dossier coverage."}
+
+
+def snapshot_path(settings, name):
+    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", name):
+        raise ValueError("Snapshot name must contain 1–64 letters, digits, underscores or hyphens.")
+    base = settings.data_dir / "analytical_snapshots"
+    target = base / name
+    if base.is_symlink() or target.is_symlink():
+        raise ValueError("Configured snapshot directories must not be symbolic links.")
+    return target
+
+
+def snapshot_status(settings, name="default"):
+    target = snapshot_path(settings, name)
+    manifest = target / "manifest.json"
+    if not manifest.is_file():
+        return {"status": "missing", "snapshot_name": name, "read_only": True, "manifest": None}
+    if manifest.is_symlink() or manifest.stat().st_size > 65536:
+        raise ValueError("Invalid or oversized snapshot manifest.")
+    return {"status": "present", "snapshot_name": name, "read_only": True,
+            "integrity": "Manifest inspection only; analytical reads verify the data.",
+            "manifest": json.loads(manifest.read_text(encoding="utf-8"))}
+
+
+def analytical_fleet(settings, name, request):
+    allowed = {"assets", "start", "end", "as_of", "source", "quote", "mode", "max_assets", "max_series"}
+    if not isinstance(request, dict) or set(request) - allowed:
+        raise ValueError("Unknown analytical fleet request fields.")
+    values = dict(request)
+    if not {"assets", "start", "end", "as_of"} <= values.keys():
+        raise ValueError("Analytical fleet requires assets, start, end and as_of.")
+    return open_analytical_snapshot(snapshot_path(settings, name)).fleet_summary(**values)

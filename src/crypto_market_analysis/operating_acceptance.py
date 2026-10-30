@@ -12,6 +12,7 @@ import math
 import os
 import re
 import sqlite3
+import tempfile
 import time
 from contextlib import contextmanager
 from dataclasses import asdict, replace
@@ -128,16 +129,24 @@ def _normalize(settings, request):
 
 
 def _write(path, value):
-    temporary = path.with_suffix(".tmp")
-    with temporary.open("w") as handle:
-        handle.write(json.dumps(value, sort_keys=True, allow_nan=False, indent=2) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    temporary.replace(path)
+    if path.is_symlink():
+        raise ValueError("Operating artifacts must not be symbolic links.")
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix="." + path.name + "-",
+                                         dir=path.parent, delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(json.dumps(value, sort_keys=True, allow_nan=False, indent=2) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def _read_json(path):
-    if path.stat().st_size > 16 * 1024**2:
+    if path.is_symlink() or path.stat().st_size > 16 * 1024**2:
         raise ValueError("Operating report exceeds the 16 MiB read bound.")
     return json.loads(path.read_text())
 
@@ -247,6 +256,8 @@ def run_operating_acceptance(settings, request, *, clients=None, stop=None):
     """
     request = _normalize(settings, request)
     directory = settings.data_dir / "operating_acceptance" / request["session_id"]
+    if directory.parent.is_symlink() or directory.is_symlink():
+        raise ValueError("Operating session directories must not be symbolic links.")
     manifest_path = directory / "manifest.json"
     if not request["refresh"]:
         return {"kind": "operating_acceptance", "status": "recorded" if manifest_path.is_file() else "not_recorded",
