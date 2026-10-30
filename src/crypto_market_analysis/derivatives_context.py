@@ -24,6 +24,8 @@ _UNKNOWN = {'', 'unknown', 'unspecified', 'none', 'contracts_unknown'}
 
 def _native_currency(value):
     """Recognize explicit native codes without asserting provider support."""
+    if not _known(value):
+        return False
     if value in ('EUR', 'USD'):
         return True
     try:
