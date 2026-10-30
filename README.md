@@ -1,6 +1,12 @@
 # Crypto Market Analysis
 
-A local, read-only multi-asset research tool with BTC/ETH defaults for gradual spot purchases over weeks and months. It provides historical context, experimental purchase windows, hypothetical purchase-plan comparisons, chronological evaluation and optional 4/8-hour vigilance. CLI and MCP share the same calculations. It never executes orders, signs wallet operations or transfers funds. Collection, calculations and charts require no language model or paid data API.
+A local, read-only cryptocurrency research tool with BTC/ETH defaults for gradual spot purchases over weeks and months. It provides historical context, experimental purchase windows, hypothetical purchase-plan comparisons, chronological evaluation and optional 4/8-hour vigilance. CLI and MCP share the same calculations. It never executes orders, signs wallet operations or transfers funds. Collection, calculations and charts require no language model or paid data API.
+
+The long-term scope includes equities, commodities and other asset classes.
+[Cross-asset design requirements](docs/CROSS_ASSET_DESIGN.md) define instrument
+identity, sessions, corporate actions and contract semantics before new classes
+are activated. Version 0.9.0 supports multiple cryptocurrency codes; it does not
+yet implement equity or commodity feeds or their class-specific calculations.
 
 Version 0.9.0 adds [bounded multi-asset operation](docs/SCALABILITY.md) for an explicit
 100-asset universe, extensible to 1,000: fair collection continuation, per-source

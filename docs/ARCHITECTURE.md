@@ -163,3 +163,14 @@ identity-checked snapshot reuse and DuckDB reads. CLI and MCP dispatch independe
 through these owners. See the storage ADR for the measured SQLite/DuckDB roles and
 PostgreSQL migration triggers; no generic database adapter family is introduced
 for a second backend that is not used by the application.
+
+
+## Future asset classes
+
+The product scope includes equities, commodities and further classes. The current
+multi-code cryptocurrency implementation retains its own supported assumptions.
+[ADR 0002](adr/0002-cross-asset-instrument-and-session-semantics.md) records separate
+instrument/listing/provider identity, series basis and sourced session/publication
+semantics as requirements before activating other classes. The concrete owner
+inventory and implementation gates are in [CROSS_ASSET_DESIGN.md](CROSS_ASSET_DESIGN.md).
+This design extension changes no existing data, calculations or frozen evidence.

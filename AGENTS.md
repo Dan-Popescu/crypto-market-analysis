@@ -6,7 +6,7 @@ Preserve raw external evidence, official names, symbols and URLs without transla
 
 ## Scope
 
-This repository contains the independent multi-asset market analysis tool imported
+This repository contains the independent market analysis tool imported
 from Crypto Observer v0.1.0. Ledgerly remains the source of portfolio transactions,
 holdings and acquisition costs. See README.md for usage and docs/SPEC.md for scope.
 
@@ -26,6 +26,11 @@ For multi-asset collection, analytical snapshots or prospective validation, read
 `docs/SCALABILITY.md` and `docs/adr/0001-storage-for-scaled-research.md`. The target is
 100 explicit assets, extensible to 1,000; BTC/ETH remain defaults and provider
 capabilities require separate evidence. Preserve named archive dataset scope.
+
+For equities, commodities, other asset classes, instrument identity, trading
+sessions or adjusted prices, read `docs/CROSS_ASSET_DESIGN.md` and
+`docs/adr/0002-cross-asset-instrument-and-session-semantics.md`. Current runtime
+support is cryptocurrency-focused; class support requires its own acceptance.
 
 ## Verification and pull requests
 
