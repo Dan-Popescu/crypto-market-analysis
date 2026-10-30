@@ -1,8 +1,10 @@
 import json
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
+import crypto_market_analysis.analytical_store as analytical_store
 from crypto_market_analysis.analytical_store import (
     AnalyticalCandleStore,
     export_candle_snapshot,
@@ -202,3 +204,141 @@ def test_fleet_capacity_matches_independent_sqlite_python_selection(tmp_path, as
     assert result["series_count"] == 2 * assets
     assert result["selected_points"] == 2 * assets
     assert all(row["missing_hours"] == 0 for row in result["series"])
+
+
+def test_partitioned_known_at_ties_match_filtered_v1_and_sqlite(tmp_path):
+    store, original = fixture_store(tmp_path)
+    filters = {"assets": ["BTC"], "source": "venue", "quote": "EUR", "mode": "live",
+               "start": OPEN, "end": OPEN + 3600}
+    first = export_candle_snapshot(store, tmp_path / "v1", max_rows=3, **filters)
+    second = export_candle_snapshot(store, tmp_path / "v2", max_rows=3, rows_per_file=2, **filters)
+    assert first["format"] == "observer-candle-snapshot-v1"
+    assert second["format"] == "observer-candle-snapshot-v2"
+    assert [part["rows"] for part in second["files"]] == [2, 1]
+    assert first["content_sha256"] == second["content_sha256"]
+    assert first["canonical_source_bytes"] == second["canonical_source_bytes"]
+    assert second["selection"] == filters
+    left = AnalyticalCandleStore(tmp_path / "v1")
+    right = open_analytical_snapshot(tmp_path / "v2")
+    assert open_analytical_snapshot(tmp_path / "v2") is right
+    bounds = {"start": OPEN, "end": OPEN + 3600, "source": "venue", "quote": "EUR"}
+    for cutoff in (OPEN + 3600, OPEN + 7200):
+        for fence in (5, 6, 7):
+            expected = store.candles("BTC", source="venue", quote="EUR", as_of=cutoff, max_id=fence)
+            assert left.candles(["BTC"], as_of=cutoff, max_id=fence, **bounds) == expected
+            assert right.candles(["BTC"], as_of=cutoff, max_id=fence, **bounds) == expected
+    assert right.candles(["BTC"], as_of=OPEN + 3600, **bounds) == [original]
+    fleet = right.fleet_summary(["BTC"], as_of=OPEN + 7200, **bounds)
+    assert fleet["series"][0]["latest_close"] == 103.
+    assert fleet["snapshot"]["selection"] == filters
+    assert fleet["snapshot"]["partition_count"] == 2
+
+
+def test_legacy_v1_and_partitioned_empty_artifacts_remain_readable(tmp_path):
+    store, _ = fixture_store(tmp_path)
+    target = tmp_path / "legacy"
+    manifest = export_candle_snapshot(store, target)
+    for key in ("selection", "export_budget", "canonical_source_bytes"):
+        manifest.pop(key)
+    (target / "manifest.json").write_text(json.dumps(manifest))
+    result = AnalyticalCandleStore(target).fleet_summary(["BTC"], start=OPEN, end=OPEN + 3600, as_of=OPEN + 7200)
+    assert result["snapshot"]["selection"] is None
+    empty = Store(tmp_path / "empty.sqlite")
+    manifest = export_candle_snapshot(empty, tmp_path / "empty", max_rows=100_000_000, rows_per_file=1_000_000)
+    assert manifest["rows"] == 0
+    assert len(manifest["files"]) == 1
+    assert AnalyticalCandleStore(tmp_path / "empty").candles(["BTC"], start=OPEN, end=OPEN + 3600, as_of=OPEN + 3600) == []
+    with pytest.raises(ValueError, match="partitioned output"):
+        export_candle_snapshot(empty, tmp_path / "too-big-v1", max_rows=10_000_001)
+    with pytest.raises(ValueError, match="max_rows"):
+        export_candle_snapshot(empty, tmp_path / "too-big-v2", max_rows=100_000_001, rows_per_file=1_000_000)
+
+
+def test_warmed_partition_cache_checks_files_without_rehashing_rows(tmp_path, monkeypatch):
+    store, _ = fixture_store(tmp_path)
+    target = tmp_path / "snapshot"
+    export_candle_snapshot(store, target, rows_per_file=4)
+    reader = open_analytical_snapshot(target)
+
+    def unexpected_hash(*args, **kwargs):
+        raise AssertionError("Warmed immutable artifact must not be fully hashed again")
+
+    monkeypatch.setattr(analytical_store, "_file_hash", unexpected_hash)
+    assert open_analytical_snapshot(target) is reader
+    assert reader.fleet_summary(["BTC"], start=OPEN, end=OPEN + 3600, as_of=OPEN + 7200)["selected_points"] == 3
+
+
+def test_partition_corruption_and_unsafe_file_list_fail_closed(tmp_path):
+    store, _ = fixture_store(tmp_path)
+    target = tmp_path / "snapshot"
+    export_candle_snapshot(store, target, rows_per_file=4)
+    reader = open_analytical_snapshot(target)
+    part = target / "candles-000002.parquet"
+    original = part.read_bytes()
+    part.write_bytes(original[:-1])
+    with pytest.raises(ValueError, match="changed after verification"):
+        reader.fleet_summary(["BTC"], start=OPEN, end=OPEN + 3600, as_of=OPEN + 7200)
+    with pytest.raises(ValueError, match="checksum"):
+        open_analytical_snapshot(target)
+    part.write_bytes(original)
+    manifest_path = target / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["files"][1]["file"] = "../other.parquet"
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="unsafe file"):
+        AnalyticalCandleStore(target)
+    part.unlink()
+    manifest["files"][1]["file"] = "candles-000002.parquet"
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="missing"):
+        AnalyticalCandleStore(target)
+
+
+def test_filtered_quarter_exports_count_only_the_selected_source_slice(tmp_path):
+    store, original = fixture_store(tmp_path)
+    later = replace(original, open_time=OPEN + 100 * 86400, close_time=OPEN + 100 * 86400 + 3600,
+                    observed_at=OPEN + 100 * 86400 + 3600)
+    store.put_candles([later, replace(later, quote="USD"), replace(later, source="other")])
+    start, end = OPEN + 90 * 86400, OPEN + 180 * 86400
+    manifest = export_candle_snapshot(store, tmp_path / "quarter", assets=["BTC"], source="venue", quote="EUR",
+                                      mode="live", start=start, end=end, max_rows=1, rows_per_file=1)
+    assert manifest["rows"] == 1
+    result = AnalyticalCandleStore(tmp_path / "quarter").candles(["BTC"], start=start, end=end, as_of=end,
+                                                               source="venue", quote="EUR")
+    assert result == [later]
+
+
+def test_export_byte_deadline_and_partition_budgets_clean_staging(tmp_path, monkeypatch):
+    store, _ = fixture_store(tmp_path)
+    with pytest.raises(ValueError, match="byte budget"):
+        export_candle_snapshot(store, tmp_path / "bytes", rows_per_file=2, max_bytes=1)
+    assert not (tmp_path / "bytes").exists()
+    assert not list(tmp_path.glob(".bytes-*"))
+    monkeypatch.setattr(analytical_store, "MAX_PARTITIONS", 2)
+    with pytest.raises(ValueError, match="partition-count"):
+        export_candle_snapshot(store, tmp_path / "parts", rows_per_file=1)
+    moments = iter([0., 2.])
+    monkeypatch.setattr(analytical_store, "time", SimpleNamespace(monotonic=lambda: next(moments)))
+    with pytest.raises(ValueError, match="deadline"):
+        export_candle_snapshot(store, tmp_path / "timeout", max_seconds=1)
+    assert not (tmp_path / "timeout").exists()
+    assert not list(tmp_path.glob(".timeout-*"))
+
+
+def test_read_query_deadline_interrupts_real_engine_without_spill(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(analytical_store, "_QUERY_SECONDS", .02)
+    with pytest.raises(ValueError, match="deadline"):
+        with analytical_store._query_connection() as con:
+            con.execute("SELECT SUM(a.i*b.i) FROM range(1000000) a(i),range(1000000) b(i)").fetchall()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_read_memory_budget_fails_without_creating_temp_files(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(analytical_store, "_QUERY_MEMORY", "1MB")
+    with pytest.raises(ValueError, match="read-only SQL budget"):
+        with analytical_store._query_connection() as con:
+            assert con.execute("SELECT current_setting('temp_directory')").fetchone()[0] == ""
+            con.execute("SELECT i FROM range(1000000) t(i) ORDER BY hash(i)").fetchall()
+    assert list(tmp_path.iterdir()) == []

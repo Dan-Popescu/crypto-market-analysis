@@ -141,9 +141,9 @@ def worker(args):
         store = populate(database, args.worker_assets, args.hours)
         ingest_ms = (time.perf_counter() - started) * 1000
         snapshot = root / "snapshot"
-        parquet = snapshot / "candles.parquet"
         started = time.perf_counter()
-        manifest = export_candle_snapshot(store, snapshot)
+        manifest = export_candle_snapshot(store, snapshot, rows_per_file=args.rows_per_file)
+        parquet_paths = [snapshot / part["file"] for part in manifest.get("files", [{"file": manifest.get("file")}])]
         row_count = manifest["rows"]
         export_ms = (time.perf_counter() - started) * 1000
         started = time.perf_counter()
@@ -157,8 +157,8 @@ def worker(args):
         query = """SELECT payload FROM (SELECT payload,source,asset,quote,timeframe,open_time,data_mode,
             ROW_NUMBER() OVER(PARTITION BY source,asset,quote,timeframe,open_time,data_mode
             ORDER BY observed_at DESC,id DESC) rn FROM {table} WHERE """ + predicates + ") WHERE rn=1 ORDER BY asset,source,quote,timeframe,open_time,data_mode"
-        with sqlite3.connect(database) as sqlite, duckdb.connect(config={"threads": "2", "memory_limit": "256MB"}) as analytical:
-            analytical.read_parquet(str(parquet)).create_view("candles")
+        with sqlite3.connect(database) as sqlite, duckdb.connect(config={"threads": "2", "memory_limit": "256MB", "temp_directory": ""}) as analytical:
+            analytical.read_parquet([str(path) for path in parquet_paths]).create_view("candles")
 
             def read_sqlite():
                 return [json.loads(row[0]) for row in sqlite.execute(query.format(table="candles"), parameters)]
@@ -210,7 +210,8 @@ def worker(args):
         return {"assets": args.worker_assets, "hours": args.hours, "vintage_rows": row_count,
                 "ingest_sqlite_ms": ingest_ms, "export_all_vintages_ms": export_ms,
                 "snapshot_open_verify_ms": open_verify_ms,
-                "sqlite_bytes": database.stat().st_size, "parquet_bytes": parquet.stat().st_size,
+                "sqlite_bytes": database.stat().st_size, "parquet_bytes": sum(path.stat().st_size for path in parquet_paths),
+                "snapshot_format": manifest["format"], "partition_count": len(parquet_paths),
                 "selected_assets": len(selected), "selected_rows": len(sqlite_rows),
                 "selected_result_sha256": digest(sqlite_rows), "fleet_result_sha256": digest(sqlite_fleet),
                 "sqlite_selected": sqlite_ms, "duckdb_selected": duckdb_ms,
@@ -229,9 +230,12 @@ def main():
     parser.add_argument("--hours", type=int, default=48)
     parser.add_argument("--repetitions", type=int, default=3)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--rows-per-file", type=int, help="Use v2 snapshots with at most this many rows per Parquet file (1..1000000)")
     parser.add_argument("--postgres-container", help="Existing disposable local observer-storage-bench-* container with psql; caller owns cleanup")
     parser.add_argument("--worker-assets", type=int, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.rows_per_file is not None and not 1 <= args.rows_per_file <= 1_000_000:
+        parser.error("rows-per-file must be between 1 and 1000000")
     if args.postgres_container and not re.fullmatch(r"observer-storage-bench-[a-zA-Z0-9_.-]+", args.postgres_container):
         parser.error("PostgreSQL comparison requires an explicit observer-storage-bench-* disposable container")
     if not 1 <= args.hours <= 744 or not 1 <= args.repetitions <= 10:
@@ -247,6 +251,8 @@ def main():
         command = [sys.executable, __file__, "--worker-assets", str(scale), "--hours", str(args.hours), "--repetitions", str(args.repetitions)]
         if args.postgres_container:
             command.extend(["--postgres-container", args.postgres_container])
+        if args.rows_per_file is not None:
+            command.extend(["--rows-per-file", str(args.rows_per_file)])
         result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=300)
         if result.returncode:
             raise RuntimeError(f"Storage benchmark failed for {scale} assets: {result.stderr}")
