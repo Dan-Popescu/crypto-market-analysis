@@ -8,7 +8,6 @@ records remain under their original contracts and are not reinterpreted here.
 from __future__ import annotations
 
 import copy
-from collections import defaultdict
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -90,45 +89,20 @@ def _effective(row, start, end, at, cutoff):
     return row["known_at"] <= cutoff and row[start] <= at and (row[end] is None or at < row[end])
 
 
-class _RegistryIndex:
-    """Index a once-validated registry; resolution never revalidates the universe."""
+class _SeriesIdentity:
+    """Apply native series constraints to identity-owned indexed resolution."""
 
     def __init__(self, registry):
-        self.instruments = {row["id"]: row for row in registry["instruments"]}
-        self.listings = defaultdict(list)
-        self.aliases = defaultdict(list)
-        for row in registry["listings"]:
-            self.listings[row["id"]].append(row)
-        for row in registry["aliases"]:
-            self.aliases[(row["provider"], row["symbol"])].append(row)
+        self.resolver = identity.RegistryResolver(registry)
+        self.registry = self.resolver.registry
+        self.instruments = {row["id"]: row for row in self.registry["instruments"]}
 
     def resolve(self, descriptor, at, cutoff):
-        # A correction supersedes the same logical alias even when it shortens
-        # the effective interval. Filtering before selecting revisions leaks it.
-        latest = {}
-        for row in self.aliases[(descriptor["provider"], descriptor["provider_symbol"])]:
-            if row["known_at"] <= cutoff:
-                key = row["instrument_id"], row["listing_id"], row["effective_from"]
-                if key not in latest or row["known_at"] > latest[key]["known_at"]:
-                    latest[key] = row
-        candidates = []
-        for row in latest.values():
-            if not _effective(row, "effective_from", "effective_until", at, cutoff):
-                continue
-            listing_id = row["listing_id"]
-            if descriptor["listing_id"] is not None and listing_id != descriptor["listing_id"]:
-                continue
-            listing = None
-            if listing_id is not None:
-                known = [item for item in self.listings[listing_id] if item["known_at"] <= cutoff]
-                listing = max(known, key=lambda item: item["known_at"], default=None)
-                if listing is None or not _effective(listing, "active_from", "active_until", at, cutoff):
-                    continue
-            candidates.append((row, listing))
-        identities = {(row["instrument_id"], row["listing_id"]) for row, _ in candidates}
-        if len(identities) != 1:
-            raise ValueError("Series provider alias is unknown or ambiguous at the observation cutoff.")
-        alias, listing = max(candidates, key=lambda pair: pair[0]["known_at"])
+        resolved = self.resolver.resolve_alias(
+            provider=descriptor["provider"], symbol=descriptor["provider_symbol"],
+            effective_at=at, as_of=cutoff, listing_id=descriptor["listing_id"],
+        )
+        alias, listing = resolved["alias"], resolved["listing"]
         if (alias["instrument_id"], alias["listing_id"]) != (descriptor["instrument_id"], descriptor["listing_id"]):
             raise ValueError("Series descriptor does not match its resolved provider alias.")
         instrument = self.instruments[alias["instrument_id"]]
@@ -146,6 +120,31 @@ class _RegistryIndex:
         return {"instrument": instrument, "listing": listing, "alias": alias}
 
 
+def validate_capture_metadata(registry, calendars, descriptor, *, start, end, as_of):
+    """Resolve a capture's declared metadata before any provider request.
+
+    No observation is invented for preflight. Complete returned observations
+    subsequently pass the ordinary bundle validator at their own receipt clocks.
+    """
+    index = _SeriesIdentity(registry)
+    registry = index.registry
+    _clock(as_of, "as_of")
+    _window({"start": start, "end": end})
+    if not isinstance(calendars, list) or not 1 <= len(calendars) <= MAX_SERIES:
+        raise ValueError("Capture calendars must be a bounded nonempty list.")
+    validated = [sessions.validate_calendar(row) for row in calendars]
+    calendar_index = {(row["id"], row["version"]): row for row in validated}
+    if len(calendar_index) != len(validated):
+        raise ValueError("Capture contains duplicate calendar versions.")
+    descriptor = prices.validate_series({"schema": "market-series.v1", "descriptor": descriptor,
+                                          "bars": [], "actions": []})["descriptor"]
+    calendar = calendar_index.get((descriptor["calendar_id"], descriptor["calendar_version"]))
+    if calendar is None or calendar["known_at"] > as_of:
+        raise ValueError("Capture requires a known matching calendar version.")
+    resolved = index.resolve(descriptor, start, as_of)
+    return {"descriptor": descriptor, "identity": resolved, "calendar": calendar}
+
+
 def validate_bundle(bundle: dict) -> dict:
     """Validate native contracts and their cross-references in a defensive copy.
 
@@ -159,8 +158,8 @@ def validate_bundle(bundle: dict) -> dict:
         raise ValueError("Bundle calendars must be a bounded list.")
     if not isinstance(bundle["series"], list) or len(bundle["series"]) > MAX_SERIES:
         raise ValueError("Bundle series must contain at most 1000 series.")
-    registry = identity.validate_registry(bundle["registry"])
-    index = _RegistryIndex(registry)
+    index = _SeriesIdentity(bundle["registry"])
+    registry = index.registry
     calendars = [sessions.validate_calendar(row) for row in bundle["calendars"]]
     calendar_index = {(row["id"], row["version"]): row for row in calendars}
     if len(calendar_index) != len(calendars):
@@ -274,7 +273,7 @@ def _series_inputs_from_store(store, request, as_of, extra):
     calendar = store.calendar(descriptor["calendar_id"], descriptor["calendar_version"], as_of=as_of)
     if registry is None or calendar is None:
         raise ValueError("Series registry or declared calendar version is unavailable at this cutoff.")
-    index = _RegistryIndex(identity.validate_registry(registry))
+    index = _SeriesIdentity(registry)
     resolutions = [index.resolve(descriptor, bar["start"], as_of) for bar in series["bars"]]
     resolved = resolutions[0] if resolutions else index.resolve(descriptor, start, as_of)
     selected = prices.bars_as_of(series, as_of, start=start, end=end)

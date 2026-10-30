@@ -81,6 +81,25 @@ def test_readonly_commands_and_unknown_requests_do_not_create_store(tmp_path, mo
     assert "actual" in rejected and not directory.exists()
 
 
+def test_fetch_preflight_and_apply_resolve_metadata_without_inventing_observations(tmp_path, monkeypatch, capsys):
+    bundle = synthetic_bundle(1, vintages=1)
+    series = bundle["series"][0]
+    series["descriptor"].update(provider="normalized_import", data_mode="import", revision_semantics="captured_history")
+    bundle["registry"]["aliases"][0]["provider"] = "normalized_import"
+    request = {"registry": bundle["registry"], "calendars": bundle["calendars"], "source_request": {
+        "descriptor": series["descriptor"], "start": START, "end": END,
+        "source_contract": {"origin": "Invented local fixture", "rights": "Synthetic fixture; no market feed",
+                            "price_basis": "raw"}, "import_data": {"bars": series["bars"], "actions": []}}}
+    directory = tmp_path / "capture"
+    preview = invoke("market-fetch", request, directory, monkeypatch, capsys)
+    assert preview["applied"] is False and not directory.exists()
+    applied = invoke("market-fetch", request, directory, monkeypatch, capsys, extra=("--apply",))
+    assert applied["applied"] is True and applied["source_assessment"]["production_accepted"] is False
+    stored = CrossAssetStore(directory / "observer.sqlite").read_series("synthetic:series:0",
+        as_of=applied["receipt"]["received_at"], data_mode="import")
+    assert len(stored["bars"]) == 8 and stored["descriptor"]["provider"] == "normalized_import"
+
+
 def test_snapshot_fleet_preserves_negative_references_and_never_mutates_authority(tmp_path, monkeypatch, capsys):
     store = CrossAssetStore(tmp_path / "observer.sqlite", initialize=True)
     store.import_bundle(validate_bundle(synthetic_bundle()), received_at=END)

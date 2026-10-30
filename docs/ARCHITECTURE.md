@@ -12,7 +12,9 @@ DuckDB aggregation. The public analytical query context shares existing process
 memory/concurrency/deadline limits. `prospective` owns frozen native-calendar
 issuance/outcomes; `recovery` verifies originals at the backup boundary.
 `application` composes these owners, checking identities/calendars and unsupported
-forms before calculation. `market_cli` and `market_mcp` own transport dispatch;
+forms before calculation. `queries` owns shared bounded series/snapshot/fleet
+reads; metadata-only capture preflight does not invent observations. `market_cli`
+and `market_mcp` own independent transport dispatch;
 MCP never fetches or writes. Existing crypto owners and snapshot formats retain
 their contracts. See [runtime and acceptance](CROSS_ASSET_RUNTIME.md).
 

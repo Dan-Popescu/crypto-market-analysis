@@ -52,21 +52,21 @@ def register_market_tools(server, engine, readonly, present=None):
     @register
     def get_instrument_series(request: dict, as_of: StrictInt | None = None) -> dict:
         """Inspect at most 512 retained native intervals and declared/actual receipt provenance for one explicit series and data_mode. Narrow start/end when history exceeds max_rows. No provider request, schema migration or missing-store creation."""
-        from .market_cli import inspect_market_series
+        from .cross_asset.queries import inspect_market_series
 
         return inspect_market_series(engine.settings.database, bounded_object(request), as_of=_cutoff(as_of))
 
     @register
     def get_market_snapshot_status(snapshot_name: str = "default") -> dict:
         """Inspect a safe named market-v1 snapshot manifest. Manifest presence alone does not verify its data or prove live freshness. No export, collection or writes."""
-        from .market_cli import market_snapshot_status
+        from .cross_asset.queries import market_snapshot_status
 
         return market_snapshot_status(engine.settings, snapshot_name)
 
     @register
     def get_market_fleet(request: dict, snapshot_name: str = "default", as_of: StrictInt | None = None) -> dict:
         """Read verified immutable mixed-class analytical summaries for up to 1000 explicit native series. Keep listing, currency, unit, price basis and calendar versions separate; bounded retained work is not live provider acceptance or a full coherent dossier."""
-        from .market_cli import market_fleet
+        from .cross_asset.queries import market_fleet
 
         return market_fleet(engine.settings, snapshot_name, bounded_object(request), as_of=_cutoff(as_of))
 
@@ -81,9 +81,9 @@ def register_market_tools(server, engine, readonly, present=None):
     def calculate_futures_value(request: dict, as_of: StrictInt | None = None) -> dict:
         """Value a caller-declared futures position under an explicit currency, multiplier, expiry, collateral and margin model. Negative native prices are permitted when supported; no trade, broker margin guarantee or cash-spot accounting."""
         from .cross_asset.contracts import value_futures_position
-        from .market_cli import _fields
+        from .cross_asset.queries import request_fields
 
-        values = _fields(bounded_object(request), {"contract", "position", "native_currency"},
+        values = request_fields(bounded_object(request), {"contract", "position", "native_currency"},
                          ("contract", "position", "native_currency"))
         return value_futures_position(values["contract"], values["position"],
                                       native_currency=values["native_currency"], as_of=_cutoff(as_of))
