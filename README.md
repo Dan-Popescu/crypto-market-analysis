@@ -7,6 +7,7 @@ changes between known-at dossiers, claim-level readiness and next inputs, actual
 HTTP attempt/deadline limits, resumable Coinbase/Bitstamp history and fixed-grid
 plan robustness. The four additional MCP tools are read-only; public captures
 remain explicit finite local operations.
+See [verified delivery, efficiency gains and remaining limits](docs/ANALYSIS_WORKFLOWS_STATUS.md).
 
 Version 0.7.0 adds [measured operation and coherent workflows](docs/OPERATING_CAPACITY.md):
 observed HTTP consumption, bounded endurance experiments, resumable automatic
